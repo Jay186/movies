@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(109 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(28,160,226)" />
+      <stop offset="100%" stop-color="rgb(41,148,234)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="79" cy="129" r="29" fill="rgba(255,255,255,0.07)" /><circle cx="333" cy="105" r="29" fill="rgba(255,255,255,0.07)" /><circle cx="152" cy="270" r="27" fill="rgba(255,255,255,0.07)" /><circle cx="130" cy="326" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="85" cy="225" r="12" fill="rgba(255,255,255,0.07)" /><circle cx="206" cy="57" r="21" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">3D厚涂风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

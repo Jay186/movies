@@ -1,0 +1,120 @@
+########## 1. 总览 ##########
+扫描 .js/.mjs 文件数: 112
+被引用过的文件数: 83
+入度为 0 的文件数: 29
+
+########## 2. 入度为 0 的文件(无人 import) ##########
+(排除入口候选: index.js / tests/ / 以 _ 开头)
+
+      35.5 KB  tests/assetNameCjk.test.mjs  <-- 测试入口
+      21.1 KB  tests/assetQuality.test.mjs  <-- 测试入口
+      19.5 KB  tests/extraFixes.test.mjs  <-- 测试入口
+      18.7 KB  tests/layoutAnchor.test.mjs  <-- 测试入口
+      18.5 KB  tests/sceneReview.test.mjs  <-- 测试入口
+      18.3 KB  tests/spatialAnchorIntegration.test.mjs  <-- 测试入口
+      16.9 KB  tests/dataContract.test.mjs  <-- 测试入口
+      15.3 KB  tests/spatialGroupReview.test.mjs  <-- 测试入口
+      14.9 KB  tests/sceneElements.test.mjs  <-- 测试入口
+      14.0 KB  tests/layoutStale.test.mjs  <-- 测试入口
+      13.2 KB  tests/sceneGroupLock.test.mjs  <-- 测试入口
+      13.0 KB  tests/assetImageRoute.static.test.mjs  <-- 测试入口
+      12.9 KB  tests/groupLockView.test.mjs  <-- 测试入口
+      12.4 KB  tests/alertVisibility.test.mjs  <-- 测试入口
+       9.5 KB  tests/sceneGroupSchedule.test.mjs  <-- 测试入口
+       9.2 KB  tests/layoutAnchorCard.test.mjs  <-- 测试入口
+       8.8 KB  tests/sceneSpatialAnchor.test.mjs  <-- 测试入口
+       8.4 KB  tests/spatialGroupLock.test.mjs  <-- 测试入口
+       8.3 KB  tests/layoutReview.test.mjs  <-- 测试入口
+       7.6 KB  tests/propNameMatch.test.mjs  <-- 测试入口
+       7.5 KB  ai/directorCore/selftest.mjs
+       6.9 KB  tests/sceneAnchorPrompt.test.mjs  <-- 测试入口
+       6.5 KB  tests/sceneIdRemap.test.mjs  <-- 测试入口
+       6.0 KB  index.js  <-- 可能是入口
+       5.1 KB  ai/sceneComposer.js
+       5.0 KB  scripts/fix_ep4_grouping.mjs
+       4.8 KB  ai/directorCore/_ep2_run.mjs  <-- 临时
+       4.5 KB  _audit_scan.mjs  <-- 临时
+       3.1 KB  _audit1.mjs  <-- 临时
+
+########## 3. 未解析的相对引用(悬空 import) ##########
+  ai/layoutReview.js  ==>  ../uploads
+  ai/sceneComposer.js  ==>  ./node_modules/ffmpeg-static/ffmpeg.exe
+  ai/sceneReview.js  ==>  ../uploads
+  ai/segmentBuilder.js  ==>  ./ai/segmentBuilder.js
+  ai/segmentBuilder.js  ==>  ./ai/segmentBuilder.js
+  ai/segmentSlicer.js  ==>  ./ai/segmentSlicer.js
+  ai/segmentSlicer.js  ==>  ./node_modules/ffmpeg-static/ffmpeg.exe
+  tests/alertVisibility.test.mjs  ==>  ../../src/stores/project.js
+  tests/assetImageRoute.static.test.mjs  ==>  ../..
+  tests/assetNameCjk.test.mjs  ==>  ../ai/
+  tests/assetNameCjk.test.mjs  ==>  ../routes/
+  tests/assetQuality.test.mjs  ==>  ../schema.sql
+  tests/extraFixes.test.mjs  ==>  ../ai/lexicons/
+  tests/groupLockView.test.mjs  ==>  ../../src/utils/groupLockView.js
+  tests/groupLockView.test.mjs  ==>  ../../src/utils/groupLockView.js
+  tests/groupLockView.test.mjs  ==>  ../../src/services/api.js
+  tests/layoutAnchor.test.mjs  ==>  ../..
+  tests/layoutAnchorCard.test.mjs  ==>  ../../src/services/api.js
+  tests/layoutReview.test.mjs  ==>  ../..
+  tests/layoutStale.test.mjs  ==>  ../schema.sql
+  tests/sceneAnchorPrompt.test.mjs  ==>  ../../src/services/promptBuilder.js
+  tests/sceneElements.test.mjs  ==>  ../..
+  tests/sceneGroupLock.test.mjs  ==>  ../..
+  tests/sceneGroupSchedule.test.mjs  ==>  ../../src/utils/sceneGroupSchedule.js
+  tests/sceneGroupSchedule.test.mjs  ==>  ../..
+  tests/sceneReview.test.mjs  ==>  ../schema.sql
+  tests/sceneReview.test.mjs  ==>  ../routes/
+
+########## 4. 文件体积 TOP 25 ##########
+     143.2 KB  ai/doubao.js
+      95.3 KB  routes/generate-image.js
+      92.3 KB  routes/generate-video.js
+      92.2 KB  ai/storyboardValidator.js
+      82.0 KB  routes/episodes.js
+      67.4 KB  routes/generate-script.js
+      47.5 KB  ai/v4Video.js
+      46.9 KB  ai/sceneAnchors.js
+      38.9 KB  ai/directorCore/planner.js
+      37.4 KB  ai/storyboardRules.js
+      36.4 KB  routes/qc.js
+      35.5 KB  tests/assetNameCjk.test.mjs
+      34.5 KB  config.js
+      30.5 KB  ai/segmentPrompt.js
+      29.7 KB  routes/generate-post.js
+      28.7 KB  ai/directorCore/screenplay.js
+      28.6 KB  ai/directorRequest.js
+      28.2 KB  ai/segmentBuilder.js
+      27.3 KB  ai/h3PromptTranslator.js
+      26.5 KB  ai/continuityGuard.js
+      25.7 KB  ai/runninghub.js
+      25.1 KB  ai/shared.js
+      23.6 KB  ai/qcCodes.js
+      21.1 KB  tests/assetQuality.test.mjs
+      21.0 KB  ai/extractGuard.js
+
+########## 5. 被引用次数 TOP 25(核心枢纽) ##########
+    38 次  db.js
+    28 次  config.js
+    23 次  ai/shared.js
+    16 次  ai/doubao.js
+    14 次  ai/runninghub.js
+    13 次  ai/alerts.js
+    10 次  ai/dialogue.js
+     8 次  ai/h3PromptTranslator.js
+     8 次  characterLibrary.js
+     7 次  ai/sceneAnchors.js
+     7 次  ai/v4Video.js
+     6 次  ai/anchorTypes.js
+     6 次  ai/assetBackfill.js
+     6 次  ai/directorCore/ontology.js
+     6 次  ai/propNameMatch.js
+     6 次  ai/scriptFormat.js
+     6 次  ai/spatialGroupReview.js
+     6 次  scriptHash.js
+     5 次  ai/cameraAngle.js
+     5 次  ai/seamCheck.js
+     5 次  ai/segmentBuilder.js
+     5 次  ai/shotClassifier.js
+     5 次  routes/generate-image.js
+     5 次  routes/generate-script.js
+     4 次  ai/aiLog.js

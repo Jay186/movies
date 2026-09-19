@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(305 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(244,114,63)" />
+      <stop offset="100%" stop-color="rgb(231,55,69)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="335" cy="295" r="19" fill="rgba(255,255,255,0.07)" /><circle cx="68" cy="224" r="26" fill="rgba(255,255,255,0.07)" /><circle cx="162" cy="129" r="24" fill="rgba(255,255,255,0.07)" /><circle cx="89" cy="281" r="8" fill="rgba(255,255,255,0.07)" /><circle cx="79" cy="131" r="14" fill="rgba(255,255,255,0.07)" /><circle cx="291" cy="75" r="12" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">武侠江湖写实摄影风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

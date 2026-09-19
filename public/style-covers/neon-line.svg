@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(107 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(27,161,226)" />
+      <stop offset="100%" stop-color="rgb(41,147,235)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="37" cy="217" r="29" fill="rgba(255,255,255,0.07)" /><circle cx="243" cy="98" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="184" cy="53" r="27" fill="rgba(255,255,255,0.07)" /><circle cx="176" cy="51" r="23" fill="rgba(255,255,255,0.07)" /><circle cx="345" cy="227" r="13" fill="rgba(255,255,255,0.07)" /><circle cx="281" cy="67" r="13" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">💜</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">霓虹线条</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">Neon Line</text>
+</svg>

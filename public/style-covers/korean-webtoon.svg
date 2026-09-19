@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(163 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(139,60,225)" />
+      <stop offset="100%" stop-color="rgb(223,70,163)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="273" cy="303" r="27" fill="rgba(255,255,255,0.07)" /><circle cx="145" cy="28" r="15" fill="rgba(255,255,255,0.07)" /><circle cx="129" cy="216" r="17" fill="rgba(255,255,255,0.07)" /><circle cx="42" cy="211" r="28" fill="rgba(255,255,255,0.07)" /><circle cx="244" cy="149" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="141" cy="44" r="21" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">📖</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">韩漫风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">Webtoon Style</text>
+</svg>

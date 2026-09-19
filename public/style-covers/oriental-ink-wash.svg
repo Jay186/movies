@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(197 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(176,64,198)" />
+      <stop offset="100%" stop-color="rgb(193,67,185)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="227" cy="67" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="309" cy="134" r="25" fill="rgba(255,255,255,0.07)" /><circle cx="277" cy="250" r="10" fill="rgba(255,255,255,0.07)" /><circle cx="230" cy="120" r="20" fill="rgba(255,255,255,0.07)" /><circle cx="310" cy="177" r="8" fill="rgba(255,255,255,0.07)" /><circle cx="320" cy="24" r="27" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">东方水墨国风</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

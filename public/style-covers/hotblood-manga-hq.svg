@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(342 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(179,65,196)" />
+      <stop offset="100%" stop-color="rgb(190,66,187)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="52" cy="272" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="117" cy="161" r="10" fill="rgba(255,255,255,0.07)" /><circle cx="210" cy="292" r="20" fill="rgba(255,255,255,0.07)" /><circle cx="95" cy="59" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="165" cy="217" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="259" cy="46" r="25" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">高质量2D热血漫画风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

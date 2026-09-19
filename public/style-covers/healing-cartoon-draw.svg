@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(10 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(158,62,212)" />
+      <stop offset="100%" stop-color="rgb(208,69,174)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="40" cy="90" r="12" fill="rgba(255,255,255,0.07)" /><circle cx="31" cy="290" r="9" fill="rgba(255,255,255,0.07)" /><circle cx="285" cy="28" r="16" fill="rgba(255,255,255,0.07)" /><circle cx="146" cy="288" r="24" fill="rgba(255,255,255,0.07)" /><circle cx="257" cy="317" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="58" cy="49" r="11" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">手绘治愈时代卡通画风</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

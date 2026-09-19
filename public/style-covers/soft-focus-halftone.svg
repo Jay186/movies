@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(179 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(137,60,227)" />
+      <stop offset="100%" stop-color="rgb(225,71,161)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="249" cy="49" r="15" fill="rgba(255,255,255,0.07)" /><circle cx="142" cy="258" r="29" fill="rgba(255,255,255,0.07)" /><circle cx="44" cy="99" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="329" cy="32" r="28" fill="rgba(255,255,255,0.07)" /><circle cx="152" cy="61" r="8" fill="rgba(255,255,255,0.07)" /><circle cx="342" cy="21" r="14" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">柔焦半调颗粒艺术风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

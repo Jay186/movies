@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(49 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(15,173,218)" />
+      <stop offset="100%" stop-color="rgb(51,138,241)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="299" cy="159" r="15" fill="rgba(255,255,255,0.07)" /><circle cx="106" cy="179" r="25" fill="rgba(255,255,255,0.07)" /><circle cx="209" cy="24" r="17" fill="rgba(255,255,255,0.07)" /><circle cx="179" cy="112" r="25" fill="rgba(255,255,255,0.07)" /><circle cx="133" cy="187" r="13" fill="rgba(255,255,255,0.07)" /><circle cx="42" cy="66" r="28" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">🎪</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">定格动画</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">Stop Motion</text>
+</svg>

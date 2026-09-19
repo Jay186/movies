@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(160 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(137,60,227)" />
+      <stop offset="100%" stop-color="rgb(225,71,161)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="330" cy="30" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="195" cy="51" r="10" fill="rgba(255,255,255,0.07)" /><circle cx="50" cy="278" r="22" fill="rgba(255,255,255,0.07)" /><circle cx="287" cy="203" r="19" fill="rgba(255,255,255,0.07)" /><circle cx="317" cy="262" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="363" cy="48" r="23" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">暗色调厚涂风格插画</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(25 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(127,58,234)" />
+      <stop offset="100%" stop-color="rgb(233,72,155)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="275" cy="75" r="19" fill="rgba(255,255,255,0.07)" /><circle cx="273" cy="155" r="25" fill="rgba(255,255,255,0.07)" /><circle cx="272" cy="220" r="12" fill="rgba(255,255,255,0.07)" /><circle cx="230" cy="253" r="19" fill="rgba(255,255,255,0.07)" /><circle cx="55" cy="285" r="10" fill="rgba(255,255,255,0.07)" /><circle cx="33" cy="38" r="23" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">北条司风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

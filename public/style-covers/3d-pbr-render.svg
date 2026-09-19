@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(337 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(24,164,224)" />
+      <stop offset="100%" stop-color="rgb(44,145,236)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="367" cy="327" r="29" fill="rgba(255,255,255,0.07)" /><circle cx="242" cy="308" r="14" fill="rgba(255,255,255,0.07)" /><circle cx="354" cy="29" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="368" cy="278" r="27" fill="rgba(255,255,255,0.07)" /><circle cx="114" cy="59" r="13" fill="rgba(255,255,255,0.07)" /><circle cx="338" cy="62" r="16" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">3D真实感PBR渲染风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

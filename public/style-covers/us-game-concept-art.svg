@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(294 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(187,66,190)" />
+      <stop offset="100%" stop-color="rgb(183,65,192)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="304" cy="314" r="16" fill="rgba(255,255,255,0.07)" /><circle cx="191" cy="70" r="15" fill="rgba(255,255,255,0.07)" /><circle cx="220" cy="238" r="23" fill="rgba(255,255,255,0.07)" /><circle cx="266" cy="181" r="22" fill="rgba(255,255,255,0.07)" /><circle cx="102" cy="313" r="9" fill="rgba(255,255,255,0.07)" /><circle cx="251" cy="29" r="11" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">美式游戏概念艺术风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

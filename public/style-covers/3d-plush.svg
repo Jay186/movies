@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(166 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(27,161,225)" />
+      <stop offset="100%" stop-color="rgb(42,147,235)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="176" cy="126" r="26" fill="rgba(255,255,255,0.07)" /><circle cx="175" cy="291" r="26" fill="rgba(255,255,255,0.07)" /><circle cx="90" cy="80" r="22" fill="rgba(255,255,255,0.07)" /><circle cx="250" cy="269" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="185" cy="326" r="13" fill="rgba(255,255,255,0.07)" /><circle cx="49" cy="60" r="15" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">🧶</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">3D毛绒风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">3D Plush</text>
+</svg>

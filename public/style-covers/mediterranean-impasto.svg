@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(123 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(153,62,215)" />
+      <stop offset="100%" stop-color="rgb(212,69,171)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="213" cy="293" r="17" fill="rgba(255,255,255,0.07)" /><circle cx="350" cy="245" r="25" fill="rgba(255,255,255,0.07)" /><circle cx="197" cy="346" r="25" fill="rgba(255,255,255,0.07)" /><circle cx="263" cy="50" r="23" fill="rgba(255,255,255,0.07)" /><circle cx="356" cy="72" r="12" fill="rgba(255,255,255,0.07)" /><circle cx="70" cy="52" r="28" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">地中海厚涂色彩风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(51 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(185,66,191)" />
+      <stop offset="100%" stop-color="rgb(185,66,191)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="341" cy="341" r="21" fill="rgba(255,255,255,0.07)" /><circle cx="366" cy="164" r="27" fill="rgba(255,255,255,0.07)" /><circle cx="157" cy="55" r="14" fill="rgba(255,255,255,0.07)" /><circle cx="300" cy="155" r="24" fill="rgba(255,255,255,0.07)" /><circle cx="191" cy="96" r="10" fill="rgba(255,255,255,0.07)" /><circle cx="135" cy="43" r="12" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">东方建筑钢笔蚀刻风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

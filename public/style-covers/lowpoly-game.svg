@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(159 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(25,164,224)" />
+      <stop offset="100%" stop-color="rgb(43,145,236)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="289" cy="209" r="21" fill="rgba(255,255,255,0.07)" /><circle cx="189" cy="159" r="20" fill="rgba(255,255,255,0.07)" /><circle cx="219" cy="148" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="266" cy="333" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="357" cy="349" r="14" fill="rgba(255,255,255,0.07)" /><circle cx="113" cy="71" r="17" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">低多边形游戏风</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

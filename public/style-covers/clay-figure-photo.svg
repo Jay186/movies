@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(51 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(16,172,218)" />
+      <stop offset="100%" stop-color="rgb(51,138,241)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="321" cy="101" r="23" fill="rgba(255,255,255,0.07)" /><circle cx="151" cy="280" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="130" cy="337" r="16" fill="rgba(255,255,255,0.07)" /><circle cx="85" cy="277" r="18" fill="rgba(255,255,255,0.07)" /><circle cx="249" cy="151" r="12" fill="rgba(255,255,255,0.07)" /><circle cx="227" cy="55" r="15" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">黏土手办摄影风</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

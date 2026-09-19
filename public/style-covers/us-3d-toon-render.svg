@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(180 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(6,182,212)" />
+      <stop offset="100%" stop-color="rgb(59,130,246)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="50" cy="230" r="20" fill="rgba(255,255,255,0.07)" /><circle cx="202" cy="78" r="28" fill="rgba(255,255,255,0.07)" /><circle cx="94" cy="300" r="13" fill="rgba(255,255,255,0.07)" /><circle cx="250" cy="286" r="10" fill="rgba(255,255,255,0.07)" /><circle cx="142" cy="90" r="9" fill="rgba(255,255,255,0.07)" /><circle cx="256" cy="32" r="20" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">美国卡通3D渲染风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

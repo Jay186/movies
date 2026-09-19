@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(161 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(178,65,196)" />
+      <stop offset="100%" stop-color="rgb(191,66,187)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="111" cy="91" r="13" fill="rgba(255,255,255,0.07)" /><circle cx="295" cy="321" r="28" fill="rgba(255,255,255,0.07)" /><circle cx="190" cy="132" r="16" fill="rgba(255,255,255,0.07)" /><circle cx="135" cy="178" r="8" fill="rgba(255,255,255,0.07)" /><circle cx="255" cy="86" r="14" fill="rgba(255,255,255,0.07)" /><circle cx="228" cy="73" r="25" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">高彩实验绘本插画风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="g" gradientTransform="rotate(112 0.5 0.5)">
+      <stop offset="0%" stop-color="rgb(132,59,231)" />
+      <stop offset="100%" stop-color="rgb(229,71,158)" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#g)" />
+  <circle cx="62" cy="72" r="16" fill="rgba(255,255,255,0.07)" /><circle cx="34" cy="166" r="11" fill="rgba(255,255,255,0.07)" /><circle cx="73" cy="210" r="14" fill="rgba(255,255,255,0.07)" /><circle cx="290" cy="67" r="22" fill="rgba(255,255,255,0.07)" /><circle cx="147" cy="268" r="14" fill="rgba(255,255,255,0.07)" /><circle cx="257" cy="69" r="20" fill="rgba(255,255,255,0.07)" />
+  <text x="200" y="215" font-size="112" text-anchor="middle">null</text>
+  <text x="200" y="330" font-size="26" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif">美式复古黑色电影侦探漫画风格</text>
+  <text x="200" y="362" font-size="15" fill="rgba(255,255,255,0.55)" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei',sans-serif"></text>
+</svg>

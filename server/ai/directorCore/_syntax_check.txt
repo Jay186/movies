@@ -1,0 +1,10 @@
+导演核 · 模块加载自检（每次改完内核跑一次，比等运行时报错快）
+生成方式：node --import 检查四个模块能否被解析加载。
+
+screenplay.js  OK
+events.js      OK
+planner.js     OK
+index.js       OK
+
+用途：改动 screenplay / events / planner 后先跑一次，确认没有语法错误，
+      否则下游运行器会因为 import 失败而静默不执行（报告文件保持旧内容，极易误判为"改动无效"）。
