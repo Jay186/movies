@@ -105,8 +105,8 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: err.message })
 })
 
-app.listen(config.port, '127.0.0.1', () => {
-  console.log(`[Server] 后端运行在 http://localhost:${config.port}`)
+app.listen(config.port, config.host, () => {
+  console.log(`[Server] 后端运行在 http://${config.host}:${config.port}`)
   // 启动自检（2026-09-13）：原 MC 单项自检扩充为完整健康清单。
   // 起因（overview 09-12）：某进程带着缺 MC 配置的 env 跑了一整天，28 次出片静默降级无人察觉。
   // 根因是「.env 改了 ≠ 跑着的进程知道」（进程级配置无热重载），唯一可靠的解法就是开机亮灯。

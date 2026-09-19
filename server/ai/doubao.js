@@ -1058,7 +1058,7 @@ export async function repairShotAirlock(firstShot, prevFinalFrame, style = '') {
   const messages = [
     {
       role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 MiniMax H3 的 integrated_multimodal_description 写法。立刻输出改写后的正文，不要任何思考、分析、解释或前言。画风：${style || '吉卜力风格'}（与原稿保持一致，禁止偏离）。
+      content: `你是专业的 AI 视频提示词工程师，精通 MiniMax H3 的 integrated_multimodal_description 写法。立刻输出改写后的正文，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿保持一致，禁止偏离）。
 
 【任务】把给定的某场次第一个镜头的 integrated_multimodal_description 改写为带 Airlock 跨场衔接的版本：
 - 正文必须以 "Airlock:" 开头，完整复刻【上一场最终画面】的画面（人物姿态、位置、构图、光线），前 2 秒内只允许呼吸、视线偏移、重心转移等微动作；Airlock 段只写画面内容本身，不要出现 "The final frame:" 之类的标签前缀；
@@ -1108,7 +1108,7 @@ export async function repairShotAxis(shot, charName, prevSide, currSide, style =
   const messages = [
     {
       role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 MiniMax H3 的 integrated_multimodal_description 写法。立刻输出改写后的正文，不要任何思考、分析、解释或前言。画风：${style || '吉卜力风格'}（与原稿一致，禁止偏离）。
+      content: `你是专业的 AI 视频提示词工程师，精通 MiniMax H3 的 integrated_multimodal_description 写法。立刻输出改写后的正文，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
 
 【任务】原稿存在越轴隐患：角色 @${charName} 在上一镜的画面侧位是 frame ${prevSide}，本镜却出现在 frame ${currSide}，而本镜的动作时间轴没有交代这次换位——直接生成会造成角色凭空换边、画面空间跳变。
 请在【完全保留原稿其他内容】的前提下，把该角色从 frame ${prevSide} 移动到 frame ${currSide} 的走位动作写进模块4（镜头内动作时间轴），措辞风格与原稿一致，例如 "walks from frame ${prevSide} toward frame ${currSide}"。
@@ -1290,7 +1290,7 @@ export async function enrichFinalFrameGeography(shot) {
   return imd.slice(0, idx) + rewritten
 }
 
-export async function generateStoryboard(script, style = '吉卜力风格', assets = null, options = {}) {
+export async function generateStoryboard(script, style = config.defaultArtStyle, assets = null, options = {}) {
   const targetDuration = Number(options.targetDuration) || 0
   const assetMaps = assets ? buildAssetMaps(assets) : null
   const scriptSceneTitles = parseScriptSceneTitles(script)
@@ -1720,7 +1720,7 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
 // 或不规范的纯文本分镜脚本），忠实提取并映射到标准镜头 JSON。
 // 与 generateStoryboard（创作型，从剧本重新切片写 integrated prompt）对立：本函数不创作、
 // 不增删镜头、不改写画面含义、不改动用户给定的时长、不重建场次，只做结构归一 + 资产名对齐。
-export async function generateStoryboardFromFile(fileContent, style = '吉卜力风格', assets = null, options = {}) {
+export async function generateStoryboardFromFile(fileContent, style = config.defaultArtStyle, assets = null, options = {}) {
   const assetMaps = assets ? buildAssetMaps(assets) : null
   const assetListPrompt = assets ? buildAssetListPrompt(assets) : ''
   // 集级镜头语言规格（规整上下文，gentle 模式）：机位措辞与规格冲突时按规格校准，但不得虚构/反转用户原意（共享规则库）
@@ -1921,7 +1921,7 @@ export async function enrichShotIntegrated(shot, assets, style = '', opts = {}) 
       role: 'system',
       content: `你是专业的 AI 视频提示词工程师，精通 MiniMax H3 的 integrated_multimodal_description 写法。【重要】立刻输出 integrated_multimodal_description 正文，不要任何思考、分析、解释或前言。请根据给定的单个镜头信息，为该镜头生成完整的 integrated_multimodal_description（英文，6 模块结构）。${assetListPrompt}${directorNotesPrompt(opts?.directorNotes || '')}
 
-画风：${style || '吉卜力风格'}（画面开头声明画风，全片严格统一，禁止偏离）。
+画风：${style || config.defaultArtStyle}（画面开头声明画风，全片严格统一，禁止偏离）。
 
 6 模块结构（严格按此书写，用换行分隔）：
 ${integratedModulesRule()}${frameGeographyRule()}

@@ -10,8 +10,33 @@ const serverDir = path.dirname(fileURLToPath(import.meta.url))
 // dotenv 默认只查找当前工作目录，容易导致从项目根目录启动时漏读密钥。
 dotenv.config({ path: path.join(serverDir, '.env') })
 
+// 本机代理地址：默认值只写一处（2026-09-19 收口）。原先在 config.image.zikl.proxy 与
+// config.image.visionary.proxy 各写一份 'http://127.0.0.1:7897' 字面量，改端口要改两处、
+// 漏一处就静默退化成直连被墙。ZIKL_PROXY 仍可覆盖；'direct' = 跟随环境变量自适应。
+const LOCAL_PROXY_URL = process.env.ZIKL_PROXY || 'http://127.0.0.1:7897'
+
 export const config = {
   port: process.env.PORT || 3000,
+
+  // HTTP 监听地址：默认只绑本机回环（前端经 Vite 同源代理访问 /api 与 /uploads，
+  // 无需对外暴露，见 index.js 顶部的 CORS 决策注释）。
+  // env SERVER_HOST 可覆盖（如容器内需绑 0.0.0.0 时）。
+  // 注：刻意不用 HOST —— 该变量名在多数系统上已被占用（常为本机名），会静默改掉绑定地址。
+  host: process.env.SERVER_HOST || '127.0.0.1',
+
+  // 项目默认画风（运行时兜底）：新项目立项、项目未设 art_style、或调用方未传 style 时取此值。
+  //
+  // 2026-09-19 收口——原 '吉卜力风格' 字面量散落 10 处：
+  //   ai/doubao.js ×3（两处 prompt 模板的 `style || ...`、两处 generateStoryboard* 默认参数）
+  //   routes/generate-script.js ×5（`project?.art_style || ...`）
+  //   routes/projects.js ×1（建项目的 art_style 默认值）
+  //   routes/qc.js ×1（QC 上下文 style 兜底）
+  // 换默认画风要改 10 处、漏一处就静默退回吉卜力。env DEFAULT_ART_STYLE 可覆盖。
+  // 默认值 = 当前生效行为（本项目「一二布布」为吉卜力手绘水彩）。
+  //
+  // ⚠️ 与 schema.sql 里 `projects.art_style TEXT DEFAULT '吉卜力风格'` 同源但职责不同：
+  //    本项是**运行时**兜底，schema.sql 是**建库**默认。换默认画风需两处一起改。
+  defaultArtStyle: process.env.DEFAULT_ART_STYLE || '吉卜力风格',
 
   // 文本大模型（兼容 OpenAI 格式：阿里云百炼 / 智谱等，按 .env 配置切换）
   llm: {
@@ -386,7 +411,7 @@ export const config = {
       // 代理地址（集中在此，原为 ziklImage.js 散读 process.env）：
       // EnvHttpProxyAgent 只认进程环境变量，服务若没带 HTTPS_PROXY 启动会退化成直连被墙，
       // 故默认显式固定本机代理端口；'direct' = 跟随环境变量自适应（无变量=直连）。
-      proxy: process.env.ZIKL_PROXY || 'http://127.0.0.1:7897',
+      proxy: LOCAL_PROXY_URL,
     },
     // Visionary（https://visionary.beer）：异步任务接口，支持 gpt-image-2 / nano-banana-pro / nano-banana-pro-cl / nano-banana-2-lite
     visionary: {
@@ -398,7 +423,7 @@ export const config = {
       // ⚠️ 修正此前错误结论：并非"CDN 直连会超时所以必须走代理"——实测直连可用，反而是代理
       // 链路可能不通（TLS 握手前即断开），一旦把代理当主路径会全线 fetch failed / CERT_HAS_EXPIRED。
       // VISIONARY_PROXY 可覆盖，'direct' = 跟随环境变量自适应（无变量=直连）。
-      proxy: process.env.VISIONARY_PROXY || process.env.ZIKL_PROXY || 'http://127.0.0.1:7897',
+      proxy: process.env.VISIONARY_PROXY || LOCAL_PROXY_URL,
       // 默认模型：可被单次请求 options.model 覆盖
       model: process.env.VISIONARY_IMAGE_MODEL || 'nano-banana-pro',
       // 默认清晰度：1K / 2K / 4K（不同模型支持不同，见 API 文档）

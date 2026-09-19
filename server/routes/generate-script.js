@@ -460,7 +460,7 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
   })
   // 分镜必须复用 Step 2 已提取的资产，禁止 AI 再从剧本重新提取，避免两边错乱
   // 进度上报（2026-09-15）：一键流程走到分镜阶段时，分镜页/前端轮询同样能看到"第几场/共几场"
-  const storyboard = await generateStoryboard(script, project?.art_style || '吉卜力风格', assets, {
+  const storyboard = await generateStoryboard(script, project?.art_style || config.defaultArtStyle, assets, {
     targetDuration: options.targetDuration,
     onProgress: makeReporter(episodeId, SB_TASK.GENERATE),
   })
@@ -873,7 +873,7 @@ router.post('/enrich-storyboard', async (req, res) => {
             // 重试间隔递增：3s, 6s
             await new Promise(r => setTimeout(r, 3000 * attempt))
           }
-          const integrated = await enrichShotIntegrated(shotForAI, assets, project?.art_style || '吉卜力风格', { directorNotes: episode.director_notes || '' })
+          const integrated = await enrichShotIntegrated(shotForAI, assets, project?.art_style || config.defaultArtStyle, { directorNotes: episode.director_notes || '' })
           if (integrated) {
             // 回填 final_frame（2026-09-15）：从 imd 的模块6【最终画面】解析写入——
             // 导入分镜此前 final_frame 全空，越轴 / Airlock 检查对它们等于空转；已有值不覆盖。
@@ -938,7 +938,7 @@ router.post('/enrich-storyboard', async (req, res) => {
     // 别名映射（name_en / aliases）：模型常写英文名，只拿中文名清单查侧位会让这批镜头
     // 整段跳过越轴检查（实测 EP4 5/40）。与 storyboardValidator 的 QC 侧位检查同口径。
     const aliasMap = buildAliasMap(characters)
-    const axisRes = await fixAxisFlips(sceneList, charNames, project?.art_style || '吉卜力风格', aliasMap)
+    const axisRes = await fixAxisFlips(sceneList, charNames, project?.art_style || config.defaultArtStyle, aliasMap)
     for (const sh of axisRes.repairedShots || []) {
       execute('UPDATE shots SET integrated_multimodal_description = ? WHERE id = ?', [sh.integratedMultimodalDescription, sh.id])
       axisFixed++
@@ -1031,7 +1031,7 @@ router.post('/storyboard', async (req, res) => {
   reportProgress(episodeId, SB_TASK.GENERATE, { phase: PHASE.START, done: 0, total: 0, message: '正在准备分镜生成…' })
   let ok = false
   try {
-    const storyboard = await generateStoryboard(episode.script_content, project?.art_style || '吉卜力风格', assets, {
+    const storyboard = await generateStoryboard(episode.script_content, project?.art_style || config.defaultArtStyle, assets, {
       targetDuration,
       directorNotes: episode.director_notes || '',
       // 进度上报（2026-09-15）：ai 层通过回调汇报"第几场/共几场"，本层直接转发到进度总线
@@ -1099,7 +1099,7 @@ router.post('/storyboard-from-file', async (req, res) => {
 
   let ok = false
   try {
-    const storyboard = await generateStoryboardFromFile(fileContent, project?.art_style || '吉卜力风格', assets, {
+    const storyboard = await generateStoryboardFromFile(fileContent, project?.art_style || config.defaultArtStyle, assets, {
       directorNotes: episode.director_notes || '',
       onProgress: makeReporter(episodeId, SB_TASK.FROM_FILE),
     })

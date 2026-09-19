@@ -611,7 +611,7 @@ router.post('/qc-fix', async (req, res) => {
     const truncated = targets.length > batchLimit
     const work = truncated ? targets.slice(0, batchLimit) : targets
 
-    const ctx = { scenes, shotIndex, assetNames, style: assetNames.projectStyleText || '吉卜力风格' }
+    const ctx = { scenes, shotIndex, assetNames, style: assetNames.projectStyleText || config.defaultArtStyle }
     const result = await handler(epId, work.map((s) => ({ shot: s })), ctx)
     console.log(`[qc-fix] code=${code} 目标 ${work.length} 镜 → 修好 ${result.fixed}，失败 ${result.failed}`)
     res.json({

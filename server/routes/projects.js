@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url'
 import { query, queryOne, execute } from '../db.js'
 // removeLocalUploads 统一到 ai/shared.js（原此处与 episodes.js 各有一份）
 import { removeLocalUploads, filterUnreferencedUploadUrls } from '../ai/shared.js'
+// [收口 2026-09-19] 建项目时的 art_style 默认值取 config.defaultArtStyle，
+// 不再写死 '吉卜力风格'（原本 doubao.js / generate-script.js / 本文件 / qc.js 共 10 处各写一份）。
+import { config } from '../config.js'
 
 const router = Router()
 
@@ -48,7 +51,7 @@ router.get('/:id', (req, res) => {
 
 // 创建项目
 router.post('/', (req, res) => {
-  const { title = '新项目', theme = '', art_style = '吉卜力风格' } = req.body
+  const { title = '新项目', theme = '', art_style = config.defaultArtStyle } = req.body
   // 默认竖屏 9:16（短剧形态）；显式传合法值则用传入值
   const aspectRatio = normalizeAspectRatio(req.body.aspect_ratio) || '9:16 (Portrait Widescreen)'
   const result = execute(
