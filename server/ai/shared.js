@@ -284,6 +284,3 @@ export async function assertSafeDownloadTarget(rawUrl, allowHosts = []) {
   }
 }
 
-export async function isSafeDownloadTarget(rawUrl, allowHosts = []) {
-  try { await assertSafeDownloadTarget(rawUrl, allowHosts); return true } catch { return false }
-}

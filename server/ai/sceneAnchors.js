@@ -4,7 +4,7 @@ import { query, queryOne, execute } from '../db.js'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
 import { recordAlert } from './alerts.js'
-import { ASSET_TYPES, TYPE_PROP } from './assetTypes.js'
+import { TYPE_PROP } from './assetTypes.js'
 import { SCENE_ANCHOR_TYPE, PROP_ANCHOR_TYPE, SPATIAL_ANCHOR_TYPE, LAYOUT_ANCHOR_TYPE, LAYOUT_ANCHOR_HINT, parseElementList } from './anchorTypes.js'
 import { loadGroupLocks, applyGroupLocks, getGroupLockOverview } from './sceneGroupLock.js'
 import {

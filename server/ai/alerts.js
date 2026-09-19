@@ -125,15 +125,3 @@ export function resolveAlertsByScene(sceneId, by = 'regen', source = '') {
   }
 }
 
-export function alertSummaryForShot(shotId) {  if (shotId == null) return ''
-  try {
-    const rows = query(
-      "SELECT source, message FROM system_alerts WHERE shot_id = ? AND (resolved_at IS NULL OR resolved_at = '') ORDER BY id DESC LIMIT 3",
-      [Number(shotId)]
-    )
-    if (!rows.length) return ''
-    return rows.map((r) => r.message).join('；')
-  } catch {
-    return ''
-  }
-}

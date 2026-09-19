@@ -205,4 +205,3 @@ export function startSalvageWorker() {
   console.log('[salvage] 成片打捞守护已启动（每 5 分钟扫描，50 分钟窗口；覆盖镜头与段）')
 }
 
-export { salvageOnce as salvageOnceForTest }

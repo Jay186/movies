@@ -53,9 +53,6 @@ function normField(field, v) {
   return s
 }
 
-export function snapshotDir() {
-  return SNAPSHOT_DIR
-}
 
 
 export function snapshotBeforeExtract({ episodeId, trigger = 'extract', tables = [] } = {}) {
@@ -162,11 +159,6 @@ export function restoreSnapshot(file) {
   return result
 }
 
-export function restoreLatestSnapshot(episodeId) {
-  const [latest] = listSnapshots(episodeId)
-  if (!latest) return null
-  return restoreSnapshot(latest.path)
-}
 
 
 export function computeExtractDiff({ table, oldRows = [], incoming = [] } = {}) {
@@ -333,5 +325,3 @@ export function applyKeepForCharacters(incoming = [], oldRows = []) {
   }
   return patched
 }
-
-export const _tableMeta = TABLE_META

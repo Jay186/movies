@@ -106,10 +106,6 @@ export function translateCameraMovement(cn) {
   return CAMERA_MAP[key] || ''
 }
 
-export function lookupCameraMovement(cn) {
-  const key = String(cn || '').trim()
-  return CAMERA_MAP[key] || ''
-}
 
 const TONE_MAP = {
   '压低声音': 'in a hushed tone',

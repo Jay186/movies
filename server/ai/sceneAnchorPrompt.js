@@ -59,18 +59,3 @@ export function buildLayoutImagePrompt(p = {}) {
   )
 }
 
-export function collectLayoutMaterials(p = {}) {
-  const roles = []
-  const landmarks = []
-  const seenRole = new Set()
-  const seenLand = new Set()
-  for (const m of Array.isArray(p.members) ? p.members : []) {
-    const role = String(m?.spatialRole || '').trim()
-    if (role && !seenRole.has(role)) { seenRole.add(role); roles.push(role) }
-    for (const x of Array.isArray(m?.props) ? m.props : []) {
-      const s = String(x || '').trim()
-      if (s && !seenLand.has(s)) { seenLand.add(s); landmarks.push(s) }
-    }
-  }
-  return { roles, landmarks }
-}

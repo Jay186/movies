@@ -37,6 +37,3 @@ export function labelOfPhase(phase) {
   return PHASE_LABEL[key] || key
 }
 
-export function allPhases() {
-  return Object.values(PHASE)
-}

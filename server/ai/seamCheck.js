@@ -152,8 +152,3 @@ export async function checkOpenerTone(shot) {
   return result
 }
 
-export async function checkOpenerToneByShotId(shotId) {
-  const shot = queryOne('SELECT * FROM shots WHERE id = ?', [Number(shotId)])
-  if (!shot) throw new Error(`镜头不存在 (shotId=${shotId})`)
-  return checkOpenerTone(shot)
-}

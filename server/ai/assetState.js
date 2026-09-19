@@ -32,17 +32,6 @@ function slugifyAscii(s) {
     .replace(/^_+|_+$/g, '')
 }
 
-export function normalizeStateKey(label, opts = {}) {
-  const raw = String(label || '').trim()
-  if (!raw) return ''
-  const lower = raw.toLowerCase()
-  if (/^[a-z0-9_]+$/.test(lower)) return lower
-  const aliases = getStateAliases(opts)
-  for (const [key, list] of Object.entries(aliases)) {
-    if (list.some((a) => a.toLowerCase() === lower)) return key
-  }
-  return slugifyAscii(raw)
-}
 
 
 export function resolveState(shotStateEntry, assetStatesList) {
@@ -128,5 +117,3 @@ export function displayLabel(stateKey, labelZh) {
   const key = String(stateKey || '').trim()
   return key ? `${key}〔未登记〕` : ''
 }
-
-export const _defaultStateKey = DEFAULT_STATE_KEY

@@ -254,18 +254,6 @@ async function queryOutputsV2(taskId) {
   return res.json()
 }
 
-export async function uploadFile(fileBuffer, filename, mimeType) {
-  const formData = new FormData()
-  formData.append('apiKey', apiKey)
-  formData.append('fileType', 'input')
-  formData.append('file', new Blob([fileBuffer], { type: mimeType }), filename)
-
-  const res = await fetchWithTimeout(`${baseURL}/task/openapi/upload`, {
-    method: 'POST',
-    body: formData,
-  }, 60000)
-  return res.json()
-}
 
 export async function queryTaskOutput(taskId) {
   try {

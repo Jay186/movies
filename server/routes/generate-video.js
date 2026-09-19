@@ -20,7 +20,7 @@ import { config } from '../config.js'
 import { clean as cleanText, pickInjectableEnglish } from '../ai/shared.js'
 import { parseDialogue, hasDialogue } from '../ai/dialogue.js'
 import { mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
-import { ASSET_TYPES, TYPE_PROP } from '../ai/assetTypes.js'
+import { TYPE_PROP } from '../ai/assetTypes.js'
 import { resolveState } from '../ai/assetState.js'
 import { resolvePropName } from '../ai/propNameMatch.js'
 import { pickEnglish as pickEnglishGuard, stripResidualCjk as stripCjkGuard } from '../ai/v4Video.js'
@@ -55,10 +55,6 @@ function propStateDescEn(shot, propName, baseDescEn) {
   }
 }
 
-export const __propStateDescEn = propStateDescEn
-
-
-fs.mkdirSync(uploadsDir, { recursive: true })
 
 function episodeSpeakerIds(shot) {
   const sceneRowId = shot?.storyboard_scene_id

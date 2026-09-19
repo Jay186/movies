@@ -1,5 +1,4 @@
 
-export const ANCHOR_TYPES = ['scene', 'prop', 'spatial', 'layout']
 
 export const SPATIAL_ANCHOR_TYPE = 'spatial'
 
@@ -21,7 +20,6 @@ export const REVIEW_STATUS = {
   SKIPPED: 'skipped',
 }
 
-export const REVIEW_STATUSES = Object.values(REVIEW_STATUS)
 
 export const REVIEW_ACTION = {
   CONFIRM: 'confirm',
@@ -74,12 +72,6 @@ export function buildSharedEnvNote(sharedEnv) {
   return `${SHARED_ENV_NOTE_TAG}(本场景与同空间的其它场景共享以下环境特征，必须一致：${list.join('、')}：${ELEMENT_WEIGHT})。`
 }
 
-export function buildElementNoteFromJson(raw) {
-  return buildElementNote(parseElementList(raw))
-}
-export function buildSharedEnvNoteFromJson(raw) {
-  return buildSharedEnvNote(parseElementList(raw))
-}
 
 
 export const LAYOUT_ANCHOR_HINT =
@@ -90,11 +82,6 @@ export const LAYOUT_ANCHOR_HINT =
   '严禁把布局图的俯视/轴测画法当作本画面的视角，也严禁照搬它的示意画风。'
 
 export const LAYOUT_IMAGE_SUBJECT = '空间布局示意图'
-
-export const LAYOUT_IMAGE_STYLE_ANCHOR =
-  '这是一张**扁平矢量风格的教学挂图**，像儿童科普书里用来讲解空间的示意图：' +
-  '只用干净的色块、简单的几何形状和利落的线条来表达物体，没有渲染、没有质感、没有光影。' +
-  '整张图是"一块可以拿在手里把玩的地形模型"那种感觉。'
 
 export const LAYOUT_IMAGE_NEGATIVE =
   '画面为纯图形化的等轴测或斜俯视空间关系示意图，是美术设计用的平面示意，不是摄影作品、不是场景效果图。' +

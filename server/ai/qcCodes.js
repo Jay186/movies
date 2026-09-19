@@ -345,9 +345,6 @@ export function qcMeta(code) {
   return QC_CODES[c] || { ...QC_UNKNOWN_META, title: c || '未分类问题' }
 }
 
-export function isQcError(code) {
-  return qcMeta(code).level === QC_LEVEL.ERROR
-}
 
 export function isRegisteredQcCode(code) {
   return Object.prototype.hasOwnProperty.call(QC_CODES, String(code || ''))
@@ -394,13 +391,4 @@ export function summarizeQc(qc = {}) {
   }
 }
 
-export function formatQcItem(item) {
-  const meta = qcMeta(item?.code)
-  const title = meta.title || item?.code || ''
-  const where = item?.shot && item.shot !== '*' ? `镜头 ${item.shot}：` : ''
-  return `${title ? `[${title}] ` : ''}${where}${item?.message || ''}`
-}
 
-export function qcFixResult({ changed = false, reason = '' } = {}) {
-  return { success: !!changed, changed: !!changed, reason: String(reason || '') }
-}

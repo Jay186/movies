@@ -99,14 +99,6 @@ export function runBootChecks() {
   return results
 }
 
-export function countUnresolvedAlerts() {
-  try {
-    const r = queryOne("SELECT COUNT(*) AS n FROM system_alerts WHERE (resolved_at IS NULL OR resolved_at = '')")
-    return Number(r?.n) || 0
-  } catch {
-    return 0
-  }
-}
 
 export function printBootReport(results, { log = console.log } = {}) {
   const has = (s) => results.filter((r) => r.status === s).length

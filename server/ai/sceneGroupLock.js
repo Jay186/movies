@@ -36,42 +36,7 @@ export function applyGroupLocks(rows, locks) {
   return { rows: next, lockedCount, changedCount }
 }
 
-export function saveGroupLocks(episodeId, rows, db, opts = {}) {
-  const note = String(opts.note || '').slice(0, 200)
-  let locked = 0
-  for (const r of Array.isArray(rows) ? rows : []) {
-    const sid = Number(r?.scene_id)
-    const g = String(r?.spatial_group || '').trim()
-    if (!Number.isFinite(sid) || sid <= 0 || !g) continue
-    db.execute(
-      `INSERT INTO scene_group_locks (episode_id, scene_id, spatial_group, note)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(episode_id, scene_id) DO UPDATE SET spatial_group = excluded.spatial_group, note = excluded.note`,
-      [episodeId, sid, g, note]
-    )
-    locked++
-  }
-  return { locked }
-}
 
-export function clearGroupLocks(episodeId, db, opts = {}) {
-  const ids = Array.isArray(opts.sceneIds) ? opts.sceneIds.map(Number).filter((n) => Number.isFinite(n) && n > 0) : []
-  if (!ids.length) {
-    const before = db.queryOne('SELECT COUNT(*) AS c FROM scene_group_locks WHERE episode_id = ?', [episodeId])
-    db.execute('DELETE FROM scene_group_locks WHERE episode_id = ?', [episodeId])
-    return { removed: Number(before?.c || 0) }
-  }
-  let removed = 0
-  for (const sid of ids) {
-    const before = db.queryOne(
-      'SELECT COUNT(*) AS c FROM scene_group_locks WHERE episode_id = ? AND scene_id = ?',
-      [episodeId, sid]
-    )
-    db.execute('DELETE FROM scene_group_locks WHERE episode_id = ? AND scene_id = ?', [episodeId, sid])
-    removed += Number(before?.c || 0)
-  }
-  return { removed }
-}
 
 export function getGroupLockOverview(episodeId, db) {
   let locks = []

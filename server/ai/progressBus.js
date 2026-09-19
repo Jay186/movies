@@ -141,6 +141,3 @@ function decorate(v) {
   }
 }
 
-export function __clearAllProgress() {
-  store.clear()
-}

@@ -46,11 +46,6 @@ export function createProjectCharacter(projectId, data = {}) {
   return queryOne('SELECT * FROM project_characters WHERE id = ?', [r.lastInsertRowid])
 }
 
-export function ensureProjectCharacter(projectId, data = {}) {
-  const found = findProjectCharacter(projectId, { id: data.project_character_id || data.projectCharacterId, name: data.name })
-  if (found) return found
-  return createProjectCharacter(projectId, data)
-}
 
 export function updateProjectCharacter(masterId, data = {}, { allowClear = false } = {}) {
   const current = queryOne('SELECT * FROM project_characters WHERE id = ?', [masterId])

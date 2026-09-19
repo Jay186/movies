@@ -160,6 +160,3 @@ export function createLightingCheck(deps = {}) {
   return { check, checkMany, get cacheEnabled() { return cacheAvailable }, get llmEnabled() { return llmAvailable } }
 }
 
-export function detectLightingConflict() {
-  return { conflict: false, reason: '', deprecated: true }
-}

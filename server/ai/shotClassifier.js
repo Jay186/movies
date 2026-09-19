@@ -53,7 +53,3 @@ export function classifyShotCombat(shot = {}) {
   return scoreShotCombat(shot).score >= 3
 }
 
-export function explainShotCombat(shot = {}) {
-  const { score, hitCombat, hitPhysics, hitEnv, hitSlice, hasDlg } = scoreShotCombat(shot)
-  return { score, isCombat: score >= 3, hitCombat, hitPhysics, hitEnv, hitSlice, hasDlg }
-}

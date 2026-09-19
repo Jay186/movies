@@ -44,15 +44,4 @@ export function releaseSpatialGroupLock(entry) {
   console.log(`[spatialLock] ${entry.key} 释放（${entry.holder}，持锁 ${Date.now() - entry.acquiredAt}ms）`)
 }
 
-export async function withSpatialGroupLock(key, holder, task) {
-  const entry = await acquireSpatialGroupLock(key, holder)
-  try {
-    return await task()
-  } finally {
-    releaseSpatialGroupLock(entry)
-  }
-}
 
-export function pendingSpatialGroupLocks() {
-  return [...tails.keys()]
-}
