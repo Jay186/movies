@@ -16,7 +16,9 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import ffmpegStaticPath from 'ffmpeg-static'
 import { queryOne, execute } from '../db.js'
-import { insecureDownload } from './runninghub.js'
+// [去重 2026-09-19] 媒体定位收口到 ai/mediaResolve.js（原与 shotReview.js 各写一份近乎相同的
+// resolveLocalMedia）。本文件原先直接 import insecureDownload，现已随函数一并移出。
+import { resolveLocalMedia } from './mediaResolve.js'
 
 const execFile = promisify(execFileCb)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -108,26 +110,8 @@ function computeMetrics(grid /* Buffer 192B */) {
   }
 }
 
-// 定位本地文件：/uploads/ 相对路径 → 绝对（保留子目录如 continuity/）；
-// 远端 URL → 下载兜底（确定性文件名不堆积）
-async function resolveLocalMedia(url, id, tag) {
-  const u = String(url || '').trim()
-  if (u.startsWith('/uploads/')) {
-    const rel = decodeURIComponent(u.slice('/uploads/'.length))
-    // 防路径穿越：URL 不允许出现 .. 段
-    if (rel.split('/').some((seg) => seg === '..')) throw new Error(`非法的媒体地址: ${u}`)
-    const p = path.join(uploadsDir, rel)
-    if (!fs.existsSync(p)) throw new Error(`本地文件已不存在: ${u}`)
-    return p
-  }
-  if (/^https?:/i.test(u)) {
-    const buf = await insecureDownload(u)
-    const p = path.join(uploadsDir, `shot_${id}_${tag}.mp4`)
-    fs.writeFileSync(p, buf)
-    return p
-  }
-  throw new Error(`无法识别的媒体地址: ${u}`)
-}
+// （本地 resolveLocalMedia 已于 2026-09-19 收口到 ai/mediaResolve.js —— 它与
+//   shotReview.js 里的同名函数近乎逐字节相同，唯一差别是兜底文件名。见该文件头注。）
 
 // 抽视频首帧（与接力抽末帧同范式；确定性文件名幂等覆盖）
 async function extractFirstFrame(absVideo, shotId) {
@@ -153,8 +137,8 @@ export async function checkSeam(shot) {
   if (!videoUrl) throw new Error('该镜还没有成片')
   if (!anchorUrl) throw new Error('本镜没有 continuity 锚（首镜/新场景首镜），跳过检测')
 
-  const absVideo = await resolveLocalMedia(videoUrl, shot.id, 'seam')
-  const absAnchor = await resolveLocalMedia(anchorUrl, shot.id, 'anchor')
+  const absVideo = await resolveLocalMedia(videoUrl, uploadsDir, shot.id, 'seam')
+  const absAnchor = await resolveLocalMedia(anchorUrl, uploadsDir, shot.id, 'anchor')
 
   const firstFrame = await extractFirstFrame(absVideo, shot.id)
   const [videoM, anchorM] = await Promise.all([
@@ -209,7 +193,7 @@ export async function checkOpenerTone(shot) {
   const videoUrl = String(shot.video_url || '').trim()
   if (!videoUrl) throw new Error('该镜还没有成片')
 
-  const absVideo = await resolveLocalMedia(videoUrl, shot.id, 'tone')
+  const absVideo = await resolveLocalMedia(videoUrl, uploadsDir, shot.id, 'tone')
   const firstFrame = await extractFirstFrame(absVideo, shot.id)
   const m = computeMetrics(await frameGrid8(firstFrame))
 

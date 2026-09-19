@@ -25,7 +25,9 @@ import ffmpegStaticPath from 'ffmpeg-static'
 import { query, queryOne, execute } from '../db.js'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
-import { insecureDownload } from './runninghub.js'
+// [去重 2026-09-19] 媒体定位收口到 ai/mediaResolve.js（原与 seamCheck.js 各写一份近乎相同的
+// resolveLocalMedia）。本文件原先直接 import insecureDownload，现已随函数一并移出。
+import { resolveLocalMedia } from './mediaResolve.js'
 
 const execFile = promisify(execFileCb)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -33,24 +35,9 @@ const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const REVIEW_FRAME_COUNT = 5
 
-// 与 seamCheck.resolveLocalMedia 同范式：本地 /uploads 优先，云端 URL 下载兜底
-async function resolveLocalMedia(url, id) {
-  const u = String(url || '').trim()
-  if (u.startsWith('/uploads/')) {
-    const rel = decodeURIComponent(u.slice('/uploads/'.length))
-    if (rel.split('/').some((seg) => seg === '..')) throw new Error(`非法的媒体地址: ${u}`)
-    const p = path.join(uploadsDir, rel)
-    if (!fs.existsSync(p)) throw new Error(`本地文件已不存在: ${u}`)
-    return p
-  }
-  if (/^https?:/i.test(u)) {
-    const buf = await insecureDownload(u)
-    const p = path.join(uploadsDir, `shot_${id}_review_src.mp4`)
-    fs.writeFileSync(p, buf)
-    return p
-  }
-  throw new Error(`无法识别的媒体地址: ${u}`)
-}
+// （本地 resolveLocalMedia 已于 2026-09-19 收口到 ai/mediaResolve.js —— 它与
+//   seamCheck.js 里的同名函数近乎逐字节相同，唯一差别是本文件的兜底文件名写死
+//   'review_src'；现统一以 tag='review_src' 传入。见该文件头注。）
 
 // 均匀抽 5 帧（10%/30%/50%/70%/90%），幂等覆盖到 uploads/review/
 async function extractFrames(absVideo, shotId, durationSec) {
@@ -156,7 +143,7 @@ export async function reviewShot(shot) {
   const model = config.llm?.vlmModel
   if (!model) throw new Error('观片闸未配置模型（LLM_VLM_MODEL），跳过')
 
-  const absVideo = await resolveLocalMedia(videoUrl, shot.id)
+  const absVideo = await resolveLocalMedia(videoUrl, uploadsDir, shot.id, 'review_src')
   const frames = await extractFrames(absVideo, shot.id, shot.duration)
 
   // 角色参考图（按图认人，见 resolveCharRefImages 注释）
