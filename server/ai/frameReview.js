@@ -16,6 +16,9 @@ import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
+// [去重 2026-09-19] MIME 推断收口到 shared.mimeFromExt（原 frameReview/layoutReview/sceneReview
+// 各写一份逐字节相同的 mimeOf，改一处不生效）。shared 版本是超集：额外覆盖音频扩展名。
+import { mimeFromExt } from './shared.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const uploadsDir = path.join(__dirname, '..', 'uploads')
@@ -39,12 +42,6 @@ function resolveLocalImage(storedUrl) {
   return fs.existsSync(p) ? p : null
 }
 
-function mimeOf(absPath) {
-  const ext = path.extname(absPath).toLowerCase()
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-  if (ext === '.webp') return 'image/webp'
-  return 'image/png'
-}
 
 /**
  * 分镜图验收（单张）。绝不抛错：任何异常都降级为 verdict='skip'。
@@ -62,7 +59,7 @@ export async function reviewFrameImage(storedUrl, opts = {}) {
     const content = [
       {
         type: 'image_url',
-        image_url: { url: `data:${mimeOf(abs)};base64,${fs.readFileSync(abs).toString('base64')}` },
+        image_url: { url: `data:${mimeFromExt(abs)};base64,${fs.readFileSync(abs).toString('base64')}` },
       },
       {
         type: 'text',

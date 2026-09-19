@@ -27,6 +27,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from '../config.js'
 import { chatCompletion } from './doubao.js'
+// [去重 2026-09-19] MIME 推断收口到 shared.mimeFromExt（原本文件/layoutReview/sceneReview
+// 各写一份逐字节相同的 mimeOf）。shared 版本是超集：额外覆盖音频扩展名。
+import { mimeFromExt } from './shared.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const UPLOADS_DIR = path.resolve(__dirname, '../uploads')
@@ -57,13 +60,6 @@ export function resolveLocalSceneImage(storedUrl) {
   const abs = path.join(UPLOADS_DIR, m[1])
   if (!abs.startsWith(UPLOADS_DIR)) return null   // 目录穿越双保险
   return fs.existsSync(abs) ? abs : null
-}
-
-function mimeOf(absPath) {
-  const ext = path.extname(absPath).toLowerCase()
-  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
-  if (ext === '.webp') return 'image/webp'
-  return 'image/png'
 }
 
 /**
@@ -168,7 +164,7 @@ export async function reviewSceneImage(storedUrl, opts = {}) {
     const content = [
       {
         type: 'image_url',
-        image_url: { url: `data:${mimeOf(abs)};base64,${fs.readFileSync(abs).toString('base64')}` },
+        image_url: { url: `data:${mimeFromExt(abs)};base64,${fs.readFileSync(abs).toString('base64')}` },
       },
       {
         type: 'text',

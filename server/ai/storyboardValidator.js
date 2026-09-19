@@ -14,6 +14,9 @@
 import { backfillShotAssets } from './assetBackfill.js'
 import { config } from '../config.js'
 import { qcMeta } from './qcCodes.js'
+// [去重 2026-09-19] escapeRegExp 收口到 shared（shared.js 头注「已合并」清单里本就登记了它，
+// 本文件的局部拷贝是漏删的残留——旧实现无 String() 强转，传入非字符串会抛 TypeError）。
+import { escapeRegExp } from './shared.js'
 
 /**
  * 统一的 warning 落账（2026-09-16）：code 的级别不再由各校验函数自己心里记，
@@ -138,10 +141,6 @@ const SIDE_PATTERNS = [
   [/\bframe[- ]left\b|\bleft side of the frame\b|\bscreen left\b/i, 'left'],
   [/\bframe[- ]right\b|\bright side of the frame\b|\bscreen right\b/i, 'right'],
 ]
-
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
 
 // 显式走位交代的判定（唯一口径）：QC 校验（SCREEN_SIDE_FLIP 的豁免）与 doubao.js 阶段3
 // 自动越轴修补共用同一实现——此前两处各写一份正则，口径必然漂移。
