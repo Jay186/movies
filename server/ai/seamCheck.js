@@ -16,9 +16,10 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import ffmpegStaticPath from 'ffmpeg-static'
 import { queryOne, execute } from '../db.js'
-// [去重 2026-09-19] 媒体定位收口到 ai/mediaResolve.js（原与 shotReview.js 各写一份近乎相同的
-// resolveLocalMedia）。本文件原先直接 import insecureDownload，现已随函数一并移出。
-import { resolveLocalMedia } from './mediaResolve.js'
+// [收口 2026-09-19] resolveLocalMedia 统一到 ai/runninghub.js（原在本文件与 shotReview.js
+// 各写一份近乎逐字节相同的实现）。该模块已持有 insecureDownload 与 uploadsDir，
+// 正是「远端下载」与「本地路径」两半的自然交汇点，故不另建新文件。
+import { resolveLocalMedia } from './runninghub.js'
 
 const execFile = promisify(execFileCb)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -110,7 +111,7 @@ function computeMetrics(grid /* Buffer 192B */) {
   }
 }
 
-// （本地 resolveLocalMedia 已于 2026-09-19 收口到 ai/mediaResolve.js —— 它与
+// （本地 resolveLocalMedia 已于 2026-09-19 统一到 ai/runninghub.js —— 它与
 //   shotReview.js 里的同名函数近乎逐字节相同，唯一差别是兜底文件名。见该文件头注。）
 
 // 抽视频首帧（与接力抽末帧同范式；确定性文件名幂等覆盖）
@@ -137,8 +138,8 @@ export async function checkSeam(shot) {
   if (!videoUrl) throw new Error('该镜还没有成片')
   if (!anchorUrl) throw new Error('本镜没有 continuity 锚（首镜/新场景首镜），跳过检测')
 
-  const absVideo = await resolveLocalMedia(videoUrl, uploadsDir, shot.id, 'seam')
-  const absAnchor = await resolveLocalMedia(anchorUrl, uploadsDir, shot.id, 'anchor')
+  const absVideo = await resolveLocalMedia(videoUrl, shot.id, 'seam')
+  const absAnchor = await resolveLocalMedia(anchorUrl, shot.id, 'anchor')
 
   const firstFrame = await extractFirstFrame(absVideo, shot.id)
   const [videoM, anchorM] = await Promise.all([
@@ -193,7 +194,7 @@ export async function checkOpenerTone(shot) {
   const videoUrl = String(shot.video_url || '').trim()
   if (!videoUrl) throw new Error('该镜还没有成片')
 
-  const absVideo = await resolveLocalMedia(videoUrl, uploadsDir, shot.id, 'tone')
+  const absVideo = await resolveLocalMedia(videoUrl, shot.id, 'tone')
   const firstFrame = await extractFirstFrame(absVideo, shot.id)
   const m = computeMetrics(await frameGrid8(firstFrame))
 

@@ -101,6 +101,47 @@ export async function insecureDownload(url, maxRedirects = 3, timeoutMs = 180000
 }
 
 /**
+ * 把媒体地址解析成本地绝对路径（出片后处理链公共入口：衔接检测 / 观片闸）。
+ *
+ * 2026-09-19 收口：ai/seamCheck.js 与 ai/shotReview.js 原先各写一份近乎逐字节相同的
+ * 本函数，唯一差别是远端兜底的落盘文件名（seamCheck 用 `shot_${id}_${tag}.mp4`，
+ * shotReview 把 tag 写死成 'review_src'）。两处注释互相写着「与 X 同范式」，
+ * 实际改一处另一处不生效。
+ *
+ * 为什么落在这里：本模块已拥有 `insecureDownload`（远端兜底那半）与 `uploadsDir`
+ * （本地路径那半），是两半的自然交汇点；放 ai/shared.js 反而会构成
+ * shared ↔ runninghub 循环导入（runninghub 自身要 import shared）。
+ *
+ * 两条铁律（与 shared.uploadsUrlToAbs 同口径；历史由 path.basename 扁平化写法导致
+ * `/uploads/segments/segN/x.mp4` 解析失败、段级出片后拼片 400）：
+ *   ① 保留子目录：不得用 basename 压平路径；
+ *   ② 防路径穿越：URL 里不允许出现 `..` 段。
+ *
+ * @param {string} url 媒体地址（落库的 video_url / continuity_url 等）
+ * @param {string|number} id 镜头 id（仅用于远端兜底文件名，保证同镜反复调用幂等覆盖）
+ * @param {string} tag 用途标签（'seam' / 'anchor' / 'tone' / 'review_src'），决定兜底文件名
+ * @returns {Promise<string>} 本地绝对路径
+ */
+export async function resolveLocalMedia(url, id, tag) {
+  const u = String(url || '').trim()
+  if (u.startsWith('/uploads/')) {
+    const rel = decodeURIComponent(u.slice('/uploads/'.length))
+    // 防路径穿越：URL 不允许出现 .. 段
+    if (rel.split('/').some((seg) => seg === '..')) throw new Error(`非法的媒体地址: ${u}`)
+    const p = path.join(uploadsDir, rel)
+    if (!fs.existsSync(p)) throw new Error(`本地文件已不存在: ${u}`)
+    return p
+  }
+  if (/^https?:/i.test(u)) {
+    const buf = await insecureDownload(u)
+    const p = path.join(uploadsDir, `shot_${id}_${tag}.mp4`)
+    fs.writeFileSync(p, buf)
+    return p
+  }
+  throw new Error(`无法识别的媒体地址: ${u}`)
+}
+
+/**
  * 成片内容校验（2026-09-15）：COS 偶发返回 HTTP 200 但 body 是 XML 错误页或截断残片——
  * HTTP 状态码挡不住，不校验就落盘会得到一个"文件存在但播不了"的假 mp4（比下载失败更阴：
  * 下游钩子链拿到假文件全部静默坏掉）。ISO BMFF 规定第 5~8 字节固定为 'ftyp'；>10KB 防碎片。

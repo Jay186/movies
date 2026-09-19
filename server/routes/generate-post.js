@@ -39,20 +39,18 @@ import { routeIp, buildCharacterContext, resolveExplicitCharacters } from '../ai
 import ffmpegStaticPath from 'ffmpeg-static'
 // LUFS 响度归一（2026-09-14）：逐镜 -20 消段间跳变 + BGM 后整片 -16 终遍，见 audioLoudnorm.js 头注
 import { measureLoudness, loudnormFilter, normalizeFinalLoudness, PER_SHOT_TARGET, FINAL_TARGET } from '../audioLoudnorm.js'
-// [去重 2026-09-19] 六个路由辅助函数 + uploadsDir 收口到 routeShared，
-// 原本与 generate-script.js / generate-image.js 各存一份逐字节相同的拷贝（改一处不生效）。
-import {
-  uploadsDir, buildAssetContextForPrompt,
-  persistRemoteAsset, updateTask, dedupeAssets, isFurniture, filterFurnitureProps,
-} from './routeShared.js'
 
 const router = Router()
 
-// （本文件原有的 buildAssetContextForPrompt / persistRemoteAsset / updateTask / dedupeAssets /
-//   isFurniture / filterFurnitureProps / uploadsDir / FRAME_DUAL_KEYFRAME_SEC / runningFullTasks
-//   共 9 项已于 2026-09-19 收口到 ./routeShared.js —— 它们曾在本文件与 generate-script.js、
-//   generate-image.js 里各存一份逐字节相同的拷贝。FRAME_DUAL_KEYFRAME_SEC 与 runningFullTasks
-//   在本文件从未被使用（后者的唯一消费点是 generate-script.js 的 /full），两个死声明已删。）
+// server/uploads：本路由的文件落盘基准目录（BGM 列表、成片拼接口都基于它）
+const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
+fs.mkdirSync(uploadsDir, { recursive: true })
+
+// [清理 2026-09-19] 本文件原先抄有 buildAssetContextForPrompt / persistRemoteAsset / updateTask /
+// dedupeAssets / isFurniture / filterFurnitureProps 六个函数的副本，外加 FRAME_DUAL_KEYFRAME_SEC
+// 与 runningFullTasks 两个常量 —— 经逐一核对**全部零调用点**（本文件只做成片拼接/BGM/后处理，
+// 不做剧本生成、不出图、不建任务），已整块删除。这些函数的唯一使用方分别是
+// generate-script.js（剧本/资产）与 generate-image.js（persistRemoteAsset 落图）。
 
 
 router.get('/bgm-list', (req, res) => {

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { randomUUID } from 'crypto'
 import path from 'node:path'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { query, queryOne, execute, transaction } from '../db.js'
@@ -53,22 +54,38 @@ import { config } from '../config.js'
 // cleanText 统一到 ai/shared.js（原此处与 ai/videoPrompt.js 各有一份实现）
 import { clean as cleanText } from '../ai/shared.js'
 import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
-// （ipRouter 已不直接使用：buildAssetContextForPrompt 随其余路由辅助一起收口到 routeShared.js）
 // 成片拼接（保存至成片）：ffmpeg-static 已用于分镜图切分（directorRequest.js），这里复用同一份二进制
 import ffmpegStaticPath from 'ffmpeg-static'
-// [去重 2026-09-19] 六个路由辅助函数 + uploadsDir + FRAME_DUAL_KEYFRAME_SEC 收口到 routeShared，
-// 原本与 generate-script.js / generate-post.js 各存一份逐字节相同的拷贝（改一处不生效）。
-import {
-  uploadsDir, FRAME_DUAL_KEYFRAME_SEC, buildAssetContextForPrompt,
-  persistRemoteAsset, updateTask, dedupeAssets, isFurniture, filterFurnitureProps,
-} from './routeShared.js'
 
 const router = Router()
 
-// （本文件原有的 buildAssetContextForPrompt / persistRemoteAsset / updateTask / dedupeAssets /
-//   isFurniture / filterFurnitureProps / uploadsDir / FRAME_DUAL_KEYFRAME_SEC / runningFullTasks
-//   共 9 项已于 2026-09-19 收口到 ./routeShared.js —— 它们曾在本文件与 generate-script.js、
-//   generate-post.js 里各存一份逐字节相同的拷贝。runningFullTasks 在本文件从未被使用，已删。）
+// 分镜图自动出图规则（无需配置，按镜头自带时长自动判定）：
+// - 长镜（时长 ≥ 7s）：动作有过程，出 2 张「首帧 + 尾帧」，分别锁定动作起始与结束状态，
+//   作为视频工作流的起止锚点（主图=首帧 frame_url，候选=尾帧 frame_url2）
+// - 短镜（时长 < 7s）：动作单一，只出 1 张代表画面（frame_url），不再出同拍双候选
+const FRAME_DUAL_KEYFRAME_SEC = 7
+
+// server/uploads：资产图落本地（RunningHub 输出 URL 仅 24h 有效，落盘后永久可用）
+const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
+fs.mkdirSync(uploadsDir, { recursive: true })
+
+// [清理 2026-09-19] 本文件原先还抄有 buildAssetContextForPrompt / updateTask / dedupeAssets /
+// isFurniture / filterFurnitureProps / runningFullTasks 六个函数的副本，经逐一核对**零调用点**
+// （本文件只做分镜/场景/资产出图，不做剧本生成与资产提取），已直接删除。这些函数的唯一
+// 使用方是 generate-script.js，各自留在那边即可。
+
+// 下载 RunningHub 生成产物到本地，返回可直接存库的 /uploads/ 路径；失败时返回原 URL（退化为 24h 有效）
+async function persistRemoteAsset(url, filename) {
+  if (!url || url.startsWith('/uploads/')) return url
+  try {
+    const buf = await insecureDownload(url)
+    fs.writeFileSync(path.join(uploadsDir, filename), buf)
+    return `/uploads/${filename}`
+  } catch (e) {
+    console.warn(`[persistRemoteAsset] 落本地失败（${filename}），保留原 URL:`, e.message)
+    return url
+  }
+}
 
 
 // ===== 画风锚图（2026-09-16）=====

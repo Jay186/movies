@@ -25,9 +25,9 @@ import ffmpegStaticPath from 'ffmpeg-static'
 import { query, queryOne, execute } from '../db.js'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
-// [去重 2026-09-19] 媒体定位收口到 ai/mediaResolve.js（原与 seamCheck.js 各写一份近乎相同的
-// resolveLocalMedia）。本文件原先直接 import insecureDownload，现已随函数一并移出。
-import { resolveLocalMedia } from './mediaResolve.js'
+// [收口 2026-09-19] resolveLocalMedia 统一到 ai/runninghub.js（原在本文件与 seamCheck.js
+// 各写一份近乎逐字节相同的实现，唯一差别是本文件的兜底文件名写死 'review_src'）。
+import { resolveLocalMedia } from './runninghub.js'
 
 const execFile = promisify(execFileCb)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -35,7 +35,7 @@ const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const REVIEW_FRAME_COUNT = 5
 
-// （本地 resolveLocalMedia 已于 2026-09-19 收口到 ai/mediaResolve.js —— 它与
+// （本地 resolveLocalMedia 已于 2026-09-19 统一到 ai/runninghub.js —— 它与
 //   seamCheck.js 里的同名函数近乎逐字节相同，唯一差别是本文件的兜底文件名写死
 //   'review_src'；现统一以 tag='review_src' 传入。见该文件头注。）
 
@@ -143,7 +143,7 @@ export async function reviewShot(shot) {
   const model = config.llm?.vlmModel
   if (!model) throw new Error('观片闸未配置模型（LLM_VLM_MODEL），跳过')
 
-  const absVideo = await resolveLocalMedia(videoUrl, uploadsDir, shot.id, 'review_src')
+  const absVideo = await resolveLocalMedia(videoUrl, shot.id, 'review_src')
   const frames = await extractFrames(absVideo, shot.id, shot.duration)
 
   // 角色参考图（按图认人，见 resolveCharRefImages 注释）

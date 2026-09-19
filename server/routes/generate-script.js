@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { randomUUID } from 'crypto'
 import path from 'node:path'
 import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { query, queryOne, execute, transaction } from '../db.js'
@@ -55,13 +56,6 @@ import ffmpegStaticPath from 'ffmpeg-static'
 // scene_anchors 的 scene_id 按稳定键（title → scene_number）重挂到新 id，否则分组锁按旧 id
 // 悬空 → loadGroupLocks 匹配不到 → 防漂移保护静默归零。纯映射逻辑在 ai/sceneIdRemap.js（可单测）。
 import { remapSceneRefs } from '../ai/sceneIdRemap.js'
-// [去重 2026-09-19] 六个路由辅助函数 + uploadsDir + runningFullTasks 收口到 routeShared，
-// 原本与 generate-image.js / generate-post.js 各存一份逐字节相同的拷贝（改一处不生效）。
-// runningFullTasks 是本文件 /full 防重入锁的唯一实现，另两处的同名变量从未被使用（死变量）。
-import {
-  uploadsDir, runningFullTasks, buildAssetContextForPrompt,
-  persistRemoteAsset, updateTask, dedupeAssets, isFurniture, filterFurnitureProps,
-} from './routeShared.js'
 
 // 分镜流程的进度任务类型（2026-09-16）：作为 progressBus 的 task 键。
 // 用常量而非散落字符串字面量——前端要靠这些值区分任务类型，写错就静默对不上。
@@ -114,11 +108,105 @@ function remapSceneReferencesAfterRebuild(episodeId, oldScenes) {
   }
 }
 
-// （本文件原有的 buildAssetContextForPrompt / persistRemoteAsset / updateTask / dedupeAssets /
-//   isFurniture / filterFurnitureProps / uploadsDir / runningFullTasks / FRAME_DUAL_KEYFRAME_SEC
-//   共 9 项已于 2026-09-19 收口到 ./routeShared.js —— 它们曾在本文件与 generate-image.js、
-//   generate-post.js 里各存一份逐字节相同的拷贝。FRAME_DUAL_KEYFRAME_SEC 在本文件从未被使用
-//   （唯一消费点是 generate-image.js），该死声明已删；runningFullTasks 改为从 routeShared 导入。）
+// ===== 资产定位 → 编剧上下文 =====
+// 前端确认过角色时传 characterIds（显式指定，直接用）；
+// 没传则自动路由，仅高置信（主题里点了角色名）才注入，绝不瞎绑。
+// 定位失败不挡生成流程 —— 最坏情况回到裸主题生成，与改造前行为一致。
+async function buildAssetContextForPrompt(prompt, episodeId, characterIds = null) {
+  try {
+    if (Array.isArray(characterIds) && characterIds.length) {
+      const resolved = resolveExplicitCharacters(characterIds)
+      if (resolved.characters.length) {
+        return buildCharacterContext(resolved.characters, resolved.ip)
+      }
+    }
+    const ep = queryOne('SELECT project_id FROM episodes WHERE id = ?', [episodeId])
+    const route = await routeIp(String(prompt || ''), { projectId: ep?.project_id })
+    if (route.confidence === 'high' && route.characters.length) {
+      return buildCharacterContext(route.characters, route.ip)
+    }
+    return ''
+  } catch (e) {
+    console.warn('[ip-route] 资产定位失败，按裸主题生成:', e.message)
+    return ''
+  }
+}
+
+// server/uploads：资产图落本地（RunningHub 输出 URL 仅 24h 有效，落盘后永久可用）
+const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
+fs.mkdirSync(uploadsDir, { recursive: true })
+
+// 一键生成（/full）进行中的集（episodeId 字符串集合）：
+// 同一集同时只允许一个 /full 任务，防止两个任务交错删插分镜/资产互相覆盖
+const runningFullTasks = new Set()
+
+// 更新任务状态
+function updateTask(taskId, updates) {
+  const fields = []
+  const values = []
+  for (const [key, value] of Object.entries(updates)) {
+    fields.push(`${key} = ?`)
+    values.push(typeof value === 'object' ? JSON.stringify(value) : value)
+  }
+  values.push(taskId)
+  execute(`UPDATE tasks SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, values)
+}
+
+// 资产去重：同名/近似同名（去除标点空格后一致）只保留第一条，兼容字符串与对象格式
+function dedupeAssets(list, keyFn) {
+  if (!Array.isArray(list)) return list || []
+  const seen = new Set()
+  const result = []
+  for (const item of list) {
+    const raw = keyFn(item)
+    if (!raw) continue
+    const norm = String(raw).replace(/[\s，。！？、,.\s]/g, '').toLowerCase()
+    if (!norm || seen.has(norm)) continue
+    seen.add(norm)
+    result.push(item)
+  }
+  return result
+}
+
+// 大型固定家具属于场景陈设而非独立道具：若提取为道具，
+// 场景生图会把家具排除出画面、镜头又会画出来，两边互相打架
+const FURNITURE_KEYWORDS = [
+  '沙发', '茶几', '电视', '柜子', '桌子', '椅子', '书架', '衣柜', '餐桌',
+  '地毯', '窗帘', '冰箱', '空调', '楼梯', '地板', '天花板', '台灯', '吊灯',
+  '凳子', '床头柜', '鞋柜', '橱柜', '灶台',
+]
+function isFurniture(name) {
+  const n = String(name || '').trim()
+  return FURNITURE_KEYWORDS.some((kw) => {
+    const k = kw.trim()
+    return k && n.includes(k) && n.length <= k.length + 2
+  })
+}
+
+// 家具类道具从 props 中剔除，并同步清掉场景关联里的对应名称
+function filterFurnitureProps(assets) {
+  if (Array.isArray(assets?.props)) {
+    assets.props = assets.props.filter((p) => {
+      const name = typeof p === 'string' ? p : p.name
+      return !isFurniture(name)
+    })
+  }
+  if (Array.isArray(assets?.scenes)) {
+    for (const s of assets.scenes) {
+      if (Array.isArray(s.props)) {
+        s.props = s.props.filter((n) => !isFurniture(n))
+      }
+    }
+  }
+  return assets
+}
+
+// [清理 2026-09-19] 以上 7 项是本文件独用的实现，故**留在本文件**（不抽共享模块）。
+// 核实依据：逐函数统计三处 generate-*.js 的调用点 ——
+//   buildAssetContextForPrompt ×2 / updateTask ×9 / dedupeAssets ×6 / filterFurnitureProps ×2
+//   （isFurniture 仅被 filterFurnitureProps 内部调用）
+// 全部只在本文件出现；generate-image.js 只用一个 persistRemoteAsset，generate-post.js 六个全零。
+// 故那两个文件里的副本按死代码直接删除，无需引入任何新模块。
 
 // 创作主题 → 定位资产库里的角色。前端在用户点"生成"前调用：
 // high 直接展示已识别角色徽章；low/none 弹候选让用户勾选，
