@@ -1,76 +1,34 @@
-// A3 布局图 · 生成后处理闸（2026-09-17）
-//
-// 存在理由（六轮实测得出的结论）：
-//   布局图是「等轴测示意图」，而示意图在图像模型的先验里**天然带标注文字**——
-//   "教科书/说明书插图"这个分布几乎总是有标签与指引线。实测六版：
-//     v1 满图中文标注 + 眼睛机位图标
-//     v3 干净零文字（唯一一次） ← 之后无论怎么改 prompt 都无法复现
-//     v4 满屏冰雪质感 + 补画清单外雪松
-//     v5 中英文字标注全回来 + 指引线 + 图幅卡
-//     v6 正向表述 + 扁平矢量风格锚 → 仍是满图英文标注，且"教科书感"更强
-//   且 v3(826字/14否定) 与 v6(889字/14否定) 规模相当，**证明"否定过载"不是主因**：
-//   真正的原因是**格式与标注在这个模型的先验里强耦合**——只要它认为自己在画"示意图"，
-//   它就会加标签。纯靠 prompt 与之对抗，收益低且不可复现。
-//
-//   → 因此改为**工程闭环**（与 frameReview.js 同范式）：
-//     生成后用视觉模型判定是否违规，违规则带更强的针对性指令重试（上限 N 次）。
-//     这样"文字污染"从一个"赌运气"的问题，变成一个**可检出、可重试、可测试**的问题。
-//
-// ⚠️ 通用性铁律：本模块**零题材词表、零正则匹配画面内容**。
-//   所有判定都交给视觉模型；代码只负责"调模型 + 解析 JSON + 落降级"。
-//   换题材/换语言（甚至换成写实题材）都不需要改这里。
 
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from '../config.js'
 import { chatCompletion } from './doubao.js'
-// [去重 2026-09-19] MIME 推断收口到 shared.mimeFromExt（原本文件/layoutReview/sceneReview
-// 各写一份逐字节相同的 mimeOf）。shared 版本是超集：额外覆盖音频扩展名。
 import { mimeFromExt } from './shared.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const UPLOADS_DIR = path.resolve(__dirname, '../uploads')
 
-/** 重试上限（含首次）。每次重试都是一次付费生图，不可放大。 */
 export const MAX_LAYOUT_ATTEMPTS = 3
 
-/**
- * 违规类型（闭集，便于测试与前端展示）。
- * 只列**会污染全组生成**的那些——布局图作为 refs[0] 会被同组每个场景继承，
- * 因此它上面任何"多余的东西"都会被放大到全组。
- */
 export const LAYOUT_DEFECT_TYPES = [
-  'text',        // 图上出现任何文字/字母/数字/标签/题注
-  'leader_line', // 指引线、箭头、图例框、比例尺、指北针、坐标格
-  'character',   // 出现角色/人物/动物（含本片主角）或角色痕迹
-  'extra_object',// 出现了清单之外的多余物体
-  'atmosphere',  // 画了雾/云/雨/雪/光晕等大气与光照氛围
+  'text',        
+  'leader_line', 
+  'character',   
+  'extra_object',
+  'atmosphere',  
 ]
 
-/**
- * 把落盘地址解析为本地绝对路径。不存在返回 null（绝不让调用方抛错）。
- * @param {string} storedUrl
- * @returns {string|null}
- */
 export function resolveLocalLayoutImage(storedUrl) {
   const s = String(storedUrl || '').trim()
   if (!s) return null
-  // 只接受 /uploads/ 下的相对地址（与 frameReview 一致的收敛口径，避免任意路径读取）
   const m = s.match(/^\/uploads\/([^/?#]+)$/)
   if (!m) return null
   const abs = path.join(UPLOADS_DIR, m[1])
-  // 目录穿越双保险
   if (!abs.startsWith(UPLOADS_DIR)) return null
   return fs.existsSync(abs) ? abs : null
 }
 
-/**
- * 从模型返回的原文里解析出违规清单。脏输入一律降级为 []（不误杀）。
- * 独立导出以便测试（纯函数，无网络）。
- * @param {string} raw
- * @returns {{defects:Array<{type:string,evidence:string}>, summary:string}}
- */
 export function parseLayoutReview(raw) {
   try {
     const m = String(raw || '').match(/\{[\s\S]*\}/)
@@ -80,7 +38,6 @@ export function parseLayoutReview(raw) {
       ? parsed.defects
           .filter((d) => d && typeof d.type === 'string')
           .map((d) => ({
-            // 未知类型收敛为 text（最危险的默认），保证闭集
             type: LAYOUT_DEFECT_TYPES.includes(d.type) ? d.type : 'text',
             evidence: String(d.evidence || '').slice(0, 200),
           }))
@@ -91,13 +48,6 @@ export function parseLayoutReview(raw) {
   }
 }
 
-/**
- * 判定布局图是否可交付。绝不抛错：任何异常降级为 verdict='skip'（放行，不阻断生成）。
- *
- * @param {string} storedUrl - 落盘后的本地地址（/uploads/xxx.png）
- * @param {Object} opts - { episodeId, attempt }
- * @returns {Promise<{verdict:'pass'|'fail'|'skip', defects:Array, summary:string, model?:string, skipReason?:string}>}
- */
 export async function reviewLayoutImage(storedUrl, opts = {}) {
   const model = config.llm?.vlmModel
   if (!model) {
@@ -156,22 +106,11 @@ export async function reviewLayoutImage(storedUrl, opts = {}) {
       attempt: opts.attempt || 1,
     }
   } catch (e) {
-    // 验收本身故障（额度/网络/JSON）绝不能影响出图主流程 —— 与 frameReview 同口径
     console.warn('[layoutReview] 布局图验收失败，跳过（不影响出图）:', e.message)
     return { verdict: 'skip', defects: [], summary: '', skipReason: e.message }
   }
 }
 
-/**
- * 根据上一轮的违规清单，构造**针对性的加固指令**，拼到下一轮 prompt 末尾。
- * 纯函数，便于测试。空清单返回 ''（不改变首轮 prompt 一个字）。
- *
- * 设计要点：只针对**实际检出的**问题加固，不做"预防性堆砌"——
- * 六轮实测表明预防性堆砌无效（甚至有害），而针对性指令才有意义。
- *
- * @param {Array<{type:string,evidence?:string}>} defects
- * @returns {string}
- */
 export function buildLayoutRetryNote(defects) {
   const types = new Set(
     (Array.isArray(defects) ? defects : [])

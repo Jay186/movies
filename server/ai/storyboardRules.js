@@ -1,26 +1,4 @@
-// ============================================================
-// 分镜/提示词生成 公共规则库（一处维护，三模板共享）
-// 使用方（doubao.js）：
-//   1. generateStoryboard        剧本 → 创作分镜（硬约束版规则）
-//   2. enrichShotIntegrated      已有镜头 → 补全 integrated（硬约束版规则）
-//   3. generateStoryboardFromFile 分镜文件 → 忠实规整（温和版规则，不创作不改写）
-// 修改原则：规则文案只改这里；三模板通过 ${rule()} 引用，一处改全链生效。
-//
-// ⚠️ 两套「六」结构，不要混：
-//   A)【图像六模块】= shots.integrated_multimodal_description 的模块1~模块6
-//      — 由本文件 integratedModulesRule() 定义，喂给分镜图/生图模型，
-//        结构是「镜头声明 / 角色锁定 / 环境冻结 / 时间轴动作 / 道具专属 / 最终画面」。
-//      — 中文允许出现在规则说明里，但**模块正文必须英文**（见各模块内的硬约束）。
-//   B)【H3 官方六段】= 出片时运行时拼装的 prompt，与 DB 字段无关
-//      — 由 ai/v4Video.js buildShotVideoPromptV4() / ai/videoPrompt.js buildShotVideoPrompt() 产出，
-//        结构是「subject_definitions / summary / retention_analysis /
-//                detailed_description / overall_soundscape / non_diegetic_music」。
-//      — 全英文（只有 <d> 内台词保留中文），规范见 base-en.txt / ref-en.txt。
-//   两者字段不同、消费方不同、语言要求不同；改任何一个都不要顺手改另一个。
-// ============================================================
 
-// 台词字段规则（创作模板专用：规整模板忠实提取原文，不编造台词）
-// 返回不含 "- dialogue: " 前缀的核心文本
 export function dialogueRule() {
   return '台词，可以是一个对象或对象数组（一镜多句就写数组，本集剧本一镜常有 2-3 句）。每个对象 {character, tone, text, startTime}；无任何对白才写 null。'
     + 'startTime 一律用【全片时间轴绝对秒】（例：第 2 镜全片从 6s 开始，该镜第 1 句要在全片 8.3s 开口就写 8.3；首镜 startTime=0 则绝对秒=镜内秒）。'
@@ -29,7 +7,6 @@ export function dialogueRule() {
     + '不确定该镜是否该有对白时，宁可保留剧本台词也不要写 null——台词缺失会让成片完全没有角色语音（H3 只念 <d> 标签内台词），属于严重缺陷'
 }
 
-// 资产名逐字匹配（核心句，创作/规整共用；规整模板再拼 __unmatched 机制说明）
 export function assetNameRule() {
   return '资产名逐字匹配：characters/sceneAssets/propAssets 中每个名字必须【逐字】等于资产清单里出现的名字（包括顺序、字符、空格），'
     + '差一个字都会被系统丢弃、列里就空了——绝对禁止翻译、缩写、自造新名（如把"沿海公路下坡弯道"写成"海边公路"、把"蓝色长板"写成"蓝色滑板"）。'
@@ -40,16 +17,11 @@ export function assetNameRule() {
     + '【规整模板例外】若任务是"忠实规整用户已有的分镜文件"，不替用户纠正语义——只做明显不符的提示（如画面已写"上岸走上草地"却挂着河边场景锚），不改动用户原意、不新增/删除用户的镜头。'
 }
 
-// 角色覆盖硬约束（凡画面可见角色都必须列入 characters，防参考图缺失画错）
 export function characterCoverageRule() {
   return '【角色覆盖硬约束】characters 必须包含本镜画面中【出现的所有角色】，不只是说话或做主动作的角色——'
     + '凡 Airlock 继承的上一镜角色、最终画面中可见的角色，都必须列入，否则该角色会缺失参考图被画错。'
 }
 
-// 【图像六模块】结构定义（创作/补全统一版）
-// 注意：这是给生图/生视频模型看的画面描述，与出片时的【H3 官方六段】是两套结构，见文件头说明。
-// 历史坑：模块2/3 早期写成「中文描述原文」示例，模型直接照抄中文进英文正文；
-//         现要求逐字使用 description_en / summary_en，无英文则改写成英文。
 export function integratedModulesRule() {
   return '【图像六模块】按模块1~模块6 顺序输出（这是画面描述结构，不是出片 prompt 的结构）：\n'
     + '模块1【镜头声明】[Shot X] [画风声明]. [机位 wide establishing shot/medium shot/close-up] [距离 大全景/全景/中距离/近景/特写] [角度 正前方平视/45°侧视/正侧方/俯拍/仰拍] [运动 static/slow push in/gentle pan/tracking shot].\n'
@@ -71,12 +43,6 @@ export function integratedModulesRule() {
     + '  模块6【最终画面】The final frame: [完整复刻 finalFrame 字段内容：角色精确位置朝向 + 道具精确位置状态 + 环境光照 + 表情]'
 }
 
-// 画风统一铁律（V12，2026-09-12）：全片任何镜头不得切换画风。
-// 背景实锤：第1集武戏段 5-3 分镜写了"写实CGI定格"，出片又叠加"双调性"画风常量，
-// 8 镜全被拉去写实 CGI，成片"像换了部片子"，全段返工（overview.md 09-12 晚）。
-// 核心结论：剧情里的"变强/异变/变身/暴怒"只能用【画面内容】表达（体型暴涨/毛发炸立/红眼/蒸汽/环境特效），
-// 绝不能用【切换画风】表达——模型拿到"写实/CG/photoreal"就会把整镜拉离项目画风，参考图救不回来。
-// 校验侧：storyboardValidator.js V12（STYLE_POISON，错误级，喂回重试）。
 export function styleLockRule() {
   return '\n\n【画风统一铁律（与台词铁律同级，违反即输出无效）】\n'
     + '1. 全片所有镜头（含武戏/变身/异变/回忆/梦境）必须使用同一画风——即项目指定的画风，禁止任何镜头切换到其他画风。\n'
@@ -85,13 +51,6 @@ export function styleLockRule() {
     + '4. "压迫感/重量感"等演出需求写成画面与动作语言（towering scale / real weight and inertia），不得借道画风切换。'
 }
 
-// Airlock 跨镜继承规则（创作模板专用）
-//
-// ⚠️ 历史坑（务必保持本函数「不含可被复述的中文完整句子」）：
-// 旧版把 Airlock 模板写成「英文句子 + 中文否定约束」的混排示例，模型会【逐字照抄】整段，
-// 于是中文导演指令泄漏进了 15/18 个镜的 integrated_multimodal_description，
-// 并在 H3 出片时被当成台词念出来（AGENTS.md 记录过 shot 86 被念稿事故）。
-// 因此：模板必须 100% 英文；中文只允许出现在「规则说明/检查项」里，不得构成可复述的完整句。
 export function airlockRule() {
   return '【Airlock 跨镜继承规则】\n'
     + '- 整个剧本的第一个镜头不需要 Airlock 开头。\n'
@@ -104,13 +63,10 @@ export function airlockRule() {
     + '- 自检：Airlock 段内不得出现任何中文字符（该段本身也不应包含台词）。'
 }
 
-// 时间轴规则（创作模板专用；规整模板的时间轴逻辑依赖用户给定时长，见其模板内联说明）
 export function timelineRule() {
   return '时间轴规则：第一个镜头 startTime=0，后续镜头 startTime=上一镜 endTime，连续不重叠，不留空档。'
 }
 
-// LLM 行为边界（V2.3 llm_boundary 落地）：LLM 负责理解/创作/补充，但不可覆盖硬规则。
-// 创作型模板在 system prompt 中引用，作为最高优先级行为红线。
 export function llmBoundaryRule() {
   return '\n\n【LLM 行为边界（红线，优先级最高，违反即视为输出无效）】\n'
     + '允许：补充合理动作、优化镜头表达、判断叙事单元与场次边界、选择景别与运镜、补充转场动作、优化对白表达、判断情绪强弱。\n'
@@ -118,12 +74,6 @@ export function llmBoundaryRule() {
     + '删减或跳过剧本已有场次、镜头时长超出规定范围、输出资产清单外自造的资产名、在 integratedMultimodalDescription 中编造资产清单没有的外貌或环境特征。'
 }
 
-// 单镜动作密度硬约束（V3 出片对齐）：时长换不来动作数，动作一多 H3 必糊。
-// 背景：实测「雪山大战白熊」1-6 镜 8 秒塞 5 动作 + 3 句台词，出片动作被优化器截短后糊掉。
-// 核心结论：H3 单镜能稳定演准的核心动作约 2~3 个，超过即丢动作；多角色同时发力必须拆镜。
-// 2026-09-19 第五轮对齐：旧条款只写"核心动作 ≤2~3 个"，与校验侧 ACTION_DENSITY_HIGH
-// （肢体动作动词 ÷ 时长 ≤0.6）是两套口径，模型无法自检——第2集重提 35 镜实测 7 条密度告警，
-// 模型按"核心动作 4 个"自认合格、按 QC 口径却是 1.1 个/秒。现补第 5/6 条把上限写成同口径可数式。
 export function actionDensityRule() {
   return '\n\n【单镜动作密度硬约束（与台词铁律同级，违反即输出无效）】\n'
     + '1. 单镜核心动作数 ≤2~3 个。核心动作 = 一个角色完成一个完整动作单元（「扑抱」「抡拳」「甩头」「竖起围巾」各算一个）。'
@@ -141,16 +91,6 @@ export function actionDensityRule() {
     + '合并是为了「一个完整视觉任务一镜到底」，不是把两镜的内容倒进一镜——只并镜号不删动作，等于把两镜的负荷叠到一条时间轴上，出片只会更糊。'
 }
 
-// 镜头语言硬约束（电影感规则，2026-09-18 升级为七层美学心法）：
-// 管"文戏节拍"与"景别节奏"——actionDensityRule 只管武戏发力动作，
-// 不管叙事节拍，旧 2-1 一镜塞六拍（脚滑/雪块滑落/耳朵一动/惊起怒吼/雪崩/缩团）就是钻了这个空子；
-// 旧场1~场4 五镜全远景平推、布布勇气台词"别怕……有我在！"在中景里指甲盖大，同族根因。
-// 校验侧：storyboardValidator.js V11（EMOTION_SHOT_TOO_WIDE / SCENE_SHOTTYPE_FLAT / MULTI_BEAT_SUSPECT）+
-//         L4 REACTION_SHOT_MISSING（2026-09-18 P0）+
-//         L2 LIGHT_DIRECTION_FLIP / L5 MULTI_CAMERA_MOVE / L5 ACTION_CAMERA_MISMATCH（2026-09-18 P2）。
-// 背景实锤：2026-09-12 第1集场1~场4 两轮拆镜手术（一拍一镜+景别节奏）后，成片从"动态PPT"变成质量基准版。
-// 2026-09-18 升级：旧 MULTI_BEAT 纯靠连接词≥3，模型不用连接词也能塞多拍（"她看见熊，缩肩，转头就跑"），
-//                  第1集42镜13条真实多拍旧规则零报；升级三信号后全中。
 export function cinematicGrammarRule() {
   return '\n\n【镜头语言硬约束（七层美学心法·L1/L2/L4/L5，与台词铁律同级，违反即输出无效）】\n'
     + '1. 一拍一镜（L1）：一个镜头只承载一个叙事节拍。叙事节拍 = 一个完整视觉任务（发现 / 反应 / 动作 / 情绪之一）。'
@@ -191,8 +131,6 @@ export function cinematicGrammarRule() {
     + '8. 长镜名分（≥8秒）：长镜必须有明确设计意图——运镜在推进（缓慢推近落到表情/细节）、情绪在沉淀（写明 micro-movement 与环境声）、或空间在揭示（横摇/拉远展示新信息）。禁止"四无死画面"：长镜 + 远景/全景 + 固定机位 + 无台词，观众会走神。无台词长镜若用固定机位，景别必须收到中景/近景。开场镜除外——开场镜先服从钩子规则（集级叙事第1条），不得以"情绪沉淀"为名分做慢热长镜；开场需要长镜时，钩子（冲突/悬念/危险/异常）必须与建境同镜在画面里。\n'
 }
 
-// 机位朝向硬约束（V4 出片对齐）：朝向必须落成结构化字段 + 四者一致，否则 H3 首帧锚定错朝向后无法纠正。
-// 背景：1-1 "顺着小熊的视线推近" 分镜图却画正面、角色卡又塞了正面特征，导致成片全程面向镜头。
 export function cameraAngleRule() {
   return '\n\n【机位朝向硬约束（camera_angle，与台词铁律同级，违反即输出无效）】\n'
     + '1. 每个镜头必须输出 camera_angle 字段，取值限定六选一：正面 / 侧面 / 背面 / 过肩 / 俯拍 / 仰拍。\n'
@@ -201,12 +139,6 @@ export function cameraAngleRule() {
     + '4. 分镜图（frame）的构图朝向必须与 camera_angle 一致；角色 description 不得出现该朝向看不见的特征（背面镜头禁止"黑点小眼/粉腮红/粉嘴鼻/领结/腮红"等正面专属特征）。'
 }
 
-// 画面地理硬约束（Frame Geography）：角色的画面侧位与视线必须可机读、可跨镜校验。
-// 背景：camera_angle 只解决「相机在哪」，「角色在画面哪半边、脸朝哪」此前只靠 Airlock
-// 复制自然语言兜底，无校验可拦（1-1「背对偷看」变正面合影的同族根因）。
-// 参考业界共识（Hailuo 官方 Shot-Reverse-Shot Spatial Logic / FAIM Frame Map / Versely AXIS 块）：
-// 模型执行的是画面描述而不是规则名，因此侧位与视线必须写成明确的画面语言。
-// 注意：相对坐标（to her left）有歧义——她的左还是观众的左？一律以画框为参照。
 export function frameGeographyRule() {
   return '\n\n【画面地理硬约束（Frame Geography，与台词铁律同级，违反即输出无效）】\n'
     + '1. 绝对画面坐标：finalFrame 与模块6【最终画面】中每个可见角色必须声明画面侧位，用英文绝对坐标 at frame left / at frame right / at center frame；禁止用相对坐标替代（to her left / on his right 这类表述有歧义——角色自己的左还是观众的左？）。靠近道具/环境的位置描述可保留作补充，但不能替代画面侧位声明。\n'
@@ -216,8 +148,6 @@ export function frameGeographyRule() {
     + '5. 换空间必须交代位移（跨场同样适用）：上一场结束角色在 A 地、下一场开场角色已在 B 地时，必须在下一场首镜的 description 与模块4 时间轴里写出位移过程（如"沿崖壁绕下河谷，来到断桥边的浅滩"），不能凭空换空间——观众会直接问"人怎么过来的"。\n'
     + '6. 跨场侧位翻转也要给交代：换场时角色画面侧位可以与上一场不同（新空间可以重新建立轴线），但若与上一场末镜相反，同样要在本镜模块4 里写出显式走位（如 walks to frame right / 从画面左侧走到右侧），并在 description 里点明方向变化——否则会被判成越轴。\n'}
 
-// 集级叙事结构（V2.3 episode/retention engine 落地）：开场钩子、对话信息密度、伏笔回收、集末卡点。
-// 背景：创作型 LLM 因果逻辑够但缺钩子意识——实测剧情"提出爬大雪坡→后续全程无回扣"、开场三镜 18 秒静态对话零冲突。
 export function episodeStructureRule() {
   return '\n\n【集级叙事结构（硬约束，与台词铁律同级）】\n'
     + '1. 开场钩子：第一镜必须在 3 秒内建立冲突/悬念/危险/异常之一，禁止以纯氛围建境开场超过 4 秒；环境交代必须与钩子同镜完成（例：第 1 镜就是"行进中猛然发现前方雪地里躺着一头巨熊"）。\n'
@@ -241,13 +171,6 @@ export function episodeStructureRule() {
     + '推近是强调手段，全片不超过 6 次——用到第十次就不叫强调了。'
 }
 
-/**
- * 集级镜头语言规格注入
- * @param {string} notes - episodes.director_notes（空串返回 ''，不改变原行为）
- * @param {object} opts
- * @param {'strict'|'gentle'} opts.mode - strict=创作/补全（硬约束，优先级最高）；
- *        gentle=文件规整（上下文校准：只校准措辞，不虚构/不反转用户原意）
- */
 export function directorNotesPrompt(notes, { mode = 'strict' } = {}) {
   const spec = String(notes || '').trim()
   if (!spec) return ''

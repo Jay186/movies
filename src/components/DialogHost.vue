@@ -1,17 +1,4 @@
 <script setup>
-/**
- * DialogHost（2026-09-16）：全局唯一的弹窗渲染宿主。
- *
- * 职责：
- *  - 渲染 confirm 队列的队首（一次只显示一个，不叠弹）
- *  - 渲染右下角 toast 队列
- *  - 处理焦点管理：打开时聚焦到「安全的那一侧」，关闭时把焦点还给原来的元素
- *
- * 焦点策略（关键）：
- *   普通操作 → 聚焦主按钮（回车即确认，快速路径）
- *   警告/危险操作 → 聚焦「取消」。回车=取消，想确认必须主动移过去点/按 Tab。
- *   这样「习惯性一路回车」的人不会把不可逆操作点出去。
- */
 import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { dialogState, dismissToast, _settleConfirm } from '../services/dialog'
 
@@ -20,7 +7,6 @@ const toasts = dialogState.toasts
 
 const current = computed(() => confirmQueue.value[0] || null)
 const isDanger = computed(() => current.value?.tone === 'danger')
-// 危险/警告默认焦点落在「取消」上
 const focusCancelFirst = computed(() => ['danger', 'warn'].includes(current.value?.tone))
 
 const dialogEl = ref(null)
@@ -28,7 +14,6 @@ const cancelBtn = ref(null)
 const confirmBtn = ref(null)
 let restoreFocusTo = null
 
-// ── 配色：不同危险等级 → 图标与主按钮 ──
 const TONE = {
   normal: { wrap: 'border-info/45 bg-info/15 text-info', solid: 'bg-accent text-black hover:bg-accent-hover', icon: 'info' },
   warn: { wrap: 'border-warn/45 bg-warn/15 text-warn', solid: 'bg-warn text-black hover:bg-warn/85', icon: 'warn' },
@@ -56,7 +41,6 @@ function onKeydown(e) {
     settle(false)
     return
   }
-  // 焦点陷阱：Tab 在弹窗内循环，不跑到背后的页面上
   if (e.key === 'Tab') {
     const nodes = [cancelBtn.value, confirmBtn.value].filter(Boolean)
     if (nodes.length < 2) return
@@ -72,7 +56,6 @@ function onKeydown(e) {
   }
 }
 
-// 弹窗开启/切换时：锁滚动、抢焦点、记下归还点
 watch(current, async (val, old) => {
   if (val && !old) {
     restoreFocusTo = document.activeElement
@@ -82,12 +65,11 @@ watch(current, async (val, old) => {
   if (!val && old) {
     document.removeEventListener('keydown', onKeydown, true)
     document.body.style.overflow = ''
-    try { restoreFocusTo?.focus?.() } catch { /* 原元素可能已卸载 */ }
+    try { restoreFocusTo?.focus?.() } catch {  }
     restoreFocusTo = null
   }
   if (val) {
     await nextTick()
-    // 队列里换了下一个弹窗时也要重新落焦
     ;(focusCancelFirst.value ? cancelBtn.value : confirmBtn.value)?.focus()
   }
 })
@@ -105,7 +87,6 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <!-- ═══ 确认框 ═══ -->
   <div
     v-if="current"
     class="fixed inset-0 z-[100] flex items-center justify-center p-5"
@@ -121,7 +102,6 @@ onBeforeUnmount(() => {
       class="relative w-full max-w-[440px] overflow-hidden rounded-card border border-border bg-bg-card shadow-pop animate-fade-up"
     >
       <div class="p-5">
-        <!-- 标题行：危险等级图标 + 标题 -->
         <div class="flex items-start gap-3">
           <span
             class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border"
@@ -141,13 +121,11 @@ onBeforeUnmount(() => {
           <h2 id="dlg-title" class="text-[14px] font-medium leading-6 text-text-primary">{{ current.title }}</h2>
         </div>
 
-        <!-- 说明：一句话讲清后果 -->
         <p
           v-if="current.description"
           class="ml-9 mt-1.5 whitespace-pre-line text-[12px] leading-relaxed text-text-secondary"
         >{{ current.description }}</p>
 
-        <!-- 结构化明细：键值对齐，关键数字（计费/数量）可单独标色 -->
         <div
           v-if="current.details.length"
           class="ml-9 mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 rounded-btn border border-border bg-bg-primary px-3 py-2.5"
@@ -165,7 +143,6 @@ onBeforeUnmount(() => {
           </template>
         </div>
 
-        <!-- 额外次要动作：给用户一条「不做这件事，先去做别的」的出路 -->
         <div v-if="current.extraActions.length" class="ml-9 mt-2.5 flex flex-wrap gap-2">
           <button
             v-for="a in current.extraActions"
@@ -176,7 +153,6 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- 按钮区：取消在左、主操作在右（主操作用动作词，不用「确定」） -->
       <div class="flex items-center justify-end gap-2 border-t border-border bg-bg-secondary/50 px-5 py-3">
         <button
           ref="cancelBtn"
@@ -193,7 +169,6 @@ onBeforeUnmount(() => {
     </div>
   </div>
 
-  <!-- ═══ 提示条：右下角堆叠（不打断操作） ═══ -->
   <div
     class="pointer-events-none fixed bottom-5 right-5 z-[95] flex w-[360px] max-w-[calc(100vw-2.5rem)] flex-col gap-2"
     aria-live="polite"
@@ -204,7 +179,6 @@ onBeforeUnmount(() => {
       :key="t.id"
       class="pointer-events-auto flex overflow-hidden rounded-panel border border-border bg-bg-card shadow-pop animate-fade-up"
     >
-      <!-- 左侧语义色条：一眼分辨成/败，不靠读文字 -->
       <span class="w-1 shrink-0" :class="toastTone(t.type).bar"></span>
       <div class="flex min-w-0 flex-1 gap-2.5 px-3.5 py-3">
         <div class="min-w-0 flex-1">
@@ -222,7 +196,6 @@ onBeforeUnmount(() => {
             @click="t.action.onClick?.(); dismissToast(t.id)"
           >{{ t.action.label }}</button>
         </div>
-        <!-- 错误必须手动关：失败原因错过就没了，不能自动消失 -->
         <button
           class="shrink-0 self-start rounded-tag p-0.5 text-text-muted transition hover:text-text-primary"
           :title="t.type === 'error' ? '关闭（错误提示不会自动消失）' : '关闭'"

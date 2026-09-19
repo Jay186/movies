@@ -5,7 +5,7 @@ import { toastWarn, toastError } from '../services/dialog'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  type: { type: String, default: 'character' }, // character | scene | prop
+  type: { type: String, default: 'character' }, 
 })
 
 const emit = defineEmits(['update:modelValue', 'uploaded'])
@@ -44,7 +44,6 @@ function handleFileChange(e) {
     return
   }
   selectedFile.value = file
-  // 生成预览
   const reader = new FileReader()
   reader.onload = () => { previewUrl.value = reader.result }
   reader.readAsDataURL(file)
@@ -63,11 +62,8 @@ async function handleUpload() {
   }
   uploading.value = true
   try {
-    // 读取文件转 base64
     const base64 = await readFileAsBase64(selectedFile.value)
-    // 名称：用户填了用用户的，没填用文件名（去掉扩展名）
     const finalName = name.value.trim() || selectedFile.value.name.replace(/\.[^/.]+$/, '')
-    // 上传（后端存入"我的素材"并返回新记录，供选择器在替换场景下自动应用）
     const res = await api.uploadLibraryAsset(props.type, finalName, base64)
     emit('uploaded', res?.data || null)
     close()
@@ -97,7 +93,6 @@ function close() {
   <Teleport to="body">
     <div v-if="modelValue" class="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" @click.self="close">
       <div class="w-full max-w-lg overflow-hidden rounded-2xl border border-border bg-bg-primary shadow-2xl">
-        <!-- 标题栏 -->
         <div class="flex items-center justify-between border-b border-border px-6 py-4">
           <h2 class="text-base font-medium text-white">上传图片</h2>
           <button class="flex h-7 w-7 items-center justify-center rounded-md text-text-muted transition hover:bg-bg-hover hover:text-white" @click="close">
@@ -106,18 +101,15 @@ function close() {
         </div>
 
         <div class="px-6 py-5">
-          <!-- 名称 -->
           <div class="mb-5">
             <label class="mb-1.5 block text-xs text-text-secondary">名称</label>
             <input v-model="name" class="w-full rounded-lg border border-border bg-bg-secondary px-3 py-2 text-sm text-white placeholder:text-text-muted focus:border-accent focus:outline-none" placeholder="素材名称（建议填写，不填则显示为「我的素材 #N」）" />
           </div>
 
-          <!-- 选择图片 -->
           <div class="mb-2">
             <label class="mb-1.5 block text-xs text-text-secondary">选择图片</label>
             <input ref="fileInput" type="file" accept="image/*" class="hidden" @change="handleFileChange" />
 
-            <!-- 未选择：虚线框 -->
             <div v-if="!selectedFile" class="flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-border py-8 transition hover:border-accent/50" @click="triggerFileSelect">
               <div class="flex items-center gap-2 text-text-muted">
                 <svg class="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4v16m8-8H4" /></svg>
@@ -125,7 +117,6 @@ function close() {
               </div>
             </div>
 
-            <!-- 已选择：预览图 -->
             <div v-else class="relative overflow-hidden rounded-lg border border-border">
               <img :src="previewUrl" alt="预览" class="max-h-48 w-full object-contain bg-white" />
               <button class="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white backdrop-blur transition hover:bg-red-500" @click="clearFile">
@@ -138,7 +129,6 @@ function close() {
           </div>
         </div>
 
-        <!-- 底部按钮 -->
         <div class="flex justify-end gap-3 border-t border-border px-6 py-4">
           <button class="rounded-lg border border-border px-5 py-2 text-sm text-text-secondary transition hover:border-border-light hover:text-white" @click="close">取消</button>
           <button class="rounded-lg bg-accent px-5 py-2 text-sm font-medium text-black transition hover:bg-accent-hover disabled:opacity-50" :disabled="uploading || !selectedFile" @click="handleUpload">

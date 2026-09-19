@@ -20,9 +20,9 @@ const loadError = ref('')
 const showConfirmDialog = ref(false)
 const extracting = ref(false)
 const showCreateDialog = ref(false)
-const editingStyle = ref(null) // 非空 = 编辑模式
+const editingStyle = ref(null) 
 const showDeleteDialog = ref(false)
-const deletingStyle = ref(null) // 待删除风格
+const deletingStyle = ref(null) 
 const deleting = ref(false)
 
 onMounted(async () => {
@@ -65,7 +65,6 @@ const filteredStyles = computed(() => {
 
 const selectedStyle = computed(() => styles.value.find((s) => s.key === selectedKey.value))
 
-// 预计提取资产数：从当前剧本解析角色与场景
 const assetEstimate = computed(() => {
   const text = store.scriptContent || ''
   const roleSet = new Set()
@@ -81,7 +80,6 @@ const assetEstimate = computed(() => {
   return { roles: roleSet.size, scenes: Math.max(sceneCount, store.scenes.length) }
 })
 
-// 已提取状态：设定页资产非空即视为已提取过，避免用户切回本页时误以为需要重新提取
 const extractedCounts = computed(() => ({
   characters: store.characters.length,
   scenes: store.assetScenes.length,
@@ -91,12 +89,10 @@ const hasExtractedAssets = computed(
   () => extractedCounts.value.characters + extractedCounts.value.scenes + extractedCounts.value.props > 0
 )
 
-// 提取状态：只由「剧本是否变化」驱动 —— 提取的是角色/场景/道具名单，与画风无关。
-// 换画风只影响后续生成图片的风格（生成时自动带上），不需要重新提取资产。
 const extractState = computed(() => {
   if (!hasExtractedAssets.value) return 'none'
   const fp = store.lastExtractInfo
-  if (!fp) return 'done' // 有资产但无指纹（历史数据），按已完成处理
+  if (!fp) return 'done' 
   const scriptChanged = fp.script !== (store.scriptContent || '')
   return scriptChanged ? 'script-changed' : 'fresh'
 })
@@ -107,7 +103,6 @@ const extractStateHint = computed(() =>
     : '剧本未改动，无需重复提取，可直接前往设定页查看'
 )
 
-// 换画风说明（不参与提取判定）：提示新画风的生效方式
 const styleSwitchHint = computed(() => {
   const fp = store.lastExtractInfo
   const cur = store.currentStyle?.label || ''
@@ -115,19 +110,15 @@ const styleSwitchHint = computed(() => {
   return `画风已更换为「${cur}」，新画风将在后续生成图片时自动应用；已生成的图片仍为原画风，可在设定页重新生成`
 })
 
-// 剧本或画风在上次提取后有变化 → 流程上必须先重新提取，主按钮引导提取而非下一步
 const needsExtract = computed(() =>
   ['script-changed', 'style-changed', 'both-changed'].includes(extractState.value)
 )
 
 function selectStyle(style) {
   selectedKey.value = style.key
-  // 选中即持久化：画风是「选择」不是「动作」，与提取资产解耦
-  // 设定页/分镜页只展示当前画风（不可修改），改画风一律回到本页
   store.setStyle(style)
 }
 
-// 显式确认后才提取：画风决策与扣费动作解耦（画风已在 selectStyle 时保存）
 async function confirmExtract() {
   showConfirmDialog.value = false
   extracting.value = true
@@ -141,7 +132,6 @@ async function confirmExtract() {
   }
 }
 
-// 新建画风成功后：刷新本地 styles/categories、自动切到「我的风格」分类、选中新建的画风
 async function handleStyleCreated(style) {
   try {
     const data = await api.getStyles()
@@ -152,10 +142,8 @@ async function handleStyleCreated(style) {
       presets: c.presets,
     }))
     styles.value = data.categories.flatMap((c) => c.presets.map((p) => ({ ...p, category: c.key })))
-    // 切到「我的风格」分类（新建画风会落在这里），便于用户立刻看到新画的
     const custom = categories.value.find((c) => c.key === 'custom')
     if (custom) activeCategory.value = custom.key
-    // 自动选中新画风并持久化
     if (style?.key) {
       selectedKey.value = style.key
       store.setStyle({ ...style, category: style.category || 'custom' })
@@ -165,7 +153,6 @@ async function handleStyleCreated(style) {
   }
 }
 
-// 编辑画风成功后：刷新列表，保持选中状态
 async function handleStyleUpdated(style) {
   try {
     const data = await api.getStyles()
@@ -176,7 +163,6 @@ async function handleStyleUpdated(style) {
       presets: c.presets,
     }))
     styles.value = data.categories.flatMap((c) => c.presets.map((p) => ({ ...p, category: c.key })))
-    // 若编辑的正是当前选中画风，用最新数据更新 store（保留 category）
     if (style?.key && style.key === selectedKey.value) {
       store.setStyle({ ...style, category: style.category || 'custom' })
     }
@@ -185,25 +171,21 @@ async function handleStyleUpdated(style) {
   }
 }
 
-// 打开新建：确保清掉编辑态，避免复用上次 editStyle
 function openCreate() {
   editingStyle.value = null
   showCreateDialog.value = true
 }
 
-// 打开编辑：带上当前风格
 function openEdit(style) {
   editingStyle.value = style
   showCreateDialog.value = true
 }
 
-// 请求删除：弹确认框
 function askDelete(style) {
   deletingStyle.value = style
   showDeleteDialog.value = true
 }
 
-// 确认删除：调后端 -> 刷新列表 -> 若删的是当前选中则回退到首个系统风格
 async function confirmDelete() {
   const style = deletingStyle.value
   if (!style) return
@@ -219,7 +201,6 @@ async function confirmDelete() {
     }))
     styles.value = data.categories.flatMap((c) => c.presets.map((p) => ({ ...p, category: c.key })))
     if (selectedKey.value === style.key) {
-      // 选中被删：优先保持「我的风格」分类存在、否则切到首个有风格的分类
       const custom = categories.value.find((c) => c.key === 'custom')
       if (custom && custom.presets.length) {
         selectedKey.value = custom.presets[0].key
@@ -243,7 +224,6 @@ async function confirmDelete() {
 
 <template>
   <div class="flex h-full w-full flex-col">
-    <!-- 顶部工具栏 -->
     <div class="flex shrink-0 items-center justify-between border-b border-border px-6 py-3">
       <div class="flex items-center gap-4">
         <button
@@ -266,9 +246,7 @@ async function confirmDelete() {
       </div>
     </div>
 
-    <!-- 主体：分类 + 风格网格 + 预览 -->
     <div class="flex min-h-0 flex-1 overflow-hidden">
-      <!-- 左：分类 + 搜索 -->
       <div class="flex w-48 shrink-0 flex-col border-r border-border bg-bg-secondary/50">
         <div class="p-3">
           <input
@@ -288,7 +266,6 @@ async function confirmDelete() {
           >
             <span>{{ cat.label }}</span>
             <span class="flex items-center gap-1.5">
-              <!-- 「我的风格」分类右侧加 + 入口：点击直接弹新建画风，比跑到右上角更近 -->
               <span
                 v-if="cat.key === 'custom'"
                 role="button"
@@ -304,7 +281,6 @@ async function confirmDelete() {
         </div>
       </div>
 
-      <!-- 中：风格网格 -->
       <div class="min-w-0 flex-1 overflow-y-auto p-4">
         <div v-if="loading" class="flex h-40 items-center justify-center text-sm text-text-muted">加载风格中...</div>
         <div v-else-if="loadError" class="flex h-40 items-center justify-center text-sm text-red-400">{{ loadError }}</div>
@@ -334,7 +310,6 @@ async function confirmDelete() {
                   <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
                 </div>
 
-                <!-- 自定义风格：hover 显示「编辑 / 删除」操作 -->
                 <div
                   v-if="style.source === 'USER'"
                   class="absolute left-1.5 top-1.5 flex gap-1 opacity-0 transition group-hover:opacity-100"
@@ -354,7 +329,6 @@ async function confirmDelete() {
                     <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2m2 0v14a1 1 0 01-1 1H6a1 1 0 01-1-1V6h14z" /></svg>
                   </button>
                 </div>
-                <!-- 自定义标记 -->
                 <span
                   v-if="style.source === 'USER'"
                   class="absolute bottom-1.5 left-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white backdrop-blur"
@@ -365,7 +339,6 @@ async function confirmDelete() {
               </div>
             </div>
 
-            <!-- 「我的风格」分类：永远多一个「新增风格」占位卡片，空时展示引导 -->
             <div
               v-if="activeCategory === 'custom'"
               class="group cursor-pointer overflow-hidden rounded-xl border-2 border-dashed border-border bg-bg-secondary/30 transition hover:border-accent/50 hover:bg-bg-secondary"
@@ -390,7 +363,6 @@ async function confirmDelete() {
         </template>
       </div>
 
-      <!-- 右：预览 + 显式提取 -->
       <div class="flex w-64 shrink-0 flex-col border-l border-border bg-bg-secondary/50 p-4">
         <div v-if="selectedStyle" class="flex flex-1 flex-col">
           <div class="aspect-square overflow-hidden rounded-xl border border-border bg-bg-primary">
@@ -412,7 +384,6 @@ async function confirmDelete() {
             <p class="mt-1 text-xs leading-relaxed text-text-secondary">{{ selectedStyle.prompt }}</p>
           </div>
 
-          <!-- 已提取状态：明确告知资产现状，剧本/画风变化时给出重新提取建议 -->
           <div
             v-if="hasExtractedAssets"
             class="mb-3 rounded-lg border px-3 py-2 text-xs"
@@ -441,7 +412,6 @@ async function confirmDelete() {
             </div>
           </div>
 
-          <!-- 预计提取资产 -->
           <div class="mb-3 flex items-center gap-2 rounded-lg border border-border bg-bg-primary px-3 py-2 text-xs">
             <span class="text-text-muted">预计提取：</span>
             <span class="font-medium text-white">{{ assetEstimate.roles }} 角色</span>
@@ -449,7 +419,6 @@ async function confirmDelete() {
             <span class="font-medium text-white">{{ assetEstimate.scenes }} 场景</span>
           </div>
 
-          <!-- 剧本/画风已变：主 CTA 是重新提取（先更新资产再往下走），跳过是次要入口 -->
           <template v-if="needsExtract">
             <button
               class="mt-4 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-black transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
@@ -466,7 +435,6 @@ async function confirmDelete() {
             </button>
           </template>
 
-          <!-- 已提取且内容未变：主 CTA 是下一步，重新提取降级为次要入口 -->
           <template v-else-if="hasExtractedAssets">
             <button
               class="mt-4 w-full rounded-xl bg-accent px-4 py-2.5 text-sm font-medium text-black transition hover:bg-accent-hover"
@@ -483,7 +451,6 @@ async function confirmDelete() {
             </button>
           </template>
 
-          <!-- 未提取：显式扣费按钮，琥珀色，点击前弹确认 -->
           <template v-else>
             <button
               class="mt-4 w-full rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-black transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
@@ -506,7 +473,6 @@ async function confirmDelete() {
       </div>
     </div>
 
-    <!-- 提取确认弹窗：余额 / 消耗 / 剩余 一目了然 -->
     <Teleport to="body">
       <div
         v-if="showConfirmDialog"
@@ -545,7 +511,6 @@ async function confirmDelete() {
       </div>
     </Teleport>
 
-    <!-- 新建 / 编辑画风弹窗 -->
     <CreateStyleDialog
       v-model="showCreateDialog"
       :edit-style="editingStyle"
@@ -553,7 +518,6 @@ async function confirmDelete() {
       @updated="handleStyleUpdated"
     />
 
-    <!-- 删除确认弹窗 -->
     <Teleport to="body">
       <div
         v-if="showDeleteDialog"

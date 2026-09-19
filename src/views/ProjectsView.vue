@@ -92,7 +92,6 @@ async function confirmDelete() {
   try {
     await api.deleteProject(project.id)
     projects.value = projects.value.filter((p) => p.id !== project.id)
-    // 若删除的是当前记忆中的项目，清理本地记忆，避免下次刷新误选已删除项目
     try {
       if (Number(window.localStorage.getItem('story-current-project-id')) === project.id) {
         window.localStorage.removeItem('story-current-project-id')

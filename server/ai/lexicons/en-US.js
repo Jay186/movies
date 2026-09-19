@@ -1,8 +1,3 @@
-// 英文语言包（en-US）—— 验证算法与语言解耦的示例
-//
-// 本文件的存在本身就是通用性证明：同一套算法，换一个语言包即可服务英文剧本。
-// 注意：本包是**结构示例**，词表为最小可用集（英文分词与中文差异大，
-// 实战需按项目语料扩充——这正是词表该在数据层而非算法层的原因）。
 export default {
   id: 'en-US',
   label: 'English',
@@ -40,9 +35,6 @@ export default {
     'emerge from', 'emerges from', 'break through', 'breaks through', 'pierce through',
   ],
 
-  // 渐变锚点：证明"移动过程被展开写了"（与 zh-CN 的 gradualMarkers 同义）
-  // ⚠️ 同样不收 "first / then / next / finally" 这类通用递进连词——
-  // 它们在任何叙事里都会出现，会让"过程未展开"被误豁免。
   gradualMarkers: [
     'step by step', 'one by one', 'little by little', 'bit by bit', 'layer by layer',
     'more and more', 'closer and closer', 'farther and farther', 'gradually', 'slowly',
@@ -52,7 +44,6 @@ export default {
     'more clearly', 'comes into focus', 'come into focus',
   ],
 
-  // 剧本结构识别（与 zh-CN 的 structure 同义，按英文剧本书写约定）
   structure: {
     sceneHeader: /^(scene|sc)\s*\d+/i,
     settingHead: /^(setting|location|space|environment|time)\s*[:：]/i,
@@ -64,10 +55,8 @@ export default {
     'int', 'ext', 'interior', 'exterior',
   ],
 
-  // 英文用空格分词，故"bad head"按整词判断（此处给空正则，由实现按词匹配）
   placeBadHead: /^(the|a|an|and|or|but|of|in|on|at|to|for|with|from|by|is|are|was|were)$/,
 
-  // 英文地点后缀多用整词，此处简化为常见地形/场所词尾
   placeTail: /(cliff|canyon|valley|forest|river|lake|sea|city|street|hall|room|yard|garden|field|mountain|island|bridge|shore|bank|road|path|gate|tower)$/,
 
   messages: {

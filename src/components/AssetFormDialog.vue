@@ -4,24 +4,23 @@ import { api } from '../services/api'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  type: { type: String, default: 'character' }, // character | scene | prop
+  type: { type: String, default: 'character' }, 
   projectId: { type: [Number, String], default: null },
 })
 const emit = defineEmits(['update:modelValue', 'create', 'select'])
 
-const tab = ref('manual') // manual | project
+const tab = ref('manual') 
 const loading = ref(false)
 const projectItems = ref([])
 const selectedIds = ref(new Set())
 
-// 手填表单
 const form = ref({
   name: '',
   role: '配角',
-  identity: '', // 主体人物
-  appearance: '', // 外貌特征
-  visualPrompt: '', // 视觉提示词（场景/道具）
-  outfits: [{ label: '主形象', desc: '' }], // 服饰
+  identity: '', 
+  appearance: '', 
+  visualPrompt: '', 
+  outfits: [{ label: '主形象', desc: '' }], 
 })
 
 const titles = {
@@ -47,7 +46,6 @@ const show = computed({
   set: (v) => emit('update:modelValue', v),
 })
 
-// 弹窗打开时重置
 watch(() => props.modelValue, (v) => {
   if (v) {
     tab.value = 'manual'
@@ -131,7 +129,6 @@ function close() {
   <Teleport to="body">
     <div v-if="show" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60" @click.self="close">
       <div class="flex max-h-[85vh] w-[560px] flex-col overflow-hidden rounded-2xl border border-border bg-bg-secondary shadow-2xl">
-        <!-- Header -->
         <div class="flex items-center justify-between border-b border-border px-6 py-4">
           <h3 class="text-base font-semibold text-white">{{ titles[type] }}</h3>
           <button class="text-text-muted hover:text-white" @click="close">
@@ -141,7 +138,6 @@ function close() {
           </button>
         </div>
 
-        <!-- Tabs -->
         <div class="flex gap-2 px-6 pt-4">
           <button
             class="rounded-lg px-5 py-2 text-sm font-medium transition"
@@ -159,11 +155,8 @@ function close() {
           </button>
         </div>
 
-        <!-- Content -->
         <div class="flex-1 overflow-y-auto px-6 py-4">
-          <!-- 手填新建 -->
           <div v-if="tab === 'manual'" class="space-y-4">
-            <!-- 名称 -->
             <div>
               <label class="mb-1.5 block text-sm text-text-secondary">
                 {{ nameLabels[type] }} <span class="text-red-500">*必填</span>
@@ -176,7 +169,6 @@ function close() {
               />
             </div>
 
-            <!-- 角色专属字段 -->
             <template v-if="type === 'character'">
               <div>
                 <label class="mb-1.5 block text-sm text-text-secondary">
@@ -200,7 +192,6 @@ function close() {
                   class="w-full resize-none rounded-lg border border-border bg-bg-primary px-3 py-2.5 text-sm text-white placeholder-text-muted outline-none focus:border-accent/50"
                 />
               </div>
-              <!-- 服饰 -->
               <div>
                 <div class="mb-1.5 flex items-center justify-between">
                   <label class="text-sm text-text-secondary">服饰（{{ form.outfits.length }}套）</label>
@@ -239,7 +230,6 @@ function close() {
               </div>
             </template>
 
-            <!-- 场景/道具：视觉提示词 -->
             <template v-else>
               <div>
                 <label class="mb-1.5 block text-sm text-text-secondary">
@@ -255,7 +245,6 @@ function close() {
             </template>
           </div>
 
-          <!-- 从项目选择 -->
           <div v-if="tab === 'project'" class="min-h-[200px]">
             <div v-if="loading" class="flex h-40 items-center justify-center text-sm text-text-muted">
               <svg class="mr-2 h-4 w-4 animate-spin text-accent" fill="none" viewBox="0 0 24 24">
@@ -294,7 +283,6 @@ function close() {
           </div>
         </div>
 
-        <!-- Footer -->
         <div class="flex justify-end gap-3 border-t border-border px-6 py-4">
           <button
             class="rounded-lg border border-border px-5 py-2 text-sm text-text-secondary transition hover:bg-bg-hover"

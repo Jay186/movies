@@ -68,7 +68,6 @@ function goManage() {
 
 <template>
   <div ref="rootRef" class="relative">
-    <!-- 触发按钮 -->
     <button
       type="button"
       class="flex h-7 items-center gap-2 rounded-md border bg-bg-secondary px-2.5 text-xs transition"
@@ -81,19 +80,15 @@ function goManage() {
       :title="currentEp ? `当前剧集：${displayName(currentEp)}（共 ${store.episodes.length} 集）` : ''"
       @click.stop="toggleOpen"
     >
-      <!-- 剧集切换图标 -->
       <svg class="h-3.5 w-3.5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V7a2 2 0 00-2-2H5a2 2 0 00-2 2m14 0H5" />
       </svg>
-      <!-- 当前剧集名 -->
       <span class="max-w-[10rem] truncate font-medium">
         {{ currentEp ? displayName(currentEp) : '加载中…' }}
       </span>
-      <!-- 集数小标 -->
       <span v-if="store.episodes.length > 0" class="rounded bg-bg-primary px-1.5 py-0.5 text-[10px] font-medium text-text-muted">
         {{ store.episodes.length > 1 ? `${store.currentEpisode} / ${store.episodes.length}` : '单集' }}
       </span>
-      <!-- 下拉箭头 -->
       <svg
         class="h-3 w-3 text-text-muted transition-transform duration-150"
         :class="{ 'rotate-180 text-accent': open }"
@@ -103,7 +98,6 @@ function goManage() {
       </svg>
     </button>
 
-    <!-- 下拉面板（仅切换） -->
     <Transition
       enter-active-class="transition duration-100 ease-out"
       enter-from-class="opacity-0 -translate-y-1"
@@ -117,12 +111,10 @@ function goManage() {
         class="absolute left-0 top-full z-50 mt-1.5 min-w-[14rem] overflow-hidden rounded-lg border border-border bg-bg-secondary shadow-2xl"
         @click.stop
       >
-        <!-- 分组标题 -->
         <div class="flex items-center justify-between px-3 pt-2 pb-1">
           <span class="text-[10px] font-semibold uppercase tracking-wider text-text-muted">切换剧集</span>
           <span class="text-[10px] text-text-muted">{{ store.episodes.length }} 集</span>
         </div>
-        <!-- 剧集列表 -->
         <div class="max-h-72 overflow-y-auto px-1 pb-1.5">
           <div
             v-for="ep in store.episodes"
@@ -136,7 +128,6 @@ function goManage() {
             :title="displayName(ep)"
             @click="onSwitch(ep)"
           >
-            <!-- 左侧：勾 / 集号 -->
             <span class="flex h-4 w-4 shrink-0 items-center justify-center">
               <svg
                 v-if="ep.id === store.currentEpisodeId"
@@ -147,11 +138,9 @@ function goManage() {
               </svg>
               <span v-else class="text-[10px] font-medium text-text-muted">{{ ep.episode_number }}</span>
             </span>
-            <!-- 剧名 -->
             <span class="flex-1 truncate">{{ displayName(ep) }}</span>
           </div>
         </div>
-        <!-- 底部中转：去剧集列表做新增 / 管理 -->
         <div class="border-t border-border">
           <button
             type="button"

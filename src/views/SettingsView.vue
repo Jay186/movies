@@ -29,47 +29,33 @@ const showAddDialog = ref(false)
 const dialogType = ref('character')
 const showLibraryPicker = ref(false)
 const libraryPickerType = ref('character')
-const replaceMode = ref(false) // true=替换当前卡片图片, false=添加新资产
-const replaceTarget = ref(null) // { type, id }
-// 详情编辑弹窗
+const replaceMode = ref(false) 
+const replaceTarget = ref(null) 
 const showDetailDialog = ref(false)
 const detailAsset = ref(null)
 const detailType = ref('character')
-const showScriptConfirmDialog = ref(false) // 剧本未确认提示弹窗
-const showStoryboardMethodDialog = ref(false) // 分镜方式选择弹窗
-const storyboardLoading = ref(false) // 分镜生成中
-const showImportDialog = ref(false) // 通用分镜脚本导入弹窗
-const fileInputRef = ref(null) // 文件上传input引用（旧JSON入口，保留兼容）
-const audioFileInput = ref(null) // 音频上传input引用
-const audioUploadTarget = ref(null) // 当前正在上传音频的角色
+const showScriptConfirmDialog = ref(false) 
+const showStoryboardMethodDialog = ref(false) 
+const storyboardLoading = ref(false) 
+const showImportDialog = ref(false) 
+const fileInputRef = ref(null) 
+const audioFileInput = ref(null) 
+const audioUploadTarget = ref(null) 
 
-// 生图模型：RunningHub / gpt-image-2（zikl）/ Visionary（gpt-image-2 / Nano Banana 系列）。
-// 全局唯一状态放 store（imageModel），设定页/分镜页共用同一选择，localStorage 记忆在 store 内完成
 
-// 自定义确认弹窗
 const showConfirmDialog = ref(false)
 const confirmConfig = ref({ title: '', message: '', confirmText: '确认', cancelText: '取消', onConfirm: null })
 
-// ── 场景 tab：多选删除（2026-09-16）──
-// 仅作用于「场景」tab；角色/道具 tab 的既有行为保持不变。
-const sceneMultiSelect = ref(false) // 场景多选模式
-const selectedSceneIds = ref([]) // 多选模式下选中的场景 id（生成中的不可选）
-// 组重画（doRefreshGroup）进行中的防重锁，同时让「多选」按钮在此期间不可误触。
-// 标题行的批量生成按钮已于 2026-09-17 删除（与组卡重复），此锁只服务组级批量。
+const sceneMultiSelect = ref(false) 
+const selectedSceneIds = ref([]) 
 const sceneBatchGenerating = ref(false)
 
-// 响应式 tabs count
 const tabs = computed(() => [
   { key: 'characters', label: '角色', count: store.characters.length },
   { key: 'scenes', label: '场景', count: store.assetScenes.length },
   { key: 'props', label: '道具', count: store.props.length },
 ])
 
-// ── 工具条三锚点重构（2026-09-17）──────────────────────────────────
-// 规则：一条横条只允许「一个左锚点 + 一个右锚点」，组内按语义成簇、簇间用 1px 分隔。
-//  ① 页面工具条：左=导航簇，右=生成配置簇（模型 + 画风）+ ⋯ 维护菜单
-//  ② 提示条：内联提示条（非卡片），异常态下的唯一「重新提取资产」主入口
-//  ③ 内容标题行：所有 tab 通用，消除切 tab 时的布局跳动
 const showMoreMenu = ref(false)
 const moreMenuRef = ref(null)
 
@@ -79,32 +65,20 @@ function onDocClickMore(e) {
   }
 }
 
-// ⋯ 菜单里的重新提取资产：assetsStale 为 false 时的手动兜底入口，
-// 有 stale 提示时走 ② 号条的橙色主按钮，保证同一动作只有一个主入口。
 function onMoreExtract() {
   showMoreMenu.value = false
   if (store.aiLoading) return
   store.extractAssets()
 }
 
-// 画风在 /art 页显式选择，设定页只做回显 + 跳转入口（不在这里做下拉改画风，
-// 因为换画风需要整条资产链路重跑，不是一次轻量切换）。
 function goStylePage() {
   router.push('/art')
 }
 
-// ── 「还等着生成」的数量口径（2026-09-17）────────────────────────
-// 标题行批量按钮已按布哥定案全删（缺图→成员卡「AI生成」单张出图；
-// 整组重画→组卡组级入口），本函数现在只喂「N 个待生成图片」pill。
-//
-// 「还等着生成」的唯一口径：无图 且 当前不在生成中。
-// 生成中的会被 store 跳过（见 batchGenerateAssetImages 里 targets 的过滤），
-// 所以 pill 上的数字必须把它们减掉，否则显示 3 张实际只跑 2 张。
 function countPending(list) {
   return list.filter((x) => !x.imageUrl && !store.generatingAssetIds.includes(x.id)).length
 }
 
-// 内容标题行数据：三个 tab 通用
 const tabMeta = computed(() => {
   const source =
     {
@@ -119,7 +93,6 @@ const tabMeta = computed(() => {
   }
 })
 
-// 查找某集角色对应的项目主设定使用集数（用于显示"项目库 · N 集共用"）
 function projectCharUsage(item) {
   if (!item.linkedToProject) return null
   const master = store.projectCharacters.find((p) => p.id === item.projectCharacterId)
@@ -128,8 +101,6 @@ function projectCharUsage(item) {
 }
 
 onMounted(() => {
-  // 剧本→画风的流程已迁移到独立画风步骤页（/art）：
-  // 确认剧本后跳 /art 选择画风并显式提取，此处不再自动弹画风选择器
   if (route.query.from === 'script') {
     router.replace({ query: { ...route.query, from: undefined, reconfirm: undefined } })
   }
@@ -142,7 +113,6 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClickMore)
 })
 
-// Esc：先关 ⋯ 菜单，再退场景多选（与项目其它页面多选交互保持一致）
 function onSceneEsc(e) {
   if (e.key !== 'Escape') return
   if (showMoreMenu.value) {
@@ -154,7 +124,6 @@ function onSceneEsc(e) {
   }
 }
 
-// 切换 tab 时退出场景多选，避免状态串到角色/道具 tab
 watch(activeTab, (val) => {
   if (val !== 'scenes') exitSceneMultiSelect()
 })
@@ -164,8 +133,6 @@ function goNext() {
     showScriptConfirmDialog.value = true
     return
   }
-  // 该集已有分镜则直接进入分镜页；「选择分镜方式」只在该集还没有任何分镜时弹出，
-  // 避免生成过分镜后每次经过设定页都被要求重新 AI 分镜
   if (store.storyboardScenes.length > 0) {
     router.push('/storyboard')
     return
@@ -183,8 +150,6 @@ const assetCollections = {
   prop: { key: 'props', list: () => store.props, save: api.saveProps, label: '道具' },
 }
 
-// allowEmpty=true：删除流程可能把列表清空，显式告诉后端「这是用户确认过的删光」，
-// 否则后端空列表护栏会 400 拒收（防误清库），删除最后一张卡会永远失败。
 async function saveAssets(type, { silent = false, allowEmpty = false } = {}) {
   const config = assetCollections[type]
   if (!config || !store.currentEpisodeId) {
@@ -210,7 +175,6 @@ async function saveAssets(type, { silent = false, allowEmpty = false } = {}) {
   }
 }
 
-// AI 生成分镜
 async function handleAiStoryboard() {
   storyboardLoading.value = true
   try {
@@ -225,7 +189,6 @@ async function handleAiStoryboard() {
   storyboardLoading.value = false
 }
 
-// 本地上传分镜脚本
 function handleUploadStoryboard() {
   showImportDialog.value = true
 }
@@ -234,7 +197,6 @@ async function handleImported() {
   showImportDialog.value = false
   showStoryboardMethodDialog.value = false
 
-  // 导入组件保存成功后，这里再显式同步一次当前集，避免跳转到分镜页时仍显示旧方案。
   const result = await store.loadEpisode(store.currentEpisodeId)
   if (!result?.success) {
     toastInfo('分镜已保存，但页面刷新失败', {
@@ -253,7 +215,6 @@ async function handleFileChange(e) {
   try {
     const text = await file.text()
     const data = JSON.parse(text)
-    // 保存分镜到后端
     if (store.currentEpisodeId && data.scenes) {
       await api.saveStoryboard(store.currentEpisodeId, {
         storyboardScenes: data.scenes,
@@ -262,7 +223,6 @@ async function handleFileChange(e) {
       })
       const reloadResult = await store.loadEpisode(store.currentEpisodeId)
       if (!reloadResult?.success) {
-        // 刷新失败单独提示（别走 catch，否则会被误报成 JSON 解析失败）
         toastInfo('分镜已保存，但页面刷新失败', {
           detail: reloadResult?.error || '进入分镜页后可手动刷新查看最新方案。',
           duration: 0,
@@ -277,20 +237,17 @@ async function handleFileChange(e) {
   } catch (err) {
     toastError('分镜脚本解析失败', { detail: '请检查 JSON 格式：' + String(err.message) })
   }
-  e.target.value = '' // 重置input
+  e.target.value = '' 
 }
 function openDialog(type) {
   dialogType.value = type
   showAddDialog.value = true
 }
 
-// 从素材库选择资产后添加到项目
 async function handleLibrarySelect(payload) {
-  // 兼容新旧格式：新格式 { items, type }，旧格式直接是数组
   const items = Array.isArray(payload) ? payload : (payload.items || [])
   const type = Array.isArray(payload) ? libraryPickerType.value : (payload.type || libraryPickerType.value)
 
-  // 替换图片模式：用选中的第一个素材的封面图替换当前卡片图片
   if (replaceMode.value && replaceTarget.value) {
     const coverUrl = items[0]?.cover_url || ''
     if (coverUrl) {
@@ -312,7 +269,6 @@ async function handleLibrarySelect(payload) {
     return
   }
 
-  // 添加新资产模式
   for (const item of items) {
     const name = item.name || ''
     const desc = item.description || ''
@@ -375,14 +331,7 @@ async function handleSelect(items) {
   await saveAssets(dialogType.value)
 }
 
-// 2026-09-17：原 handleSettingAction 已移除——它唯一的作用是给工具条上那个
-// 「重新提取资产」按钮分发动作。该入口已按三锚点规则收进 ⋯ 溢出菜单（onMoreExtract）
-// 与 ② 号提示条主按钮，函数不再有调用方。
 
-// 实际执行整卡删除：从列表摘除 → 全量保存 → 失败原位还原。
-// 注意不能用 item.id 反查存活项：saveAssets 成功后会把后端自增 id
-// 回写到存活的数组项上，此时旧 id 已是脱离列表的陈旧值（对不上任何一行）。
-// 这里保留 item 对象引用，失败时原样插回，用户看到的就是「卡片回来了」。
 async function performAssetDelete(type, id) {
   const config = assetCollections[type]
   if (!config) return
@@ -391,11 +340,8 @@ async function performAssetDelete(type, id) {
   if (index < 0) return
   const item = list[index]
   list.splice(index, 1)
-  // silent：本条流程自带失败 toast（含还原说明），不再叠一层「保存失败」
   const ok = await saveAssets(type, { silent: true, allowEmpty: type === 'scene' })
   if (!ok) {
-    // 保存失败 = 后端仍是旧数据。不回滚的话界面会显示「已删除」，
-    // 但一刷新/切集卡片就复活（删除在感知上「没做完」）。故原样还原并明确告知。
     list.splice(Math.min(index, list.length), 0, item)
     toastError(`删除${config.label}失败`, { detail: '已还原该卡片，请重试' })
     return
@@ -411,7 +357,6 @@ async function deleteAsset(type, id) {
   const label = config.label
   const name = item?.name || ''
 
-  // 项目自有确认弹窗（不用原生 confirm：它会冻结渲染线程，失败态完全无反馈）。
   openConfirmDialog({
     title: `删除${label}${name ? `「${name}」` : ''}？`,
     message: `将永久删除该${label}及其图片，删除后无法恢复。`,
@@ -422,9 +367,6 @@ async function deleteAsset(type, id) {
   })
 }
 
-// ── 场景删除双选（2026-09-17 布哥需求）──────────────────────────────
-// 删除入口给两个档位：「仅删图片」保留场景卡片与描述（清空后进「待生成」，可再补生成）；
-// 「删除场景」永久删掉整个场景。无图场景没有「仅删图片」可选，直接走整卡删除确认。
 function onDeleteSceneClick(item) {
   if (!item.imageUrl) {
     deleteAsset('scene', item.id)
@@ -442,7 +384,6 @@ function onDeleteSceneClick(item) {
   })
 }
 
-// 仅删场景图：清空 imageUrl 并全量保存；失败时把原图地址还原，避免「看着删了、刷新复活」。
 async function deleteSceneImageOnly(item) {
   const s = store.assetScenes.find((x) => x.id === item.id)
   if (!s || !s.imageUrl) return
@@ -457,19 +398,15 @@ async function deleteSceneImageOnly(item) {
   toastSuccess(`已删除「${s.name}」的图片`, { detail: '场景已保留，可重新生成图片' })
 }
 
-// ── 场景 tab · 多选与批量（2026-09-16）──────────────────────────────
 
-// 正在生成的场景 id 视为「不可操作」：既不能选中，也不能被批量删除
 function isSceneGenerating(item) {
   return store.generatingAssetIds.includes(item.id)
 }
 
-// 可选的场景 id（排除生成中）
 const sceneSelectableIds = computed(() =>
   store.assetScenes.filter((s) => !isSceneGenerating(s)).map((s) => s.id),
 )
 
-// 是否「全选」（可选集合为空时不算全选）
 const allScenesSelected = computed(
   () => sceneSelectableIds.value.length > 0
     && selectedSceneIds.value.length === sceneSelectableIds.value.length,
@@ -489,7 +426,6 @@ function exitSceneMultiSelect() {
   selectedSceneIds.value = []
 }
 
-// 点击卡片 / 勾选框：多选模式下切换选中态，否则打开详情
 function onSceneCardClick(item) {
   if (!sceneMultiSelect.value) {
     openDetail('scene', item)
@@ -508,21 +444,15 @@ function toggleSelectAllScenes() {
   selectedSceneIds.value = allScenesSelected.value ? [] : sceneSelectableIds.value.slice()
 }
 
-// 批量整卡删除：与单个删除同式——先摘除、全量保存、失败原位还原。
 async function performBatchDeleteScenes(deletable) {
   const delSet = new Set(deletable)
-  // 备份被删项与它们在原数组里的位置：保存失败要能原位还原（见下）。
-  // 同 performAssetDelete：只需存位置，不能依赖 item.id 反查——saveAssets 会把后端自增 id
-  // 回写到存活项上，删除项的 id 原地失效。
   const removed = store.assetScenes
     .map((s, i) => ({ s, i }))
     .filter(({ s }) => delSet.has(s.id))
   store.assetScenes = store.assetScenes.filter((s) => !delSet.has(s.id))
   selectedSceneIds.value = selectedSceneIds.value.filter((id) => !delSet.has(id))
-  // allowEmpty：全选删除时列表清空，显式告知后端这是用户确认过的删光（否则空列表护栏 400）
   const ok = await saveAssets('scene', { silent: true, allowEmpty: true })
   if (!ok) {
-    // 保存失败 → 后端仍是旧数据，不回滚会让界面「看着删掉了」但刷新即复活。
     const restored = store.assetScenes.slice()
     for (const { s, i } of removed) restored.splice(Math.min(i, restored.length), 0, s)
     store.assetScenes = restored
@@ -533,7 +463,6 @@ async function performBatchDeleteScenes(deletable) {
   if (!store.assetScenes.length) exitSceneMultiSelect()
 }
 
-// 批量仅删图片：保留场景卡片，只清空 imageUrl；失败逐张还原原图地址。
 async function performBatchDeleteSceneImages(deletable) {
   const delSet = new Set(deletable)
   const targets = store.assetScenes.filter((s) => delSet.has(s.id) && s.imageUrl)
@@ -552,8 +481,6 @@ async function performBatchDeleteSceneImages(deletable) {
   toastSuccess(`已删除 ${targets.length} 张场景图`, { detail: '场景已保留，可用「补生成缺图」重新生成' })
 }
 
-// 批量删除入口：生成中的项一律跳过（后端可能正在回写该资产，删除会造成数据不一致）。
-// 与单个删除同规则：选中项里有图时给「仅删图片 / 删除场景」双选，全都没图则只确认整卡删除。
 function deleteSelectedScenes() {
   const selected = selectedSceneIds.value.slice()
   const generatingCount = selected.filter((id) => store.generatingAssetIds.includes(id)).length
@@ -579,29 +506,14 @@ function deleteSelectedScenes() {
   })
 }
 
-// ── 批量生成场景图（2026-09-17 布哥定案：标题行批量按钮全删）─────────
-// 原有「补生成缺图 / 全部重做」两档批量入口已删除——
-//   · 缺图场景 → 成员卡「AI生成」单张出图（每张卡都有按钮，批量补图多余）；
-//   · 整组重画 → 组卡「整组照参考图重画」（批量入口在组级，语义才对位）；
-//   · 集级批量重做与组卡功能重复（单基准组场景下 100% 等价），删。
-// sceneBatchGenerating 保留：它还是组重画（doRefreshGroup）的防重锁，
-// 也让「多选」按钮在组重画进行中不可误触。
-// pending 组的批量兜底随按钮一并消失——锁定态（isGroupPending）仍在，
-// 单张出图入口被锁就是锁，没有批量通道可以绕过它。
 
-// ── 场景 tab · 空间组视图（2026-09-17）──────────────────────────────
-// 星型拓扑落地页：组分区（SpatialGroupCard：参考图大卡 + 轨道）× 组内成员卡（SceneMemberCard）。
-// 数据源 = /generate/spatial-group-review/status，组状态与锁定态（isGroupPending）同源。
-// 降级铁律：接口失败 → sceneGroupsError → 整页回退旧平铺卡片视图，功能一个不少。
-const sceneGroups = ref([])         // status.groups：组分区数据
-const sceneReviewPending = ref(0)   // status.pending：未决组数（横幅计数）
-const sceneGroupsError = ref(false) // true = 降级回旧平铺视图
+const sceneGroups = ref([])         
+const sceneReviewPending = ref(0)   
+const sceneGroupsError = ref(false) 
 const sceneGroupsLoading = ref(false)
-const groupBusyKey = ref('')        // 正在决策/重画的组 key（组头显示「处理中」）
-// 布局图生成中的组 key（A3，2026-09-18）。与 groupBusyKey 分开：布局图只锁它自己那张卡，
-// 不该把整组按钮（定参考图/整组重画）一起冻住——两件事互不依赖，锁一起是过度约束。
+const groupBusyKey = ref('')        
 const layoutBusyKey = ref('')
-let sceneGroupRefreshTimer = null   // 生成结束/资产增删后的防抖刷新
+let sceneGroupRefreshTimer = null   
 
 async function fetchSceneGroups(force = false) {
   if (!store.currentEpisodeId) return
@@ -612,12 +524,9 @@ async function fetchSceneGroups(force = false) {
     sceneGroups.value = Array.isArray(status?.groups) ? status.groups : []
     sceneReviewPending.value = Number(status?.pending) || 0
     sceneGroupsError.value = false
-    // 组数据到位后拉参考图版本带（组数有限，且已加载过的会跳过，不会反复打接口）
     for (const g of sceneGroups.value) loadBaselineHistory(g)
-    // 分组锁状态与组数据同源刷新（重析后锁的归属可能变化，孤儿锚检测也依赖最新归属）
     fetchGroupLocks()
   } catch (e) {
-    // 降级铁律：视图可以没有，场景页不能卡死——回退旧平铺视图，生图/多选/删除照常可用
     if (!sceneGroupsError.value) {
       toastInfo('空间组视图加载失败，已切换为平铺模式', { detail: String(e.message) })
     }
@@ -627,12 +536,7 @@ async function fetchSceneGroups(force = false) {
   }
 }
 
-// ── 参考图版本历史（2026-09-17 布哥："留历史记录参照对比"）──────────────
-// 复用后端既有能力：asset_image_history 表 + GET /generate/asset-image/history
-// （资产详情弹窗里已在用，组视图此前没接）。代表场的每次生成/改造都会自动入历史。
-//
-// 按 repSceneId 缓存：组卡按需（展开且未加载过）触发，避免一屏多组时并发打接口。
-const baselineHistoryMap = ref({})    // repSceneId -> [{id,image_url,is_current,...}]
+const baselineHistoryMap = ref({})    
 const baselineHistoryLoading = ref({})
 async function loadBaselineHistory(group) {
   const id = group?.repSceneId
@@ -650,7 +554,6 @@ async function loadBaselineHistory(group) {
     baselineHistoryLoading.value = next
   }
 }
-// 生成结束/组数据刷新后，已加载过的组重新拉一次（新版本要立刻出现在带子里）
 function invalidateAndReloadHistory(repSceneId) {
   if (!repSceneId) return
   const next = { ...baselineHistoryMap.value }
@@ -671,16 +574,6 @@ function reloadLoadedBaselineHistories() {
   }
 }
 
-// ── 分组人审锁定（2026-09-17）────────────────────────────────────────
-// 背景：spatial_group 由 LLM 逐次自由裁量，重析（改剧本、加删场景、force）会重新分组。
-// 实测同一剧本连析两次，4 组被并成 2 组 → 已确认的组锚变孤儿、人审基线静默失效。
-// 修法：把「某场归某组」固化成数据（后端 scene_group_locks 表），重析时已锁场景复用锁定组名。
-//
-// 前端职责只有两件：把锁的状态显示出来、给个切锁的入口。分组逻辑一律在后端。
-// 判定逻辑（哪些组算已锁 / 孤儿锚该挂到哪张卡）全部下沉到 src/utils/groupLockView.js——
-// 纯函数、零 Vue 依赖，因此能被 server/tests 直接 import 做用例，不靠肉眼看界面。
-// 降级铁律：/locks 接口失败 → locksOverview 保持空 → 卡片不显示锁定徽章与孤儿告警，
-//   但「重析/生成」等主流程一个不少（锁是保护，不是功能前置条件）。
 const locksOverview = ref({ locks: [], orphanAnchors: [] })
 
 function isGroupLocked(group) {
@@ -703,14 +596,10 @@ async function fetchGroupLocks() {
       orphanAnchors: Array.isArray(r?.orphanAnchors) ? r.orphanAnchors : [],
     }
   } catch {
-    // 静默降级：锁状态拿不到不影响出图（它只是"保护可见性"，不是功能依赖）
     locksOverview.value = { locks: [], orphanAnchors: [] }
   }
 }
 
-// 切锁：组内还有未锁成员 → 先把**当前**分组整体锁住；已全锁 → 只解这一组的成员。
-// 为什么按组而不是按全集：用户的心智单位是"这一组"，不是"全部"。
-// 服务端按「当前 scene_analysis 的实际归属」落锁，前端不传组名（避免前端算错覆盖真值）。
 async function toggleGroupLock(group) {
   if (!store.currentEpisodeId || !group) return
   const members = (group.memberScenes || []).map((m) => Number(m.id)).filter((n) => Number.isFinite(n) && n > 0)
@@ -723,8 +612,6 @@ async function toggleGroupLock(group) {
         detail: '下次重析时这组的分组会重新交给 LLM 决定',
       })
     } else {
-      // 锁整集（服务端按当前归属落锁，幂等）——只锁这一组的成员做不到"锁住组结构"：
-      // 组结构是全集划分的结果，只锁部分成员会让 LLM 在剩余场次里重新划出边界。
       const r = await api.lockGrouping({ episodeId: store.currentEpisodeId, note: '组卡手动锁定' })
       toastSuccess(`已锁定当前分组（${r?.locked ?? 0} 个场景）`, {
         detail: '重析不会再重组这些场景；要恢复自由分组时点同一颗按钮解锁',
@@ -736,9 +623,6 @@ async function toggleGroupLock(group) {
   }
 }
 
-// 汇总条上的「重新锁定分组」：漂移已发生后的一键兜底。
-// 与组卡上那颗按钮不重复：组卡是"预防/微调"（按组），这里是"事故后收口"（按全集）。
-// 漂移发生后用户未必找得到是哪一组出的事，所以给一个不挑目标的出口。
 async function relockAllGroups() {
   if (!store.currentEpisodeId) return
   try {
@@ -753,9 +637,6 @@ async function relockAllGroups() {
   }
 }
 
-// 换回某个旧版本当参考图：把该版本的图写回代表场当前图 + 重新定参考图。
-// 不做"只改 baseline 不动 scenes"——参考图与代表场定稿图必须一致，
-// 否则组卡显示的和场景卡显示的会是两张不同的图（正是本轮要消灭的错位）。
 async function restoreBaselineVersion(group, version) {
   if (!group || !version || version.is_current || groupBusyKey.value) return
   const rep = sceneById(group.repSceneId)
@@ -768,7 +649,7 @@ async function restoreBaselineVersion(group, version) {
       groupBusyKey.value = group.group
       try {
         await api.restoreAssetImage({ type: 'scene', id: group.repSceneId, historyId: version.id })
-        await store.loadEpisode(store.currentEpisodeId)   // 代表场图更新 → 组卡/成员卡同步
+        await store.loadEpisode(store.currentEpisodeId)   
         await api.decideSpatialGroupReview({ episodeId: store.currentEpisodeId, group: group.group, action: 'confirm' })
         toastSuccess('已换回该版本并设为参考图')
       } catch (e) {
@@ -776,14 +657,12 @@ async function restoreBaselineVersion(group, version) {
       } finally {
         groupBusyKey.value = ''
         await fetchSceneGroups(true)
-        invalidateAndReloadHistory(group.repSceneId)   // is_current 归属变了，带子重拉
+        invalidateAndReloadHistory(group.repSceneId)   
       }
     },
   })
 }
 
-// 成员 id → store 资产对象。memberScenes 与 assetScenes 同源于 DB，正常必然匹配；
-// 兜底合成对象只保证渲染不炸，动作 handler 里仍以 sceneById 找得到为准。
 function sceneById(id) {
   return store.assetScenes.find((s) => String(s.id) === String(id)) || null
 }function memberScene(member) {
@@ -801,22 +680,11 @@ function isIdSelected(id) {
   return selectedSceneIds.value.some((x) => String(x) === String(id))
 }
 
-// 组没定参考图 → 组内成员锁定（只锁 pending 组；多选模式下解锁，保证批量删除/
-// 全选不被组状态绑架——锁定只管生成，不管删除）
-// 成员卡是否锁死生成：仅"多场景组 + 还没定参考图"才锁。
-// 单场景组永远不锁——它不需要参考图（后端 sync 恒置 skipped），锁定只会逼用户
-// 去点一个点了图也不变的按钮（2026-09-17 修正）。前端这里再兜一层，
-// 防后端旧进程/降级数据把单场景组算成 pending 时又把成员卡锁上。
 function isGroupPending(group) {
   if ((group?.memberScenes?.length || 0) <= 1) return false
   return group?.status === 'pending'
 }
 
-// 「全部收起 / 展开」：一次点击把所有组容器收成标题行（组多时一屏扫览）。
-// 用受控 prop 下发而非遍历子组件实例——v-for + 降级分支下实例拿不稳，
-// 而"全部"的判断依据（有几组、当前是否全收）本来就只有父级知道。
-// forceToken 每次点击 +1：让 prop 值变化必然触发子组件 watch（连点两次"收起全部"
-// 时 boolean 值不变，光靠值本身传不下去）。
 const allGroupsCollapsed = ref(false)
 const forceCollapseToken = ref(0)
 const forceCollapsedValue = ref(null)
@@ -826,7 +694,6 @@ function toggleAllGroups() {
   forceCollapseToken.value += 1
 }
 
-// LLM 没归组的场景（新加的、老数据）：平铺兜底区，不做空间约束
 const groupedSceneIdSet = computed(() => {
   const set = new Set()
   for (const g of sceneGroups.value) {
@@ -838,7 +705,6 @@ const ungroupedScenes = computed(() =>
   store.assetScenes.filter((s) => !groupedSceneIdSet.value.has(String(s.id))),
 )
 
-// 成员卡动作统一分发：memberScenes 的 id 与 store 对不上（刚删除/换集瞬间）时兜底刷新
 function onMemberAction(action, member) {
   const s = sceneById(member.id)
   if (!s) {
@@ -853,8 +719,6 @@ function onMemberAction(action, member) {
   else if (action === 'delete') onDeleteSceneClick(s)
 }
 
-// 组级：定参考图（decide confirm，幂等——confirmed 组「就用这张当参考图」走同一出口）。
-// 服务端一律取代表场当前定稿图，不采信前端传图（KD5），所以前端只传组键。
 async function confirmGroup(group) {
   if (!store.currentEpisodeId || groupBusyKey.value) return
   groupBusyKey.value = group.group
@@ -869,17 +733,6 @@ async function confirmGroup(group) {
   }
 }
 
-// 组级：重画参考图（= 重出代表场定稿图，画完**自动定为参考图**）。
-//
-// 2026-09-17 布哥反馈：「重画一张，应该是参考图重画啊？」+「留历史记录参照对比」。
-// 旧行为是两步：点「重新画一张」→ 场景图变了但参考图还指着旧图 → 必须再点一次
-// 「就用这张当参考图」。症状是"点了重画，左边的图没变"，用户以为没画成功。
-// 根因：assets 图的生成流程只写 scenes.image_url，不碰 spatial_group_review.baseline_image_url。
-//
-// 所以这里生成成功后立刻补一次 decide confirm（服务端一律取代表场当前定稿图，天然幂等），
-// 让参考图与新图对齐——一步到位，不再需要第二颗按钮。
-// 历史对比：生成本身已自动写入 asset_image_history（后端既有能力），
-// 组视图下方新增版本带消费它，见 loadBaselineHistory。
 async function regenBaseline(group) {
   const rep = sceneById(group.repSceneId)
   if (!rep) {
@@ -889,16 +742,13 @@ async function regenBaseline(group) {
   const run = async () => {
     const res = await store.generateAssetImage('scene', rep.id, genDesc(rep), store.imageModel)
     if (!res?.success) return
-    // 画完即定：让参考图跟上新图（幂等，服务端按当前定稿图落库）
     try {
       await api.decideSpatialGroupReview({ episodeId: store.currentEpisodeId, group: group.group, action: 'confirm' })
       toastSuccess('已重画并设为参考图', { detail: '组内其它场景可照这张重画；旧版本已存入下方版本带' })
     } catch (e) {
-      // 图已画好、只是没定上：不吞错，提示用户手动补定（组卡上仍有「就用这张当参考图」）
       toastWarn('图已重画，但设为参考图失败', { detail: `${e.message}；可点「就用这张当参考图」重试` })
     }
     await fetchSceneGroups(true)
-    // 新版本要立刻出现在版本带里（fetchSceneGroups 只拉组数据，历史需单独重拉）
     invalidateAndReloadHistory(group.repSceneId)
   }
   if (rep.imageUrl) {
@@ -914,9 +764,6 @@ async function regenBaseline(group) {
   }
 }
 
-// 组级：整组照参考图重画（覆盖式 + 计费 → 二次确认；ids 定向走 batchGenerateAssetImages，
-// 组内串行链由 store 按 spatial_group 自动排队）。复用 sceneBatchGenerating 做防重复锁，
-// 反馈在组卡自身（busy 态），进度不占标题行。
 function refreshGroup(group) {
   const memberIds = (group.memberScenes || []).map((m) => m.id)
   if (!memberIds.length || sceneBatchGenerating.value) return
@@ -958,8 +805,6 @@ async function doRefreshGroup(group, memberIds) {
   }
 }
 
-// 组级：跳过定参考图（decide skip，幂等）——这组场景不做空间约束、自由出图；
-// 跳过后随时可回来「就用这张当参考图」（skipped 组与 pending 组同款按钮）。
 async function skipGroup(group) {
   if (!store.currentEpisodeId || groupBusyKey.value) return
   groupBusyKey.value = group.group
@@ -974,21 +819,10 @@ async function skipGroup(group) {
   }
 }
 
-// ── 布局示意图（A3，2026-09-18）──────────────────────────────────────────────
-// 布局图 = 只表达「什么在哪、朝哪、多远」的俯视示意图，不含视角/光影/画风。
-// 它解决的是一个结构性矛盾：参考图是**照片**，同时携带视角/光影/画风/主体占比，
-// 让模型"继承它、但别照搬构图"天然自相矛盾（cliff_river 视角塌陷、
-// 「场2 被场1 覆盖重画」两次事故都长在这块土壤上）。
-// 有了布局图，组内每个视角都能照它对齐空间而不冲突。
-//
-// 重画是覆盖式 + 计费（与参考图重画同规则）→ 已有图时二次确认；
-// 首次生成没有"覆盖"可损失，直接跑（不拿确认框骚扰用户）。
 function generateLayout(group) {
   if (layoutBusyKey.value) return
   const run = () => doGenerateLayout(group)
   if (group.layoutAnchor?.imageUrl) {
-    // 过时的图，确认框里要说明"为什么现在该重画"——否则用户看到一句"若没改动静通常不用重画"
-    // 反而更犹豫。过时是客观事实（素材指纹不一致），直接讲清楚比让用户自己回忆更好。
     openConfirmDialog({
       title: `重画「${group.repSceneTitle || group.group}」的布局示意图？`,
       message: group.layoutStale === true
@@ -1016,9 +850,6 @@ async function doGenerateLayout(group) {
       toastError('布局图生成失败', { detail: String(res?.error || '未知错误') })
       return
     }
-    // 质检回执：服务端含"生成→视觉质检→仅对检出问题针对性重试"闭环。
-    // 带伤上岗是我们接受的（宁可有一张略有瑕疵的图，也不要卡住流程），
-    // 但必须让用户知道"这张没过质检"，否则他会拿一张有问题的图当权威空间基准。
     const rv = res.layoutReview || {}
     if (rv.verdict === 'fail') {
       const kinds = (rv.defects || []).map((d) => d.type).filter(Boolean)
@@ -1036,17 +867,12 @@ async function doGenerateLayout(group) {
   }
 }
 
-// 看大图：布局图信息密度高（多个地标 + 朝向关系），小卡里看不清。
-// 不做站内 lightbox —— 新标签页能让用户用浏览器原生缩放，对他们更顺手。
-// noopener：新窗口拿不到 window.opener，避免被打开的页面反向操纵本页。
 function previewLayout(layoutAnchor) {
   const url = layoutAnchor?.imageUrl
   if (!url) return
   window.open(url, '_blank', 'noopener')
 }
 
-// 去定参考图（横幅按钮）：弹窗退役后决策动作全在组卡上——滚动定位到第一个未决组卡并高亮。
-// 找不到（都在视口外渲染层）时退化为直接刷新组数据。
 function openGroupReview() {
   const el = document.querySelector('[data-group-card="pending"]')
   if (el) {
@@ -1058,53 +884,45 @@ function openGroupReview() {
   }
 }
 
-// 场景 tab 打开时拉取（首次可能触发 LLM 全集分析，最长两分钟；降级后不再自动重试）
 watch(activeTab, (val) => {
   if (val === 'scenes' && !sceneGroups.value.length && !sceneGroupsError.value) fetchSceneGroups()
 })
 
-// 换集：组数据清空重拉（不同集的空间组完全不同）
 watch(() => store.currentEpisodeId, () => {
   sceneGroups.value = []
   sceneReviewPending.value = 0
-  locksOverview.value = { locks: [], orphanAnchors: [] }   // 不同集的空间组与锁完全不同，不能串
+  locksOverview.value = { locks: [], orphanAnchors: [] }   
   if (activeTab.value === 'scenes') fetchSceneGroups()
 })
 
-// 生成结束 / 场景增删 → 组图、成员图、分组归属都可能变化，防抖合并成一次刷新
 function scheduleSceneGroupsRefresh() {
   if (activeTab.value !== 'scenes' || sceneGroupsError.value) return
   clearTimeout(sceneGroupRefreshTimer)
   sceneGroupRefreshTimer = setTimeout(async () => {
     await fetchSceneGroups(true)
-    // 成员卡单张生成也会给代表场加版本（若生成的就是代表场）→ 带子跟着刷新
     reloadLoadedBaselineHistories()
   }, 800)
 }
 watch(() => store.generatingAssetIds.length, (len, old) => {
-  if (old > len) scheduleSceneGroupsRefresh() // 有生成结束（含取消）→ 参考图卡/成员图可能已更新
+  if (old > len) scheduleSceneGroupsRefresh() 
 })
 watch(() => store.assetScenes.length, () => {
-  if (sceneGroups.value.length) scheduleSceneGroupsRefresh() // 新增/删除场景 → 分组归属变化
+  if (sceneGroups.value.length) scheduleSceneGroupsRefresh() 
 })
 onBeforeUnmount(() => clearTimeout(sceneGroupRefreshTimer))
 
-// 触发音频文件选择
 function handleAudioUpload(item) {
   audioUploadTarget.value = item
   audioFileInput.value?.click()
 }
 
-// 音色参考的合理上限：H3 音色克隆只需几秒样本，且 base64 再膨胀 33%
 const AUDIO_MAX_BYTES = 10 * 1024 * 1024
 const AUDIO_EXT_RE = /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i
 
-// 处理音频文件选择
 async function onAudioFileSelected(e) {
   const file = e.target.files?.[0]
   if (!file || !audioUploadTarget.value) return
 
-  // 类型白名单：accept 只过滤文件选择对话框，拖放/改后缀可绕过
   const isAudio = (file.type || '').startsWith('audio/') || AUDIO_EXT_RE.test(file.name)
   if (!isAudio) {
     toastWarn('请选择音频文件', { detail: '支持 mp3 / wav / m4a / aac / ogg / flac' })
@@ -1120,7 +938,6 @@ async function onAudioFileSelected(e) {
   }
 
   try {
-    // 转成 base64
     const reader = new FileReader()
     reader.onerror = () => {
       toastError('读取文件失败')
@@ -1132,7 +949,6 @@ async function onAudioFileSelected(e) {
       const item = audioUploadTarget.value
       try {
         const updated = await api.uploadCharacterAudio(store.currentEpisodeId, item.id, base64)
-        // 用后端返回的数据更新 store 中的角色
         const idx = store.characters.findIndex(c => c.id === item.id)
         if (idx >= 0 && updated) {
           store.characters[idx].audioUrl = updated.audio_url || updated.audioUrl || ''
@@ -1152,7 +968,6 @@ async function onAudioFileSelected(e) {
   }
 }
 
-// 删除角色音频
 async function deleteAudio(item) {
   if (!confirm('确定删除该角色的音频吗？')) return
   try {
@@ -1166,23 +981,16 @@ async function deleteAudio(item) {
   }
 }
 
-// 打开资产详情编辑弹窗
 function openDetail(type, item) {
   detailType.value = type
   detailAsset.value = item
   showDetailDialog.value = true
 }
 
-// 保存资产详情修改
 async function saveDetail(data) {
   const type = detailType.value
   const oldId = detailAsset.value.id
   const hasImage = !!detailAsset.value.imageUrl
-  // 更新 store
-  // 英文常量透传（2026-09-16）：`data` 里带了 nameEn/descriptionEn/titleEn/summaryEn/
-  // lightingEn（AssetDetailDialog 采集），此前这里只写中文 name/description，
-  // 英文键被静默丢弃 → 用户改了英文名再保存会「改了个寂寞」。
-  // 用 `!== undefined` 判据：详情弹窗对不相关类型不传该键，不能拿 undefined 覆盖掉已有值。
   if (type === 'character') {
     const c = store.characters.find(x => x.id === oldId)
     if (c) {
@@ -1197,12 +1005,9 @@ async function saveDetail(data) {
     if (s) {
       s.name = data.name
       s.description = data.description
-      // 场景光影常量：详情弹窗保存（undefined = 非 scene 类型，不动）
       if (data.lightingEn !== undefined) s.lightingEn = data.lightingEn
-      // 场景英文标题/摘要：模块3 环境冻结声明逐字复用，同样必须能改能存
       if (data.titleEn !== undefined) s.titleEn = data.titleEn
       if (data.summaryEn !== undefined) s.summaryEn = data.summaryEn
-      // 场景地点（scenes.location）：undefined = 非 scene 类型，不动
       if (data.location !== undefined) s.location = data.location
     }
   } else if (type === 'prop') {
@@ -1210,26 +1015,18 @@ async function saveDetail(data) {
     if (p) {
       p.name = data.name
       p.description = data.description
-      // 道具英文名（props.name_en）：H3 全英文提示词的必填生产资产
       if (data.nameEn !== undefined) p.nameEn = data.nameEn
-      // 道具英文描述（props.description_en）：H3 模块2「道具描述」逐字复用
       if (data.descriptionEn !== undefined) p.descriptionEn = data.descriptionEn
-      // owner 有意不在此处兜底（2026-09-16 布哥决定）：留空优于猜错，
-      // 填错会在 doubao.js 生成「专属角色」硬约束并主动判正确画面为违规。
       if (data.owner !== undefined) p.owner = data.owner
     }
   }
   await saveAssets(type)
   showDetailDialog.value = false
 
-  // 保存后重新获取最新 ID（新建资产保存后 ID 会从临时 ID 更新为数据库自增 ID）
   const list = type === 'character' ? store.characters : type === 'scene' ? store.assetScenes : store.props
   const updated = list.find(x => x.name === data.name)
   const latestId = updated?.id || oldId
 
-  // 只有当资产没有图片时，才自动调用 AI 生图
-  // 已有图片（用户上传或之前生成）时，只保存描述，不覆盖已有图片
-  // 用户想根据新描述重新生成时，可手动点击卡片上的"AI生成"按钮
   console.log('[saveDetail] type:', type, 'hasImage:', hasImage, 'latestId:', latestId)
   if (!hasImage && data.description && data.description.trim()) {
     const prompt = genDesc({ name: data.name, description: data.description })
@@ -1239,8 +1036,6 @@ async function saveDetail(data) {
   }
 }
 
-// 点击卡片"本地上传"→ 打开素材库（替换模式）：上传完成后新图自动替换当前卡片图片，
-// 图片同时已存入"我的素材"成为可复用的固定资产；也可改为从库中选已有素材替换
 function handleLocalUpload(type, item) {
   replaceMode.value = true
   replaceTarget.value = { type, id: item.id }
@@ -1248,15 +1043,11 @@ function handleLocalUpload(type, item) {
   showLibraryPicker.value = true
 }
 
-// 打开自定义确认弹窗。
-// altConfirmText + onAltConfirm = 可选的「次选项」按钮（如删除场景时的「仅删图片」）；
-// danger = true 时图标与主按钮走 danger 红，把破坏性操作和生成类确认在视觉上区分开。
 function openConfirmDialog({ title, message, confirmText = '确认', altConfirmText = '', cancelText = '取消', danger = false, onConfirm, onAltConfirm = null }) {
   confirmConfig.value = { title, message, confirmText, altConfirmText, cancelText, danger, onConfirm, onAltConfirm }
   showConfirmDialog.value = true
 }
 
-// 确认弹窗：点击确认
 function handleConfirmOk() {
   showConfirmDialog.value = false
   if (confirmConfig.value.onConfirm) {
@@ -1264,7 +1055,6 @@ function handleConfirmOk() {
   }
 }
 
-// 确认弹窗：点击次选项（如「仅删图片」）
 function handleConfirmAlt() {
   showConfirmDialog.value = false
   if (confirmConfig.value.onAltConfirm) {
@@ -1272,12 +1062,10 @@ function handleConfirmAlt() {
   }
 }
 
-// 确认弹窗：点击取消
 function handleConfirmCancel() {
   showConfirmDialog.value = false
 }
 
-// 手动点击"AI生成"：如果已有图片，先确认再生成，避免误覆盖用户上传的图片
 function handleAiGenerate(type, item) {
   if (item.imageUrl) {
     openConfirmDialog({
@@ -1294,8 +1082,6 @@ function handleAiGenerate(type, item) {
   }
 }
 
-// 以当前图为底图改造（换装/加饰品/微调）：图生图保持形象，只按指令修改指定部分。
-// 成功后自动把改造内容追加进描述——保证分镜 prompt 文字与参考图始终一致（图文不打架）。
 async function handleEditAsset(type, item) {
   if (!item.imageUrl) {
     toastWarn(`「${item.name}」还没有图片，无法改造`, { detail: '请先「AI生成」一张基础形象图' })
@@ -1305,7 +1091,6 @@ async function handleEditAsset(type, item) {
   if (!instruction) return
   const res = await store.generateAssetImage(type, item.id, genDesc(item), store.imageModel, instruction)
   if (res?.success) {
-    // 描述已由后端同步进主设定（含指令追加），这里只把 store 对象对齐为后端返回值，不再手工拼接防重复
     const list = type === 'character' ? store.characters : type === 'scene' ? store.assetScenes : store.props
     const target = list.find(x => String(x.id) === String(item.id))
     if (target && res.description) {
@@ -1315,15 +1100,12 @@ async function handleEditAsset(type, item) {
   }
 }
 
-// 统一资产卡片的生成图片描述
 function genDesc(item) { return item.name + '：' + (item.description || '') }
 </script>
 
 <template>
   <div class="flex h-full w-full flex-col">
-    <!-- ① 页面工具条 · 左锚点 = 导航簇 / 右锚点 = 生成配置簇 + 低频维护 -->
     <div class="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-border px-6">
-      <!-- 左锚点：返回 + 角色 / 场景 / 道具 -->
       <div class="flex min-w-0 items-center gap-3">
         <button
           type="button"
@@ -1346,12 +1128,7 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         </div>
       </div>
 
-      <!-- 右锚点：生成配置簇（模型 + 画风）│ 维护 -->
       <div class="flex min-w-0 items-center gap-2">
-        <!-- 生图模型：全局选择，整批资产生图统一走该模型。前列均为支持「以图生图」的模型
-             （资产图/分镜图全链路带参考图：角色图 + 场景图 + 道具图 + 画风锚）；
-             末项「四宫格通道（文生图）」仅用于分镜四宫格（RunningHub AI 应用，4 槽参考池），
-             不是通用生图模型——资产图/分镜图请选上方模型。 -->
         <label class="flex h-8 shrink-0 items-center gap-2 rounded-control border border-border bg-bg-secondary pl-3 pr-2 transition hover:border-border-light focus-within:border-accent">
           <span class="text-2xs text-text-muted">模型</span>
           <span class="relative flex items-center">
@@ -1370,7 +1147,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           </span>
         </label>
 
-        <!-- 画风胶囊：与模型对仗（同为全局生成参数），点击去画风页更换 -->
         <button
           type="button"
           class="flex h-8 shrink-0 items-center gap-2 rounded-control border border-border bg-bg-secondary px-3 transition hover:border-border-light"
@@ -1382,16 +1158,13 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           <svg class="h-2.5 w-2.5 shrink-0 text-text-muted" viewBox="0 0 10 10" fill="none" aria-hidden="true"><path d="M4 2L7 5L4 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
         </button>
 
-        <!-- 簇间分隔：把「可改的配置」与「低频维护」切开 -->
         <span class="mx-1 h-5 w-px shrink-0 bg-border" aria-hidden="true"></span>
 
-        <!-- AI 处理中：提取资产要等大模型十几秒以上，必须有可见反馈；紧邻触发入口，不挤压配置簇 -->
         <span v-if="store.aiLoading" class="flex min-w-0 items-center gap-1.5 text-2xs text-warn">
           <svg class="h-3.5 w-3.5 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
           <span class="truncate">{{ store.aiProgressMessage || 'AI 处理中…' }}</span>
         </span>
 
-        <!-- ⋯ 溢出菜单：收纳低频维护动作，常态下不抢视线 -->
         <div ref="moreMenuRef" class="relative shrink-0">
           <button
             type="button"
@@ -1435,7 +1208,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         </div>
       </div>
     </div>
-    <!-- ② 剧本已改提示条 · 内联提示条（非卡片）：异常态下「重新提取资产」的唯一主入口 -->
     <div
       v-if="store.assetsStale"
       class="mx-6 mt-4 flex shrink-0 items-center gap-3 rounded-control border border-l-[3px] border-warn/30 border-l-warn bg-warn/10 px-3.5 py-2.5"
@@ -1454,12 +1226,9 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         {{ store.aiLoading ? '提取中…' : '重新提取资产' }}
       </button>
     </div>
-    <!-- ③ 内容标题行 · 所有 tab 通用（消除切 tab 时的布局跳动）
-         左锚点 = 内容标识（标题 + 计数）；右锚点 = 内容级操作，按「模式 → 破坏性 → 主操作」排列 -->
     <div class="flex shrink-0 items-center justify-between gap-3 px-6 pt-5 pb-3">
       <div class="flex min-w-0 items-center gap-2.5">
         <h2 class="shrink-0 text-sm font-medium text-text-primary">{{ tabMeta.title }}</h2>
-        <!-- 多选模式：计数让位给「已选 N / M」，避免两组数字打架 -->
         <span
           v-if="sceneMultiSelect && activeTab === 'scenes'"
           class="flex h-5 shrink-0 items-center rounded-pill bg-accent/15 px-2 text-micro text-accent"
@@ -1474,7 +1243,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
       </div>
 
       <div v-if="activeTab === 'scenes'" class="flex shrink-0 items-center gap-1">
-        <!-- 多选模式 -->
         <template v-if="sceneMultiSelect">
           <button type="button" class="flex h-8 items-center rounded-control border border-border px-2.5 text-2xs text-text-secondary transition hover:border-border-light hover:text-white disabled:cursor-not-allowed disabled:opacity-40" :disabled="!sceneSelectableIds.length" @click="toggleSelectAllScenes">
             {{ allScenesSelected ? '取消全选' : '全选' }}
@@ -1486,13 +1254,7 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           <button type="button" class="flex h-8 items-center rounded-control px-2.5 text-2xs text-text-muted transition hover:bg-bg-hover hover:text-white" @click="exitSceneMultiSelect">退出多选</button>
         </template>
 
-        <!-- 常规模式：标题行只留「多选」。
-             2026-09-17 布哥定案：批量生成按钮全删——
-             · 缺图场景 → 成员卡「AI生成」单张出图（每张卡都有按钮，批量补图多余）；
-             · 整组重画 → 组卡「整组照参考图重画」（批量入口在组级，语义才对位）；
-             · 集级批量重做按钮与组卡功能重复，删（单 confirmed 组场景下 100% 等价）。 -->
         <template v-else>
-          <!-- 全部收起 / 展开（仅场景 tab 的组视图有意义：组多时一键扫览） -->
           <button
             v-if="activeTab === 'scenes' && !sceneGroupsError && sceneGroups.length > 1"
             type="button"
@@ -1505,7 +1267,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
             </svg>
             {{ allGroupsCollapsed ? '展开全部' : '收起全部' }}
           </button>
-          <!-- 幽灵按钮：模式切换 -->
           <button
             type="button"
             class="flex h-8 items-center gap-1.5 rounded-control px-2.5 text-2xs text-text-secondary transition hover:bg-bg-hover hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
@@ -1519,9 +1280,7 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         </template>
       </div>
     </div>
-    <!-- 卡片容器：标题行已负责上方留白，这里不再重复 padding-top，让标题与网格成为一个整体 -->
     <div class="flex flex-1 flex-wrap content-start gap-4 overflow-y-auto px-6 pb-6 pt-0">
-    <!-- 角色卡片 -->
     <template v-if="activeTab==='characters'">
       <div v-for="item in store.characters" :key="item.id" class="group flex w-64 cursor-pointer flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition hover:border-accent/30" @click="openDetail('character', item)">
         <div class="relative h-40 overflow-hidden bg-white">
@@ -1529,7 +1288,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           <div v-else class="flex h-full items-center justify-center">
             <svg class="h-10 w-10 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
           </div>
-          <!-- 生成中覆盖层 -->
           <div v-if="store.generatingAssetIds.includes(item.id)" class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/60 backdrop-blur-sm">
             <svg class="h-8 w-8 animate-spin text-accent" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
             <span class="text-xs text-white">AI生成中...</span>
@@ -1557,7 +1315,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           </div>
           <p v-if="item.description" class="mt-1.5 line-clamp-2 text-[11px] leading-relaxed text-text-secondary">{{ item.description }}</p>
         </div>
-        <!-- 底部音频上传/播放（移到描述下方） -->
         <div class="border-t border-border p-2">
           <div v-if="item.audioUrl" class="flex items-center gap-2">
             <audio :src="item.audioUrl" controls class="h-8 flex-1 min-w-0" />
@@ -1573,10 +1330,7 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
       </div>
     </template>
 
-        <!-- 场景 tab：场景组视图（星型拓扑：参考图 → 组内照着画）。
-             降级铁律：status 接口失败 → 回退旧平铺卡片视图，生图/多选/批量/删除功能一个不少 -->
         <template v-else-if="activeTab==='scenes'">
-          <!-- 降级路径：旧平铺卡片（原样保留全部行为） -->
           <template v-if="sceneGroupsError">
           <div v-for="item in store.assetScenes" :key="item.id"
                class="group flex w-64 cursor-pointer flex-col overflow-hidden rounded-xl border bg-bg-card transition"
@@ -1590,19 +1344,16 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
               <div v-else class="flex h-full items-center justify-center">
                 <svg class="h-10 w-10 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
               </div>
-              <!-- 多选勾选框（点击由卡片统一处理，此处 pointer-events-none 避免重复触发） -->
               <div v-if="sceneMultiSelect"
                    class="pointer-events-none absolute left-2 top-2 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition"
                    :class="[isSceneSelected(item) ? 'border-accent bg-accent' : 'border-white/70 bg-black/50 backdrop-blur', isSceneGenerating(item) ? 'opacity-40' : '']">
                 <svg v-if="isSceneSelected(item)" class="h-3.5 w-3.5 text-black" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
               </div>
-              <!-- 生成中覆盖层 -->
               <div v-if="store.generatingAssetIds.includes(item.id)" class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/60 backdrop-blur-sm">
                 <svg class="h-8 w-8 animate-spin text-accent" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                 <span class="text-xs text-white">AI生成中...</span>
                 <button class="rounded bg-white/15 px-2.5 py-0.5 text-[10px] text-white transition hover:bg-red-500" @click.stop="store.cancelAssetImageGen(item.id)">取消</button>
               </div>
-              <!-- 多选模式下隐藏单张删除按钮与操作栏，避免误操作；删除入口走双选弹窗（仅删图片 / 删除场景） -->
               <button v-if="!store.generatingAssetIds.includes(item.id) && !sceneMultiSelect" class="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white backdrop-blur opacity-0 transition hover:bg-red-500 group-hover:opacity-100" title="删除" @click.stop="onDeleteSceneClick(item)">
                 <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
               </button>
@@ -1625,9 +1376,7 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           </div>
           </template>
 
-          <!-- 组视图路径 -->
           <template v-else>
-            <!-- 首载分析中：status 首次可能触发 LLM 全集分析（最长两分钟），必须有可见反馈 -->
             <div v-if="sceneGroupsLoading && !sceneGroups.length" class="flex h-[300px] w-full flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border">
               <svg class="h-8 w-8 animate-spin text-warn" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
               <div class="text-2xs text-text-secondary">正在分析场景空间关系…</div>
@@ -1635,10 +1384,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
             </div>
 
             <template v-else>
-              <!-- 基准失效汇总条（2026-09-17）：只要有任何一组的组锚成了孤儿，就在顶部显式告警。
-                   为什么要有汇总：孤儿锚的卡片上虽然也有 banner，但漂移后组名可能已变，
-                   用户扫一眼列表未必找得到"是哪个组出事了"。汇总条 + 一键重新锁定是兜底出口。
-                   无孤儿时整块不渲染（不占位、不噪音）。 -->
               <div v-if="orphanAnchorCount > 0" class="flex w-full items-center gap-3 rounded-control border border-l-[3px] border-danger/30 border-l-danger bg-danger/10 px-3.5 py-2.5" role="alert">
                 <svg class="h-4 w-4 shrink-0 text-danger" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" /></svg>
                 <div class="min-w-0 flex-1">
@@ -1650,7 +1395,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                 </button>
               </div>
 
-              <!-- 未决提示条：还有组没定参考图（弹窗退役后，决策动作收口在组卡上） -->
               <div v-if="sceneReviewPending > 0" class="flex w-full items-center gap-3 rounded-control border border-l-[3px] border-warn/30 border-l-warn bg-warn/10 px-3.5 py-2.5">
                 <svg class="h-4 w-4 shrink-0 text-warn" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
                 <div class="min-w-0 flex-1">
@@ -1662,7 +1406,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                 </button>
               </div>
 
-              <!-- 组分区：参考图大卡（左） + 轨道 + 成员卡（右） -->
               <div v-for="group in sceneGroups" :key="group.group" class="w-full">
                 <SpatialGroupCard
                   :group="group"
@@ -1705,7 +1448,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                 </SpatialGroupCard>
               </div>
 
-              <!-- 未分组场景：LLM 没归组的（新增的/老数据），平铺兜底，不做空间约束 -->
               <div v-if="ungroupedScenes.length" class="w-full">
                 <div class="mb-2.5 flex items-baseline gap-2">
                   <span class="text-micro text-text-muted">未分组场景</span>
@@ -1729,7 +1471,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                 </div>
               </div>
 
-              <!-- 空态：没有任何场景 -->
               <div v-if="!sceneGroups.length && !ungroupedScenes.length" class="flex h-[300px] w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border">
                 <span class="text-2xs text-text-secondary">暂无场景</span>
                 <span class="text-micro text-text-muted">点下方「添加场景」，或剧本确认后重新提取资产</span>
@@ -1738,7 +1479,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           </template>
         </template>
 
-        <!-- 道具卡片（同布局） -->
         <template v-else>
           <div v-for="item in store.props" :key="item.id" class="group flex w-64 cursor-pointer flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition hover:border-accent/30" @click="openDetail('prop', item)">
             <div class="relative h-40 overflow-hidden bg-white">
@@ -1746,7 +1486,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
               <div v-else class="flex h-full items-center justify-center">
                 <svg class="h-10 w-10 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
               </div>
-              <!-- 生成中覆盖层 -->
               <div v-if="store.generatingAssetIds.includes(item.id)" class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/60 backdrop-blur-sm">
                 <svg class="h-8 w-8 animate-spin text-accent" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
                 <span class="text-xs text-white">AI生成中...</span>
@@ -1774,8 +1513,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
           </div>
         </template>
 
-        <!-- 添加卡片按钮（场景多选模式下隐藏，避免与批量选择混淆）。
-             场景组视图形态下用通栏细条——与 w-full 组分区对仗，不再垫一块 340px 的大空卡 -->
         <button
           v-if="activeTab==='scenes' && !sceneGroupsError && sceneGroups.length && !sceneMultiSelect && !(sceneGroupsLoading && !sceneGroups.length)"
           class="flex h-14 w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border transition hover:border-accent/50"
@@ -1790,23 +1527,19 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         </button>
       </div>
 
-    <!-- 底部进入下一步 -->
     <div class="flex shrink-0 justify-center border-t border-border py-4">
-      <!-- AI 处理中禁用：资产提取未完成时跳走会带着旧数据进下一步 -->
       <button :disabled="store.aiLoading" class="flex items-center gap-2 rounded-xl bg-accent px-8 py-2.5 text-sm font-medium text-black transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50" @click="goNext">
         <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" /></svg>
         {{ store.aiLoading ? '资产处理中...' : '进入下一步' }}
       </button>
     </div>
 
-    <!-- 全局隐藏的音频文件 input（角色音频上传用） -->
     <input ref="audioFileInput" type="file" accept="audio/*" class="hidden" @change="onAudioFileSelected" />
 
     <AssetFormDialog v-model="showAddDialog" :type="dialogType" :project-id="store.currentProjectId" @create="handleCreate" @select="handleSelect" />
     <LibraryAssetPicker v-model="showLibraryPicker" :type="libraryPickerType" :project-id="store.currentProjectId" :auto-use-on-upload="replaceMode" @select="handleLibrarySelect" />
     <AssetDetailDialog :visible="showDetailDialog" :asset="detailAsset" :type="detailType" @close="showDetailDialog=false" @save="saveDetail" />
 
-    <!-- 剧本未确认提示弹窗 -->
     <div v-if="showScriptConfirmDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="showScriptConfirmDialog=false">
       <div class="w-[400px] overflow-hidden rounded-2xl border border-border bg-bg-card shadow-2xl">
         <div class="p-6 text-center">
@@ -1824,7 +1557,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
       </div>
     </div>
 
-    <!-- 分镜方式选择弹窗 -->
     <div v-if="showStoryboardMethodDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="showStoryboardMethodDialog=false">
       <div class="w-[480px] overflow-hidden rounded-2xl border border-border bg-bg-card shadow-2xl">
         <div class="border-b border-border p-5">
@@ -1833,7 +1565,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         </div>
         <div class="p-5">
           <div class="grid grid-cols-2 gap-4">
-            <!-- AI 分镜 -->
             <button
               class="flex flex-col items-center gap-3 rounded-xl border border-border p-5 text-center transition hover:border-accent/50 hover:bg-bg-secondary disabled:opacity-50"
               :disabled="storyboardLoading"
@@ -1849,7 +1580,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
               </div>
             </button>
 
-            <!-- 本地上传 -->
             <button
               class="flex flex-col items-center gap-3 rounded-xl border border-border p-5 text-center transition hover:border-accent/50 hover:bg-bg-secondary"
               @click="handleUploadStoryboard"
@@ -1864,7 +1594,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
             </button>
           </div>
 
-          <!-- 隐藏的文件 input -->
           <input ref="fileInputRef" type="file" accept=".json" class="hidden" @change="handleFileChange" />
         </div>
         <div class="border-t border-border p-4">
@@ -1875,26 +1604,19 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
       </div>
     </div>
 
-    <!-- 通用分镜脚本导入弹窗 -->
     <ImportStoryboardDialog
       v-model="showImportDialog"
       :episode-id="store.currentEpisodeId"
       @imported="handleImported"
     />
 
-    <!-- 自定义确认弹窗 -->
     <Teleport to="body">
       <Transition name="fade">
         <div v-if="showConfirmDialog" class="fixed inset-0 z-[9999] flex items-center justify-center">
-          <!-- 遮罩层 -->
           <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="handleConfirmCancel"></div>
-          <!-- 弹窗卡片 -->
           <div class="relative w-[420px] max-w-[90vw] overflow-hidden rounded-2xl border border-border bg-bg-card shadow-2xl">
-            <!-- 顶部装饰条 -->
             <div class="h-1 w-full bg-accent"></div>
-            <!-- 内容区 -->
             <div class="p-6">
-              <!-- 图标 + 标题（danger 弹窗用垃圾桶图标 + 红色，与生成类确认的闪电图标区分） -->
               <div class="flex items-start gap-4">
                 <div class="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl" :class="confirmConfig.danger ? 'bg-danger/10' : 'bg-accent/10'">
                   <svg v-if="confirmConfig.danger" class="h-5 w-5 text-danger" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1909,7 +1631,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                   <p class="mt-1.5 text-sm leading-relaxed text-text-secondary">{{ confirmConfig.message }}</p>
                 </div>
               </div>
-              <!-- 按钮区 -->
               <div class="mt-6 flex justify-end gap-3">
                 <button
                   class="rounded-lg border border-border bg-transparent px-4 py-2 text-sm font-medium text-text-secondary transition hover:border-border-light hover:text-white"
@@ -1917,7 +1638,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                 >
                   {{ confirmConfig.cancelText }}
                 </button>
-                <!-- 次选项：与主按钮并存的另一种删除档位（如「仅删图片」），描边红弱化一档 -->
                 <button
                   v-if="confirmConfig.onAltConfirm"
                   class="rounded-lg border border-danger/40 bg-danger/10 px-4 py-2 text-sm font-medium text-danger transition hover:bg-danger/20"
@@ -1942,7 +1662,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
 </template>
 
 <style scoped>
-/* 确认弹窗淡入淡出动画 */
 .fade-enter-active,
 .fade-leave-active {
   transition: opacity 0.2s ease;
@@ -1961,7 +1680,6 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
   opacity: 0;
 }
 
-/* 「去定参考图」横幅按钮：滚动定位到第一个未决组卡后的呼吸高亮（openGroupReview 加 class） */
 @keyframes group-pulse-kf {
   0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
   25%, 75% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.35); }

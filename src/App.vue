@@ -8,10 +8,6 @@ import { useProjectStore } from './stores/project'
 const store = useProjectStore()
 const appReady = ref(false)
 
-// [2026-09-18] 全局 401 处理：后端启用 API_TOKEN 鉴权后，任何接口返回 401 都会弹出
-// 令牌输入框；用户粘贴令牌保存到 localStorage 后自动刷新（api.js 在 401 时广播
-// wb:unauthorized）。在 setup 顶层注册监听，保证早于任何 API 请求
-// （子组件 mounted 早于父组件 onMounted，放 onMounted 里可能错过首轮 401）。
 const showTokenDialog = ref(false)
 const tokenInput = ref('')
 const onUnauthorized = () => {
@@ -29,7 +25,6 @@ function saveToken() {
 }
 
 onMounted(async () => {
-  // ensureReady 与路由守卫共用同一个初始化 promise，避免重复初始化
   await store.ensureReady()
   appReady.value = true
 })
@@ -37,7 +32,6 @@ onMounted(async () => {
 
 <template>
   <div class="flex h-full flex-col bg-bg-primary">
-    <!-- 加载状态 -->
     <div v-if="!appReady" class="flex h-full items-center justify-center">
       <div class="flex flex-col items-center gap-3">
         <svg class="h-8 w-8 animate-spin text-accent" fill="none" viewBox="0 0 24 24">
@@ -54,13 +48,8 @@ onMounted(async () => {
       </main>
     </template>
 
-    <!-- 统一弹窗宿主：确认框 + 右下角提示条。
-         全项目唯一的挂载点——放在最外层，所以无论当前在哪一页、
-         甚至弹窗由 store 内部触发，都能正确渲染。 -->
     <DialogHost />
 
-    <!-- 全局 401 访问令牌弹窗：后端启用 API_TOKEN 鉴权后，任何接口返回 401 都会触发。
-         放在最外层、不依赖 appReady，加载阶段也能弹出。 -->
     <div v-if="showTokenDialog" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4">
       <form class="w-full max-w-md border border-[#3c3c3c] bg-[#202020] p-6 shadow-2xl" @submit.prevent="saveToken">
         <h2 class="mb-2 text-lg font-semibold text-white">需要访问令牌</h2>

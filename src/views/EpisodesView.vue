@@ -12,7 +12,6 @@ onMounted(async () => {
     router.replace('/projects')
     return
   }
-  // 进入项目时 selectProject 已加载剧集；刷新直达时兜底补一次
   if (!store.episodes.length) {
     await store.loadEpisodes(store.currentProjectId)
   }
@@ -20,8 +19,6 @@ onMounted(async () => {
 
 const episodes = computed(() => store.episodes)
 
-// 项目级默认比例：下拉直改（乐观更新 + 失败回滚，见 store.updateProjectAspectRatio）。
-// 这是唯一配置入口：分镜页/成片页只读跟随，保证生图与出片同源。
 const projectAspectRatio = computed({
   get: () => store.aspectRatio,
   set: (v) => { store.updateProjectAspectRatio(v) },
@@ -38,13 +35,11 @@ function epName(ep) {
   return ep.title || `第 ${ep.episode_number} 集`
 }
 
-// 点集 → 载入该集数据 → 进入剧本页（三级流程的最后一跳）
 async function openEpisode(ep) {
   await store.switchEpisode(ep.id)
   router.push('/script')
 }
 
-// 新增剧集：创建后留在列表，store.episodes 会响应式刷新
 async function addEpisode() {
   await store.addEpisode({ title: '' })
 }
@@ -57,7 +52,6 @@ async function removeEpisode(ep) {
 
 <template>
   <div class="min-h-full w-full overflow-y-auto bg-[#151515] text-white">
-    <!-- 顶部栏（剧集列表屏用自己的头部，全局 AppHeader 在此隐藏） -->
     <header class="flex h-14 items-center justify-between border-b border-[#242424] bg-black px-14">
       <button class="flex items-center gap-2 text-white/70 transition hover:text-white" @click="router.push('/projects')">
         <span class="rounded border border-white/70 px-2 py-0.5 text-[11px] font-black tracking-wide">RH</span>
@@ -71,7 +65,6 @@ async function removeEpisode(ep) {
     </header>
 
     <main class="px-14 py-8">
-      <!-- 面包屑 + 标题 -->
       <div class="mb-6 border-b border-[#262626] pb-5">
         <div class="text-xs text-white/40">我的项目 / <b class="text-white/70">{{ store.projectTitle }}</b></div>
         <div class="mt-2 flex items-end justify-between gap-4">
@@ -79,8 +72,6 @@ async function removeEpisode(ep) {
             <h1 class="text-xl font-semibold">{{ store.projectTitle }} · 剧集</h1>
             <p class="mt-1 text-sm text-white/40">点任一集进入它的剧本页 · 数据按集隔离，默认都在第 1 集</p>
           </div>
-          <!-- 项目级默认比例：唯一配置入口，生图与出片链路共用。
-               注意：只影响之后的生成，已出图/片不回填重渲染。 -->
           <div class="flex items-center gap-2 pb-0.5" title="项目级设置：该项目所有集的分镜图与出片统一使用此比例；只影响新生成的内容">
             <span class="text-xs text-white/40">默认比例</span>
             <select
@@ -99,7 +90,6 @@ async function removeEpisode(ep) {
         <p class="mt-1 text-[11px] text-white/25">当前 {{ ratioLabel }} · 对该项目下所有集生效：分镜图与出片统一使用，已生成的内容不会被追溯修改</p>
       </div>
 
-      <!-- 剧集网格 -->
       <div v-if="!episodes.length" class="border border-dashed border-[#383838] py-20 text-center text-sm text-white/40">
         该项目还没有剧集，点击「新增剧集」开始。
       </div>
@@ -111,7 +101,6 @@ async function removeEpisode(ep) {
           @click="openEpisode(ep)"
         >
           <div class="relative aspect-[1.72] overflow-hidden bg-[radial-gradient(ellipse_at_center,#5c6629_0%,#25290e_35%,#121212_75%)]">
-            <!-- 删除（hover 出现） -->
             <button
               class="absolute bottom-3 right-3 z-10 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white opacity-0 backdrop-blur transition hover:bg-red-500 group-hover:opacity-100"
               title="删除剧集"
@@ -134,7 +123,6 @@ async function removeEpisode(ep) {
           </div>
         </div>
 
-        <!-- 新增剧集 -->
         <button
           class="flex min-h-[200px] flex-col items-center justify-center border border-dashed border-[#383838] bg-transparent text-white/50 transition hover:border-[#c7ff00] hover:text-[#c7ff00]"
           @click="addEpisode"

@@ -1,17 +1,4 @@
 #!/usr/bin/env node
-/**
- * 一键启动脚本：后端(Express :3000) + 前端(Vite :5173)
- *
- * 用法：
- *   node start.js            启动两个服务
- *   node start.js --watch    后端用 node --watch（改代码自动重启，开发时可用）
- *   node start.js --no-open  启动后不自动打开浏览器
- *   node start.js --backend  只启动后端
- *   node start.js --frontend 只启动前端
- *   node start.js --stop    停止服务（释放 3000 / 5173 端口）
- *
- * 按 Ctrl+C 会同时关掉两个服务（含 Windows 下的子进程树）。
- */
 
 import { spawn, spawnSync } from 'node:child_process'
 import http from 'node:http'
@@ -24,7 +11,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = __dirname
 const SERVER_DIR = path.join(ROOT, 'server')
 
-// ---------- 参数 ----------
 const argv = process.argv.slice(2)
 const OPT = {
   watch: argv.includes('--watch') || argv.includes('-w'),
@@ -34,7 +20,6 @@ const OPT = {
   skipInstall: argv.includes('--no-install'),
 }
 
-// ---------- 端口（读 server/.env 的 PORT，默认 3000）----------
 function readEnvPort() {
   try {
     const envPath = path.join(SERVER_DIR, '.env')
@@ -49,7 +34,6 @@ function readEnvPort() {
 const BACKEND_PORT = Number(process.env.PORT) || readEnvPort()
 const FRONTEND_PORT = Number(process.env.VITE_PORT) || 5173
 
-// ---------- 颜色输出 ----------
 const C = {
   reset: '\x1b[0m',
   gray: '\x1b[90m',
@@ -66,7 +50,6 @@ function warn(msg) { console.log(`${C.gray}[${ts()}]${C.reset} ${C.yellow}!${C.r
 function err(msg) { console.log(`${C.gray}[${ts()}]${C.reset} ${C.red}✗${C.reset} ${msg}`) }
 function step(msg) { console.log(`\n${C.bold}${C.cyan}▶ ${msg}${C.reset}`) }
 
-// ---------- 端口占用处理 ----------
 function pidsOnPort(port) {
   return new Promise((resolve) => {
     const isWin = process.platform === 'win32'
@@ -116,7 +99,6 @@ async function freePort(port, label) {
   else ok(`端口 ${port} 已释放`)
 }
 
-// ---------- 工具 ----------
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 function probe(port, pathname = '/', timeout = 1200) {
@@ -167,9 +149,7 @@ function openBrowser(url) {
   spawn(cmd, { shell: true, windowsHide: true, stdio: 'ignore' })
 }
 
-// ---------- 子进程管理 ----------
 const children = []
-// 子进程崩溃自愈：非正常退出时自动重启（到达上限后放弃），避免单点崩溃导致整个平台"点不动"
 let backendRestarts = 0
 let frontendRestarts = 0
 const MAX_RESTARTS = 30
@@ -257,7 +237,6 @@ function startFrontend() {
   return child
 }
 
-// ---------- 退出清理 ----------
 let shuttingDown = false
 function cleanup(code = 0) {
   if (shuttingDown) return
@@ -271,7 +250,7 @@ function cleanup(code = 0) {
       } else {
         c.kill('SIGTERM')
       }
-    } catch { /* ignore */ }
+    } catch {  }
   }
   setTimeout(() => process.exit(code), 400)
 }
@@ -280,7 +259,6 @@ process.on('SIGINT', () => { console.log(''); cleanup(0) })
 process.on('SIGTERM', () => cleanup(0))
 process.on('exit', () => { if (!shuttingDown) cleanup(0) })
 
-// ---------- 主流程 ----------
 async function main() {
   console.log(`${C.bold}============================================${C.reset}`)
   console.log(`${C.bold}  分镜项目 · 一键启动${C.reset}`)

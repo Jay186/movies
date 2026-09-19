@@ -52,3 +52,6 @@ _archive_bak/
 # [清理 2026-09-19] 视频垃圾箱与审计快照（体积大、过程产物）
 _video_trash/
 _snapshots/
+
+# [约束 2026-09-19] AI 生成过程文件统一归档（勿入库）
+/generated/

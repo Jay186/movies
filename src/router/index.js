@@ -53,11 +53,7 @@ const router = createRouter({
   routes,
 })
 
-// 全局前置守卫：
-//  - 项目列表 / 剧集列表是入口与项目主页，不被剧本/分镜确认校验拦截
-//  - 进入设定/分镜/短片前必须已确认剧本；短片页额外要求分镜已确认
 router.beforeEach(async (to) => {
-  // 剧集列表需要已选中项目（刷新直达时兜底）
   if (to.meta.tab === 'episodes') {
     const store = useProjectStore()
     if (!store.initialized) {
@@ -66,11 +62,8 @@ router.beforeEach(async (to) => {
     if (!store.currentProjectId) return { path: '/projects' }
     return
   }
-  // 项目列表是工作台入口，不应被剧本/分镜确认校验拦截
   if (to.meta.tab !== 'script' && to.meta.tab !== 'projects') {
     const store = useProjectStore()
-    // 等待初始化完成（刷新时 initProject 还在从后端加载数据），
-    // 最多等 5 秒，超时按未确认处理，避免 !initialized 时直接放行绕过卡点
     if (!store.initialized) {
       await Promise.race([
         store.ensureReady(),

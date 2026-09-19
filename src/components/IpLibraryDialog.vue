@@ -13,25 +13,19 @@ const saving = ref(false)
 const errorMsg = ref('')
 const toast = ref('')
 
-// 逐卡加载态：busyId 命中的那张卡片盖遮罩，busyLabel 是遮罩上的文案
 const busyId = ref(null)
 const busyLabel = ref('')
 
-// 描述展开的 IP id 集合
 const expandedIds = ref(new Set())
 
-// 描述 <p> 元素表（纯测量用，不需要响应式）+ 实测被截断的 id 集合
 const descRefs = new Map()
 const overflowIds = ref(new Set())
 
-// v-for 里的函数 ref：元素卸载时 el 为 null，顺手清掉避免 Map 泄漏
 function setDescRef(el, id) {
   if (el) descRefs.set(id, el)
   else descRefs.delete(id)
 }
 
-// -webkit-line-clamp 下 scrollHeight 各内核表现不一致，
-// 这里临时解除 clamp 量一次全高再还原，保证"是否真被截断"的判定是确定的
 function isClamped(el) {
   const clampedHeight = el.clientHeight
   el.style.webkitLineClamp = 'unset'
@@ -47,7 +41,6 @@ function measureDescriptions() {
       descRefs.delete(id)
       continue
     }
-    // 展开态下高度是 max-h 而不是 3 行，测不准，保持原有判定
     if (expandedIds.value.has(id)) continue
     if (isClamped(el)) next.add(id)
     else next.delete(id)
@@ -55,11 +48,7 @@ function measureDescriptions() {
   overflowIds.value = next
 }
 
-// 确认弹窗（2026-09-16 统一）：此前本组件自己写了一套确认模态来替代 window.confirm，
-// 结果全项目并存两套弹窗皮肤（这套是直角 + 硬编码 #202020，全局是 V2 圆角 + 令牌色）。
-// 现在只保留一个薄适配层，渲染交给全局 <DialogHost />，调用点一个字都不用改。
 
-// 「应用到项目」弹层：只存 IP id，展示对象从 list 里实时取，loadIp() 刷新后徽标自动跟上
 const applyPanelIpId = ref(null)
 const applyPanelIp = computed(() => list.value.find((i) => i.id === applyPanelIpId.value) || null)
 function openApplyPanel(ip) {
@@ -86,7 +75,6 @@ function flash(message) {
   setTimeout(() => { if (toast.value === message) toast.value = '' }, 3000)
 }
 
-// 错误条：8 秒后自动消失，手动关闭或重新加载时清理定时器避免泄漏
 let errorTimer = null
 function setError(message) {
   errorMsg.value = message
@@ -115,7 +103,6 @@ async function loadIp() {
   } finally {
     loading.value = false
   }
-  // 数据到位、DOM 更新后实测哪些描述真被截断
   await nextTick()
   measureDescriptions()
 }
@@ -129,7 +116,6 @@ onUnmounted(() => {
   descRefs.clear()
 })
 
-// 确认后才执行 onConfirm：参数原样搬运给全局弹窗
 async function askConfirm({ title, message, confirmText = '确认', danger = false, onConfirm }) {
   const ok = await confirmDialog({
     title,
@@ -200,7 +186,6 @@ async function saveEdit() {
   }
 }
 
-// 换形象 = 打开统一的选图器（选择图片弹窗），从我的图库选或在那里上传
 const showImagePicker = ref(false)
 const pickerTarget = ref(null)
 function pickImage(ip) {
@@ -236,14 +221,12 @@ function pickAudio(ip) {
   audioInput.value?.click()
 }
 
-// 音色参考的合理上限：H3 音色克隆只需几秒样本，且 base64 再膨胀 33%
 const AUDIO_MAX_BYTES = 10 * 1024 * 1024
 const AUDIO_EXT_RE = /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i
 
 async function onAudioPicked(event) {
   const file = event.target.files?.[0]
   if (!file || !audioTarget.value) return
-  // 类型白名单 + 大小上限：accept 只过滤文件选择对话框，拖放/改后缀可绕过
   const isAudio = (file.type || '').startsWith('audio/') || AUDIO_EXT_RE.test(file.name)
   if (!isAudio) {
     setError('请选择音频文件（mp3/wav/m4a/aac/ogg/flac）')
@@ -303,7 +286,6 @@ async function runDeleteAudio(ip) {
   }
 }
 
-// 弹层里的「同步」：该项目已有同名副本，覆盖到 IP 当前设定
 function askSyncProject(ip, pj) {
   if (saving.value) return
   askConfirm({
@@ -315,14 +297,12 @@ function askSyncProject(ip, pj) {
   })
 }
 
-// diffFields 机器码 → 中文标签（弹层行内展示"差在哪"）
 function diffLabel(pj) {
   if (!pj.diffFields?.length) return ''
   const map = { image: '形象', description: '描述', audio: '音色' }
   return pj.diffFields.map((f) => map[f] || f).join('、')
 }
 
-// 弹层里的「引入」：该项目还没有这个角色，用户在清单里看到「未引入」并主动点，才允许新建
 function askImportProject(ip, pj) {
   if (saving.value) return
   askConfirm({
@@ -334,7 +314,6 @@ function askImportProject(ip, pj) {
   })
 }
 
-// 弹层里的「移除」：把角色从该项目移除（解除关联 + 删项目角色），之后可随时用「引入」加回来
 function askRemoveFromProject(ip, pj) {
   if (saving.value) return
   if (!pj.projectCharacterId) return
@@ -358,7 +337,6 @@ async function runRemoveFromProject(ip, pj) {
     flash(`已把「${ip.name}」从「${pj.title}」移除`)
     await loadIp()
   } catch (e) {
-    // 失败不关弹层，让用户能重试
     setError(e.message || '移除失败')
   } finally {
     saving.value = false
@@ -378,7 +356,6 @@ async function runApplyOne(ip, projectId, label, create) {
     const rows = (result.results || [])
     const syncedRows = rows.reduce((sum, r) => sum + (r.syncedEpisodeRows || 0), 0)
     closeApplyPanel()
-    // 项目副本在弹窗打开期间被删掉的兜底：后端跳过，不能报成功
     if (rows[0] && rows[0].skipped === true) {
       flash(`「${label}」里还没有「${ip.name}」，已跳过。请先在该项目的设定页添加这个角色。`)
     } else {
@@ -386,7 +363,6 @@ async function runApplyOne(ip, projectId, label, create) {
     }
     await loadIp()
   } catch (e) {
-    // 失败不关弹层，让用户能重试
     setError(e.message || (create ? '引入失败' : '同步失败'))
   } finally {
     saving.value = false
@@ -442,7 +418,6 @@ async function loadImportList() {
 async function promote(pc) {
   if (saving.value) return
   saving.value = true
-  // 提升条不在 IP 卡片上，用字符串 key 避免和 ip.id 撞号导致无关卡片转圈
   busyId.value = `promote-${pc.id}`
   busyLabel.value = '提升中…'
   try {
@@ -516,7 +491,6 @@ async function promote(pc) {
 
         <div v-else class="grid grid-cols-2 gap-4 lg:grid-cols-3">
           <div v-for="ip in list" :key="ip.id" class="relative flex flex-col overflow-hidden border border-[#303030] bg-[#202020]">
-            <!-- 逐卡加载遮罩：盖整张卡片，不只是图片区 -->
             <div v-if="busyId === ip.id" class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-black/60">
               <svg class="h-6 w-6 animate-spin text-white" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
@@ -585,11 +559,9 @@ async function promote(pc) {
 
     <input ref="audioInput" type="file" accept="audio/*" class="hidden" @change="onAudioPicked" />
 
-    <!-- 换形象 = 统一的选图器（我的图库 / 系统素材 / 上传） -->
     <LibraryAssetPicker v-model="showImagePicker" type="character" @select="onPickerSelect" />
   </div>
 
-  <!-- 「应用到项目」弹层：按项目列同步状态，有改动才需要动手 -->
   <div v-if="applyPanelIp" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" @click.self="closeApplyPanel">
     <div class="flex max-h-[80vh] w-full max-w-md flex-col border border-[#3c3c3c] bg-[#202020] shadow-2xl">
       <div class="shrink-0 border-b border-[#303030] px-5 py-4">

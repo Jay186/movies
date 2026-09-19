@@ -1,6 +1,3 @@
-// 项目级 IP 角色库 API
-// 布布、一二这类跨集主角的主设定存放在 project_characters，各集引用它。
-// 改主设定 → 一次性同步到项目下所有集，杜绝"同名角色跨集长两张脸"。
 import { Router } from 'express'
 import { query, queryOne, execute, transaction } from '../db.js'
 import {
@@ -14,7 +11,6 @@ import {
 
 const router = Router()
 
-// 列表（带"被多少集使用"统计）
 router.get('/', (req, res) => {
   const projectId = Number(req.query.projectId)
   if (!projectId) return res.status(400).json({ error: 'projectId 必填' })
@@ -32,7 +28,6 @@ router.get('/', (req, res) => {
   res.json(list)
 })
 
-// 新建主设定（同名已存在则直接返回既有记录，避免重复）
 router.post('/', (req, res) => {
   const projectId = Number(req.body.projectId)
   if (!projectId) return res.status(400).json({ error: 'projectId 必填' })
@@ -44,7 +39,6 @@ router.post('/', (req, res) => {
   res.json(created)
 })
 
-// 更新主设定并同步所有集
 router.put('/:id', (req, res) => {
   const id = Number(req.params.id)
   const master = queryOne('SELECT * FROM project_characters WHERE id = ?', [id])
@@ -60,7 +54,6 @@ router.put('/:id', (req, res) => {
   })
 })
 
-// 把主设定强制推送到所有引用它的集（手动修过库之后用来对齐）
 router.post('/:id/sync', (req, res) => {
   const id = Number(req.params.id)
   if (!queryOne('SELECT id FROM project_characters WHERE id = ?', [id])) {
@@ -70,7 +63,6 @@ router.post('/:id/sync', (req, res) => {
   res.json({ success: true, syncedEpisodeRows: synced })
 })
 
-// 删除主设定：只解除各集链接，保留各集现有副本，不影响已生成的分镜/视频
 router.delete('/:id', (req, res) => {
   const id = Number(req.params.id)
   if (!queryOne('SELECT id FROM project_characters WHERE id = ?', [id])) {
@@ -81,7 +73,6 @@ router.delete('/:id', (req, res) => {
   res.json({ success: true, unlinkedEpisodeRows: unlinked })
 })
 
-// 把某集的角色"提升"为项目角色（按名字批量链接已存在的主设定，没有则新建）
 router.post('/link-episode', (req, res) => {
   const { episodeId } = req.body || {}
   if (!episodeId) return res.status(400).json({ error: 'episodeId 必填' })

@@ -3,7 +3,6 @@ import { queryOne } from '../db.js'
 
 const router = Router()
 
-// 查询任务状态
 router.get('/:taskId', (req, res) => {
   const task = queryOne('SELECT * FROM tasks WHERE id = ?', [req.params.taskId])
   if (!task) return res.status(404).json({ error: '任务不存在' })

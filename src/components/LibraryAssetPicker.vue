@@ -8,7 +8,6 @@ const props = defineProps({
   modelValue: { type: Boolean, default: false },
   type: { type: String, default: 'character' },
   projectId: { type: [String, Number], default: null },
-  // true=由资产卡片"本地上传"打开：上传完成后自动把新素材替换到目标卡片（上传即替换）
   autoUseOnUpload: { type: Boolean, default: false },
 })
 
@@ -22,13 +21,12 @@ const pageSize = ref(32)
 const total = ref(0)
 const records = ref([])
 const loading = ref(false)
-const selectedId = ref(null) // 单选
+const selectedId = ref(null) 
 const showUploadDialog = ref(false)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 const typeLabel = computed(() => ({ character: '角色', scene: '场景', prop: '道具' }[activeType.value]))
 
-// 素材显示名：空名或从上传文件名自动提取的不可读名字（mine_xxx 前缀）→ 可读 fallback
 function displayName(item) {
   const n = String(item.name || '').trim()
   if (!n) return '未命名素材'
@@ -36,13 +34,11 @@ function displayName(item) {
   return n
 }
 
-// 我的图库按名称分组：同名（同一角色的多张图）相邻并显示组头
 const groupedRecords = computed(() => {
   if (activeSource.value !== 'mine') return records.value
   return [...records.value].sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-CN'))
 })
 
-// 重命名（仅我的素材）
 const editingNameId = ref(null)
 const renameDraft = ref('')
 function startRename(item) {
@@ -100,7 +96,6 @@ function search() {
   fetchData()
 }
 
-// 单选：点击选中，再点取消
 function toggleSelect(item) {
   const id = item.cluster_key || item.id
   selectedId.value = selectedId.value === id ? null : id
@@ -110,20 +105,16 @@ function isSelected(item) {
   return selectedId.value === (item.cluster_key || item.id)
 }
 
-// 使用该素材
 function useAsset(item) {
   emit('select', { items: [item], type: activeType.value })
   close()
 }
 
-// 删除素材（仅我的素材）
 async function deleteAsset(item) {
   if (!confirm(`确定删除「${item.name}」吗？`)) return
   try {
     await api.deleteLibraryAsset(item.id)
-    // 如果删除的是当前选中的，清除选中
     if (isSelected(item)) selectedId.value = null
-    // 刷新列表
     await fetchData()
   } catch (e) {
     console.error('删除失败:', e)
@@ -135,7 +126,6 @@ function close() {
   emit('update:modelValue', false)
 }
 
-// ===== 素材详情（同一 cluster 的多机位/多视角图）=====
 const showDetailDialog = ref(false)
 const detailLoading = ref(false)
 const detailItems = ref([])
@@ -161,7 +151,6 @@ function closeDetail() {
   showDetailDialog.value = false
 }
 
-// 选用某张详情图：构造为主素材卡片数据，cover_url 指向所选视角图
 function useDetailItem(detailItem) {
   if (!detailCluster.value) return
   emit('select', {
@@ -181,7 +170,6 @@ function openUpload() {
   showUploadDialog.value = true
 }
 
-// 上传完成后：替换模式下自动把新素材应用到目标卡片（等价于选中+使用）；否则仅刷新列表
 function onUploaded(asset) {
   if (props.autoUseOnUpload && asset?.cover_url) {
     emit('select', { items: [asset], type: activeType.value })
@@ -197,7 +185,6 @@ function onUploaded(asset) {
   <Teleport to="body">
     <div v-if="modelValue" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" @click.self="close">
       <div class="flex max-h-[90vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-border bg-bg-primary shadow-2xl">
-        <!-- 标题栏 -->
         <div class="flex shrink-0 items-center justify-between border-b border-border px-6 py-4">
           <h2 class="text-lg font-medium text-white">选择图片</h2>
           <button class="flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition hover:bg-bg-hover hover:text-white" @click="close">
@@ -205,7 +192,6 @@ function onUploaded(asset) {
           </button>
         </div>
 
-        <!-- 工具栏 -->
         <div class="flex shrink-0 items-center justify-between border-b border-border px-6 py-3">
           <div class="flex items-center gap-4">
             <div class="flex rounded-lg border border-border bg-bg-secondary p-0.5 text-xs">
@@ -222,11 +208,9 @@ function onUploaded(asset) {
           </div>
         </div>
 
-        <!-- 内容区 -->
         <div class="flex-1 overflow-y-auto p-6">
           <div v-if="loading" class="flex h-40 items-center justify-center text-sm text-text-muted">加载中...</div>
           <div v-else class="grid grid-cols-4 gap-4">
-            <!-- 上传卡片（仅我的素材） -->
             <div v-if="activeSource==='mine'" class="flex cursor-pointer flex-col items-center justify-center overflow-hidden rounded-xl border border-dashed border-border bg-bg-card transition hover:border-accent/50" @click="openUpload">
               <div class="flex flex-1 items-center justify-center py-10">
                 <svg class="h-12 w-12 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4v16m8-8H4" /></svg>
@@ -234,7 +218,6 @@ function onUploaded(asset) {
               <div class="w-full border-t border-border py-2 text-center text-xs text-text-secondary">上传</div>
             </div>
 
-            <!-- 素材卡片（我的图库按名称分组，名字变化处显示组头） -->
             <template v-for="(item, idx) in groupedRecords" :key="item.cluster_key || item.id">
               <div v-if="activeSource==='mine' && idx > 0 && displayName(groupedRecords[idx-1]) !== displayName(item)" class="col-span-4 mt-2 border-b border-border pb-1 text-xs text-text-muted">{{ displayName(item) }}</div>
               <div class="group relative overflow-hidden rounded-xl border transition" :class="isSelected(item)?'border-accent bg-accent/5':'border-border bg-bg-card hover:border-border-light'" @click="toggleSelect(item)">
@@ -245,17 +228,14 @@ function onUploaded(asset) {
                   </div>
                   <span v-if="item.item_count" class="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white backdrop-blur">{{ item.item_count }}个素材</span>
 
-                  <!-- 详情按钮（系统素材且多机位时显示） -->
                   <button v-if="activeSource==='library' && item.item_count > 1" class="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur transition hover:bg-accent hover:text-black" title="查看详情" @click.stop="openDetail(item)">
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                   </button>
 
-                  <!-- 选中时右上角勾选 -->
                   <div v-if="isSelected(item)" class="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-accent text-black">
                     <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" /></svg>
                   </div>
 
-                  <!-- 选中时底部操作栏：使用 + 重命名 + 删除 -->
                   <div v-if="isSelected(item)" class="absolute bottom-0 left-0 right-0 flex gap-1 bg-black/70 p-1.5 backdrop-blur">
                     <button class="flex flex-1 items-center justify-center gap-1 rounded bg-accent/90 py-1 text-[10px] font-medium text-black transition hover:bg-accent" @click.stop="useAsset(item)">
                       <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
@@ -271,7 +251,6 @@ function onUploaded(asset) {
                     </button>
                   </div>
                 </div>
-                <!-- 名字 / 重命名编辑态 / 引用计数 -->
                 <div v-if="editingNameId === item.id" class="flex items-center gap-1 border-t border-border px-2 py-1.5">
                   <input v-model="renameDraft" class="w-full min-w-0 rounded border border-accent bg-bg-secondary px-1.5 py-0.5 text-xs text-white outline-none" @keyup.enter="saveRename(item)" @blur="saveRename(item)" />
                 </div>
@@ -286,7 +265,6 @@ function onUploaded(asset) {
           <div v-if="!loading && records.length===0 && activeSource!=='mine'" class="flex h-40 items-center justify-center text-sm text-text-muted">暂无{{ typeLabel }}素材</div>
         </div>
 
-        <!-- 底部分页（去掉确认添加按钮） -->
         <div class="flex shrink-0 items-center justify-center border-t border-border px-6 py-3">
           <div class="flex items-center gap-1">
             <button class="flex h-8 w-8 items-center justify-center rounded-md border border-border text-text-muted transition hover:border-border-light hover:text-white disabled:opacity-30" :disabled="page<=1" @click="goPage(page-1)">
@@ -303,7 +281,6 @@ function onUploaded(asset) {
 
     <UploadAssetDialog v-model="showUploadDialog" :type="activeType" @uploaded="onUploaded" />
 
-    <!-- 素材详情弹窗（多机位/多视角图） -->
     <div v-if="showDetailDialog" class="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" @click.self="closeDetail">
       <div class="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-border bg-bg-primary shadow-2xl">
         <div class="flex shrink-0 items-center justify-between border-b border-border px-6 py-4">

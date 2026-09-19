@@ -7,7 +7,6 @@
     "dev": "vite",
     "start": "node start.js",
     "build": "vite build",
-    "build:clean": "node scripts/clean-dist.mjs && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

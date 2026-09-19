@@ -1,4 +1,3 @@
-// 风格预设数据（169个风格，来自RunningHub官方风格库）
 export const stylePresets = [
   {
     "key": "cinematic",

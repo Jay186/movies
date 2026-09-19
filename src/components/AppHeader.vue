@@ -23,7 +23,6 @@ const activeIndex = computed(() => steps.findIndex(s => s.key === (route.meta.ta
 
 function stepStatus(index) {
   if (index === activeIndex.value) return 'current'
-  // 完成与否看数据是否就绪，与当前所在页无关：来回切换时已完成步骤的勾号不消失
   const done = {
     script: store.scriptConfirmed,
     art: !!store.currentStyle?.key,
@@ -35,7 +34,6 @@ function stepStatus(index) {
   return 'pending'
 }
 
-// 解锁看前置数据，与当前所在页解耦：剧本已确认可进步骤 2；已选画风可进后续所有步骤；短片需分镜已确认
 function isUnlocked(index) {
   if (index === 0) return true
   if (!store.scriptConfirmed) return false
@@ -75,7 +73,6 @@ function confirmGuide() {
 
 <template>
   <header class="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-border bg-bg-primary/95 px-4 backdrop-blur">
-    <!-- Left: back + title + status capsule -->
     <div class="flex min-w-0 shrink-0 items-center gap-2.5">
       <button
         class="flex h-8 w-8 items-center justify-center rounded-btn text-text-secondary transition hover:bg-bg-hover hover:text-text-primary"
@@ -101,7 +98,6 @@ function confirmGuide() {
       </div>
     </div>
 
-    <!-- Center: pipeline steps（胶囊化分组，当前步高亮，完成步打勾） -->
     <nav class="flex shrink-0 items-center gap-0.5 rounded-shell border border-border/70 bg-bg-secondary/60 p-1">
       <template v-for="(step, index) in steps" :key="step.key">
         <button
@@ -152,14 +148,12 @@ function confirmGuide() {
       </template>
     </nav>
 
-    <!-- Right: user -->
     <div class="flex shrink-0 items-center gap-3">
       <div class="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-bg-hover text-[12px] text-text-secondary">
         我
       </div>
     </div>
 
-    <!-- Guide modal -->
     <Teleport to="body">
       <div
         v-if="showGuide"

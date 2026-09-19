@@ -2,11 +2,6 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ============================================================
-   分镜项目 · 基础样式层（设计令牌 v1）
-   目标：统一表面/文字/描边/焦点/滚动条，让分镜页与短片页共享
-   同一套视觉语言；所有交互元素都有可见的键盘焦点环。
-   ============================================================ */
 
 :root {
   --surface-page: #0b0b0e;
@@ -19,7 +14,6 @@
   --fg-dim: #a8a8b3;
   --fg-faint: #7e7e8c;
   --brand: #c8f542;
-  /* 圆角刻度（V2）：与 tailwind.config.js 的 borderRadius 保持一致 */
   --r-tag: 10px;
   --r-control: 12px;
   --r-btn: 16px;
@@ -50,7 +44,6 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* ---------- 滚动条：更细、更含蓄，悬停才显现 ---------- */
 ::-webkit-scrollbar {
   width: 12px;
   height: 12px;
@@ -72,33 +65,27 @@ body {
   background: transparent;
 }
 
-/* Firefox */
 * {
   scrollbar-width: thin;
   scrollbar-color: #3e3e48 transparent;
 }
 
-/* ---------- 键盘可达性：统一焦点环（V2 用软光环，不用硬描边） ---------- */
-/* 只在键盘导航时出现（:focus-visible），鼠标点击不显示，避免视觉噪音 */
 :where(button, a, input, select, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 3px;
   border-radius: var(--r-control);
 }
 
-/* ---------- 文本选中 ---------- */
 ::selection {
   background: rgb(200 245 66 / 0.28);
   color: #ffffff;
 }
 
-/* ---------- 表单控件基线 ---------- */
 select option {
   background: var(--surface-card);
   color: var(--fg);
 }
 
-/* ---------- 尊重「减少动态效果」偏好 ---------- */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -110,9 +97,7 @@ select option {
   }
 }
 
-/* ---------- 工具类 ---------- */
 
-/* 棋盘格：透明图占位背景（V2 表面色） */
 .checkerboard {
   background-image: linear-gradient(45deg, #121216 25%, transparent 25%),
     linear-gradient(-45deg, #121216 25%, transparent 25%),
@@ -123,7 +108,6 @@ select option {
   background-color: #0b0b0e;
 }
 
-/* 思考中省略号动画 */
 .thinking-dots {
   display: inline-block;
   width: 1.1em;
@@ -139,7 +123,6 @@ select option {
   100% { width: 1.1em; }
 }
 
-/* 骨架屏：加载态占位 */
 .skeleton {
   background: linear-gradient(
     90deg,
@@ -151,12 +134,10 @@ select option {
   animation: shimmer 1.6s linear infinite;
 }
 
-/* 竖向排版文本（折叠侧栏标题用） */
 .vertical-text {
   writing-mode: vertical-lr;
 }
 
-/* 长文本截断 */
 .truncate-2 {
   display: -webkit-box;
   -webkit-line-clamp: 2;

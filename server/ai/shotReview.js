@@ -1,32 +1,12 @@
-// VLM 观片闸（满分路线图第一级，2026-09-12）：出片成功后抽 5 帧 → 视觉大模型
-// 以「第一观众」身份评审（情绪到位度 / 一句话能否讲清这镜 / 剧情符合性 / 开场衔接 / 台词是否配脸 / AI 味穿帮与画风突变）
-// → 结构化 JSON 写 shots.shot_review，前端镜头卡片亮报告。
-//
-// 2026-09-12 晚补强（第1集武戏段返工事故的闸门复盘）：
-// 旧四维全是"单镜内部质量"，8-2"描述写熊倒地、视频里熊站着红眼"这种剧情相反片
-// 和 6-3→7-1 布布瞬移全部漏过。新增两维：
-//  - scriptFaithfulness（剧情符合性）：视频演的是不是描述写的事，剧情节点相反/缺失打低分
-//  - openingContinuity（开场衔接）：首帧 vs 上一镜末帧，角色凭空换位打低分（首镜 null）
-//
-// 设计口径：
-//  - 独立列 shot_review，不碰 seam_check——那是锁4 的 409 拦截通道，观片闸是新兵未上过战场，
-//    不允许它误报就掐断出片链；只亮报告，人（布哥）当终审。验证一个项目后可升格。
-//  - 模型槽 config.llm.vlmModel（env LLM_VLM_MODEL，默认 qwen3-vl-flash）：
-//    调用失败（403 免费额度耗尽等）只记日志跳过，绝不影响出片主流程。
-//  - fire-and-forget，与接缝检测/末帧接力同口径。
-//  - 指标只存不下结论的阈值：verdict pass/warn/fail 由四项均分映射（≥7 pass / ≥5 warn / <5 fail），
-//    原始分都在 JSON 里，阈值改了可离线重判。
 import path from 'node:path'
 import fs from 'node:fs'
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import ffmpegStaticPath from 'ffmpeg-static'
+import { ffmpegPath as ffmpegStaticPath } from './ffmpeg.js'
 import { query, queryOne, execute } from '../db.js'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
-// [收口 2026-09-19] resolveLocalMedia 统一到 ai/runninghub.js（原在本文件与 seamCheck.js
-// 各写一份近乎逐字节相同的实现，唯一差别是本文件的兜底文件名写死 'review_src'）。
 import { resolveLocalMedia } from './runninghub.js'
 
 const execFile = promisify(execFileCb)
@@ -35,11 +15,7 @@ const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const REVIEW_FRAME_COUNT = 5
 
-// （本地 resolveLocalMedia 已于 2026-09-19 统一到 ai/runninghub.js —— 它与
-//   seamCheck.js 里的同名函数近乎逐字节相同，唯一差别是本文件的兜底文件名写死
-//   'review_src'；现统一以 tag='review_src' 传入。见该文件头注。）
 
-// 均匀抽 5 帧（10%/30%/50%/70%/90%），幂等覆盖到 uploads/review/
 async function extractFrames(absVideo, shotId, durationSec) {
   const dir = path.join(uploadsDir, 'review')
   fs.mkdirSync(dir, { recursive: true })
@@ -63,7 +39,6 @@ function buildReviewPrompt(shot, prevShot, refChars = [], hasPrevImg = false) {
       return d.map((x) => `${x.character}（语气:${x.tone}）："${x.text}" @镜内${Number(x.startTime) - Number(shot.start_time)}s`).join('；')
     } catch { return '无台词' }
   })()
-  // 图片顺序说明（2026-09-14 升级：内容 = 角色参考图 + 上一镜末帧 + 本镜 5 帧，最后文字）
   const imgOrder = [
     refChars.length ? `最前面 ${refChars.length} 张是【角色参考图】，依次是：${refChars.map((c) => c.name).join('、')}` : '',
     hasPrevImg ? '其后 1 张是【上一镜最终画面】（衔接判定基准）' : '',
@@ -101,15 +76,12 @@ function buildReviewPrompt(shot, prevShot, refChars = [], hasPrevImg = false) {
   ].join('\n')
 }
 
-// 角色参考图 → 本地绝对路径（2026-09-14 升级：评审必须按图认人。
-// 背景：2-1 事故——两只小熊只差围巾色，VLM 拿着纯文本"@布布踩桥"把一二认成布布，
-// 选角错配两轮静默通过还给错误盖合格章。参考图进评审，选角错误才能被机器看见。）
 function resolveCharRefImages(shot) {
   let names = []
   try {
     const p = JSON.parse(shot.characters || '[]')
     if (Array.isArray(p)) names = p.map(String).filter(Boolean)
-  } catch { /* 脏 JSON 按无参考图处理，不拦评审 */ }
+  } catch {  }
   if (!names.length) return []
   const ph = names.map(() => '?').join(',')
   let rows = []
@@ -123,7 +95,7 @@ function resolveCharRefImages(shot) {
   const out = []
   for (const r of rows) {
     const u = String(r.image_url || '').trim()
-    if (!u.startsWith('/uploads/')) continue // 远端/裸路径不进评审（参考图应已本地化）
+    if (!u.startsWith('/uploads/')) continue 
     const rel = decodeURIComponent(u.slice('/uploads/'.length))
     if (rel.split('/').some((seg) => seg === '..')) continue
     const p = path.join(uploadsDir, rel)
@@ -132,11 +104,6 @@ function resolveCharRefImages(shot) {
   return out
 }
 
-/**
- * 观片评审主入口：出片成功后调用（fire-and-forget 口径）。
- * @param {Object} shot - shots 表一行（须含 video_url）
- * @returns {Object} 评审结果（同时已写入 shots.shot_review）
- */
 export async function reviewShot(shot) {
   const videoUrl = String(shot.video_url || '').trim()
   if (!videoUrl) throw new Error('该镜还没有成片')
@@ -146,12 +113,8 @@ export async function reviewShot(shot) {
   const absVideo = await resolveLocalMedia(videoUrl, shot.id, 'review_src')
   const frames = await extractFrames(absVideo, shot.id, shot.duration)
 
-  // 角色参考图（按图认人，见 resolveCharRefImages 注释）
   const refChars = resolveCharRefImages(shot)
 
-  // 上一镜（开场衔接维度）：同集内 start_time 最近的前一镜，口径与 relayLastFrameToNextShot 的
-  // nextShot 反查同源反向。末帧优先用接力钩子落盘的真实帧图（shots.final_frame 文本是设计期
-  // 写的，镜头重生后即过期——2026-09-14 修正）；图不存在再回退文本描述；首镜/前镜未落库 → null。
   const prevShot = queryOne(
     `SELECT s.id, s.shot_number, s.final_frame
      FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
@@ -193,8 +156,6 @@ export async function reviewShot(shot) {
     throw new Error(`观片闸返回不是合法 JSON: ${String(raw).slice(0, 120)}`)
   }
 
-  // rubric 优先：剧本节拍验收（beats）。scriptFaithfulness 由执行率推导，不再让 VLM 拍脑袋打分
-  // ——MSAVBench 结论：逐例 rubric 与人类判断的一致性显著高于绝对打分。
   const beats = Array.isArray(parsed.beats)
     ? parsed.beats.filter((b) => b && typeof b.beat === 'string').map((b) => ({
         beat: String(b.beat).slice(0, 120),
@@ -205,14 +166,13 @@ export async function reviewShot(shot) {
   const executedCount = beats.filter((b) => b.executed).length
   const scriptFaithfulness = beats.length
     ? Math.round((executedCount / beats.length) * 10)
-    : (Number(parsed.scriptFaithfulness) || 0) // beats 解析失败时退回旧字段
+    : (Number(parsed.scriptFaithfulness) || 0) 
 
   const scores = ['emotion', 'clarity', 'visualQuality', 'styleConsistency',
     ...(parsed.dialogueFace != null ? ['dialogueFace'] : []),
     ...(parsed.openingContinuity != null ? ['openingContinuity'] : [])]
   const scored = { ...parsed, scriptFaithfulness }
   const avg = scores.reduce((a, k) => a + (Number(scored[k]) || 0), 0) / scores.length
-  // 硬性 fail：①均分线（<5）②任一关键剧本节拍未执行（演反/缺失）——8-2"熊倒地又站着"这种必须拦
   const missingBeats = beats.filter((b) => !b.executed)
   const verdict = (avg < 5 || missingBeats.length > 0)
     ? 'fail'
@@ -241,9 +201,6 @@ export async function reviewShot(shot) {
   }
   execute('UPDATE shots SET shot_review = ? WHERE id = ?', [JSON.stringify(result), shot.id])
 
-  // 闭环回灌（Character.ai eval-in-the-loop 模式）：fail 时把未执行的剧本节拍 + 问题清单
-  // 写进 retry_feedback——下次该镜重出，v4 prompt 组装自动注入"上次验收失败，必须修正"。
-  // 只写反馈不自动重出（烧币动作由人触发），通路焊死、扳机留人。
   if (verdict === 'fail') {
     execute('UPDATE shots SET retry_feedback = ? WHERE id = ?', [JSON.stringify({
       at: new Date().toISOString(),
@@ -256,7 +213,6 @@ export async function reviewShot(shot) {
   return result
 }
 
-/** 按 id 兜底入口（手动补评存量镜头） */
 export async function reviewShotByShotId(shotId) {
   const shot = queryOne('SELECT * FROM shots WHERE id = ?', [shotId])
   if (!shot) throw new Error(`镜头 ${shotId} 不存在`)

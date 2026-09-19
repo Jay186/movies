@@ -15,7 +15,6 @@ const store = useProjectStore()
 const router = useRouter()
 const showImportDialog = ref(false)
 
-// 导入完成后显式刷新当前集，确保新方案立即显示，并对刷新失败给出提示。
 async function handleStoryboardImported() {
   const result = await store.loadEpisode(store.currentEpisodeId)
   if (!result?.success) {
@@ -30,9 +29,6 @@ async function handleStoryboardImported() {
 const enriching = ref(false)
 const enrichResult = ref('')
 
-// ===== 质检面板（2026-09-16）=====
-// 面板默认展开：它的价值就在于"人在看分镜时顺手看到问题"，藏进折叠里等于没做。
-// 但人也要能收起来（分镜本身占满屏时），故给一个记住的开关。
 const QC_PANEL_KEY = 'storyboard_qc_panel_open'
 const showQcPanel = ref(localStorage.getItem(QC_PANEL_KEY) !== '0')
 function toggleQcPanel() {
@@ -40,20 +36,17 @@ function toggleQcPanel() {
   localStorage.setItem(QC_PANEL_KEY, showQcPanel.value ? '1' : '0')
 }
 
-// 质检面板点镜头号 → 滚动定位 + 短暂高亮（面板不碰 DOM，定位归视图层）
 const scrollRef = ref(null)
 const highlightedShot = ref('')
-const highlightSceneIds = ref([]) // 定位时强制展开目标所在场次
+const highlightSceneIds = ref([]) 
 let highlightTimer = null
 async function locateShot(shotNumber) {
   const key = String(shotNumber || '')
   if (!key) return
-  // 展开全部场次，保证目标行确实存在（折叠的场次里没有 DOM 节点，scrollIntoView 会落空）
   collapsedScenes.value = []
   highlightSceneIds.value = []
   highlightedShot.value = ''
   await nextTick()
-  // 目标行：镜头行用 data-shot-number 标记（ShotRow 上，便于面板与列表解耦）
   const root = scrollRef.value
   const el = root?.querySelector?.(`[data-shot-number="${CSS.escape(key)}"]`)
   if (!el) return
@@ -64,22 +57,15 @@ async function locateShot(shotNumber) {
 }
 onBeforeUnmount(() => { if (highlightTimer) clearTimeout(highlightTimer) })
 
-// 质检报告里有没有「必须修」——决定面板头是否标红，以及"确认分镜"是否给出提醒
 const qcErrorCount = computed(() => store.qcReport?.errorCount || 0)
 const qcWarningCount = computed(() => store.qcReport?.warningCount || 0)
 
-// 质检报告自动加载（2026-09-16 修）：加载时机原先挂在 QcPanel 组件内部，而面板是
-// v-if="showQcPanel"——收起时组件根本不挂载，报告永远拉不到，头部只剩一片空白，
-// 用户以为"没得查"。改由视图层负责（StoryboardView 始终在分镜页挂载），与面板开合解耦。
-// 触发点：进页面/切集（currentEpisodeId），以及分镜数据被整体替换（重新生成/导入/补全后
-// 都会 loadEpisode 重建数组）——保证面板头部的数字永远对应当前分镜。
 watch(
   () => [store.currentEpisodeId, store.storyboardScenes],
   ([id]) => { if (id) store.loadQcReport({ silent: true }) },
   { immediate: true }
 )
 
-// 「更多」菜单开合 + 点击外部/按 Esc 关闭
 const moreOpen = ref(false)
 const menuRef = ref(null)
 function onDocClick(e) {
@@ -97,25 +83,20 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('keydown', onEsc)
 })
-// 菜单项点击后先收起菜单再执行，避免菜单压在确认框上
 function menuAction(name) {
   moreOpen.value = false
   handleStoryboardAction(name)
 }
 
-// 场次时长合计：用于场次头快速读时长（镜头少时也能一眼看出节奏）
 function sceneDuration(scene) {
   return (scene.shots || []).reduce((n, sh) => n + (Number(sh.duration) || 0), 0)
 }
 
-// 项目级默认比例的短标签（如 '16:9'）：分镜页只读展示，配置入口在剧集页（EpisodesView）。
-// 生图（批量分镜图）与出片都读同一来源，保证参考图与成片比例一致。
 const ratioShort = computed(() => {
   const opt = ASPECT_RATIO_OPTIONS.find((o) => o.value === store.aspectRatio)
   return opt ? opt.label : '16:9'
 })
 
-// 统计缺提示词的镜头数
 const missingPromptCount = computed(() =>
   store.storyboardScenes.reduce(
     (n, s) => n + s.shots.filter(sh => !(sh.integratedMultimodalDescription || '').trim()).length,
@@ -131,8 +112,6 @@ async function enrichPrompts() {
   }
   enriching.value = true
   enrichResult.value = ''
-  // 补全进度（2026-09-16）：40+ 镜并行补全要 2~3 分钟，此前只有干等。
-  // 与生成/规整共用同一套轮询与进度条。
   store.startSbProgressPolling(store.currentEpisodeId)
   try {
     const res = await api.enrichStoryboard(store.currentEpisodeId, { onlyMissing: true })
@@ -142,25 +121,18 @@ async function enrichPrompts() {
     enrichResult.value = res?.failed > 0
       ? `补全：${res.enriched} 条成功 / ${res.failed} 条失败${errMsg ? '（' + errMsg + '）' : ''}`
       : `补全完成：${res?.enriched || missingPromptCount.value} 条`
-    // 补全成功后重新加载，让新提示词显示出来
     await store.loadEpisode(store.currentEpisodeId)
   } catch (e) {
     enrichResult.value = '补全失败：' + (e.message || '未知错误')
   } finally {
     enriching.value = false
-    // 停轮询：补全已返回，进度快照切成结束态并保留一小会儿做收尾展示
     store.stopSbProgressPolling()
     store.settleSbProgress('提示词补全完成')
-    // 5 秒后自动清空结果提示
-    // 结果提示条自动消失时长由常量统一（避免各处写死 5000）
     setTimeout(() => { enrichResult.value = '' }, DELAYS.RESULT_BANNER_MS)
-    // 稍后清掉进度快照（代次判断：期间起了新任务则不清）
     store.clearSbProgressAfter()
   }
 }
 
-// 场景折叠/展开：用 ref 存 id 数组，切换时整体替换引用。
-// （不用 reactive 对象/Set：本项目在 Vue 3.5 + vite-dev 下直接改属性不会触发重渲染）
 const collapsedScenes = ref([])
 function toggleScene(sceneId) {
   const next = [...collapsedScenes.value]
@@ -182,13 +154,11 @@ function toggleAllScenes() {
 }
 
 async function goNext() {
-  // 确认分镜（幂等：已确认时直接放行），然后进入短片创作页
   await store.confirmStoryboard()
   router.push('/video')
 }
 function handleStoryboardAction(btn) {
   if (btn === '重新提取分镜脚本') {
-    // 导入的分镜被覆盖前需要二次确认
     if (store.storyboardSource === 'imported') {
       confirmDialog({
         title: '重新提取分镜',
@@ -202,7 +172,6 @@ function handleStoryboardAction(btn) {
     }
     store.extractStoryboard()
   } else if (btn === '批量分镜图') {
-    // 分镜图（frame）：跟随全局模型选择（zikl / Visionary）
     store.batchGenerateImages('frame', store.imageModel)
   } else if (btn === '批量站位图') {
     store.batchGenerateImages('blocking')
@@ -221,7 +190,6 @@ async function clearStoryboard() {
     showImportDialog.value = true
     return
   }
-  // 统计会被一并清掉的成果：这是「清空」这个动作真正的代价，必须让用户看到具体数字
   const withMedia = store.storyboardScenes.reduce(
     (n, s) => n + s.shots.filter((sh) => sh.frameUrl || sh.videoUrl || sh.blockingUrl || sh.keyframeUrl).length,
     0
@@ -245,10 +213,8 @@ async function clearStoryboard() {
   clearing.value = true
   try {
     await store.clearStoryboard()
-    // 清完直接弹出导入，正好接上"重新导入"
     showImportDialog.value = true
   } catch {
-    // store 内部已打印错误
   } finally {
     clearing.value = false
   }
@@ -257,26 +223,13 @@ async function clearStoryboard() {
 
 <template>
   <div class="flex h-full w-full flex-col bg-bg-primary">
-    <!-- ═══ 命令栏 ═══
-         三层结构：左（身份+进度）/ 中（视图工具）/ 右（主操作）
-         把原来 12 个平铺控件收敛为「工具栏 + 更多菜单」，主操作唯一且醒目。 -->
     <div class="shrink-0 border-b border-border bg-bg-primary">
       <div class="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-6 py-3.5">
-        <!-- 左：标题。纯标识——
-             「已锁定/待审核」徽章删掉了：确认状态由右侧主按钮文案直接体现
-             （未确认时按钮写「确认分镜并进入短片创作」，确认后变「进入短片创作」），
-             顶栏的「已锁定 V1」是剧本状态，与本页徽章无关，徽章信息没有独立价值。
-             指标条也整行删掉了：「提示词齐全」只是「没毛病」的确认态，无动作价值；
-             缺提示词的可点击入口与工具栏「补全提示词 (N)」按钮重复（同一个 enrichPrompts）。 -->
         <div class="flex min-w-0 items-center gap-4">
           <h2 class="text-[15px] font-medium text-text-primary">分镜脚本</h2>
         </div>
 
-        <!-- 右：工具区 -->
         <div class="flex flex-wrap items-center gap-2">
-          <!-- 视图组：折叠 / 风格 / 模型 / 比例
-               只读项（画风、比例）压到最小：它们是「看一眼确认」的信息，
-               不该占掉比可操作控件更大的宽度。 -->
           <div class="flex items-center overflow-hidden rounded-btn border border-border bg-bg-secondary/60">
             <button
               class="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] text-text-secondary transition hover:bg-bg-hover hover:text-text-primary"
@@ -311,7 +264,6 @@ async function clearStoryboard() {
             >{{ ratioShort }}</span>
           </div>
 
-          <!-- 补全提示词（有缺口时才出现，带计数） -->
           <button
             v-if="missingPromptCount > 0"
             class="flex items-center gap-1.5 rounded-btn border border-warn/40 bg-warn/10 px-3 py-1.5 text-[12px] font-medium text-warn transition hover:border-warn/60 hover:bg-warn/15 disabled:cursor-not-allowed disabled:opacity-50"
@@ -324,7 +276,6 @@ async function clearStoryboard() {
             {{ enriching ? '补全中...' : `补全提示词 (${missingPromptCount})` }}
           </button>
 
-          <!-- 更多菜单：次要 / 危险操作收纳 -->
           <div ref="menuRef" class="relative">
             <button
               class="flex h-[30px] w-[30px] items-center justify-center rounded-btn border border-border bg-bg-secondary/60 text-text-secondary transition hover:border-border-light hover:bg-bg-hover hover:text-text-primary"
@@ -352,11 +303,6 @@ async function clearStoryboard() {
                 <svg class="h-3.5 w-3.5 shrink-0 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
                 <span class="flex-1">导入分镜脚本</span>
               </button>
-              <!-- 批量出图（2026-09-16 从工具栏收进这里）：
-                   它们是一次性发起 N 张图的重量级批任务，却和「折叠全部」这种
-                   纯视图开关并排占了同样的视觉权重——工具与批任务混在一起，
-                   工具栏会显得处处都是按钮。收进菜单后，命令栏只留下日常高频控件。
-                   忙碌时保留在菜单里但置灰，并改文案，避免重复触发。 -->
               <button
                 class="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-secondary transition hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent"
                 :disabled="store.batchStoryboardGenerating"
@@ -389,7 +335,6 @@ async function clearStoryboard() {
         </div>
       </div>
 
-      <!-- 提示条区：补全结果 / AI 进度 / 剧本已改 -->
       <div class="mt-2.5 space-y-2 px-6 pb-1">
         <div
           v-if="enrichResult"
@@ -402,9 +347,6 @@ async function clearStoryboard() {
           {{ enrichResult }}
         </div>
 
-        <!-- AI 生成进度条（2026-09-16）：换成结构化进度条组件——定量百分比 + 阶段标签 +
-             场次计数 + 已用时。三条长任务路径（生成 / 规整 / 补全）共用同一份 store.sbProgress。
-             兜底：若后端还没上报（或旧版本后端不返回结构化字段），回落到原来的单行文案。 -->
         <SbProgressBar v-if="store.sbProgress" :progress="store.sbProgress" />
         <div
           v-else-if="store.aiLoading && store.aiProgressMessage"
@@ -417,7 +359,6 @@ async function clearStoryboard() {
           <span>{{ store.aiProgressMessage }}</span>
         </div>
 
-        <!-- 剧本已改：分镜落后 -->
         <div v-if="store.storyboardStale" class="flex items-center justify-between gap-4 rounded-panel border border-warn/40 bg-warn/10 px-3.5 py-3 animate-fade-up">
           <div class="flex items-center gap-2 text-[12px] leading-relaxed text-warn">
             <svg class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
@@ -432,8 +373,6 @@ async function clearStoryboard() {
           </button>
         </div>
 
-        <!-- 质检面板（2026-09-16）：折叠头 + 面板本体。
-             折叠头常驻显示结论（哪怕收起也知道有没有问题），避免"收起来就忘了"。 -->
         <div
           v-if="store.totalShots > 0"
           class="overflow-hidden rounded-panel border transition-colors"
@@ -478,9 +417,7 @@ async function clearStoryboard() {
       </div>
     </div>
 
-    <!-- ═══ 场次列表 ═══ -->
     <div ref="scrollRef" class="flex-1 overflow-y-auto px-6 py-4">
-      <!-- 空状态 -->
       <div v-if="!store.storyboardScenes.length" class="flex h-full flex-col items-center justify-center gap-4">
         <div class="flex h-16 w-16 items-center justify-center rounded-full border border-dashed border-border">
           <svg class="h-7 w-7 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -508,13 +445,11 @@ async function clearStoryboard() {
         </div>
       </div>
 
-      <!-- 场次卡：V2 大圆角卡 + 柔和阴影分层（不靠描边切分） -->
       <div
         v-for="scene in store.storyboardScenes"
         :key="scene.id"
         class="mb-5 overflow-hidden rounded-card border border-border/50 bg-bg-card shadow-card transition-all duration-200 hover:border-border/80 hover:shadow-card-hover"
       >
-        <!-- 场次头：sticky 吸顶，滚动时始终知道自己在哪一场 -->
         <div class="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-border/40 bg-bg-card/95 px-4 py-3 backdrop-blur">
           <button
             class="group flex min-w-0 flex-1 items-center gap-3 text-left"
@@ -552,11 +487,6 @@ async function clearStoryboard() {
         </div>
 
         <template v-if="!isCollapsed(scene.id)">
-          <!-- 列头：sticky 贴在场景头下方（top 对齐场景头高度）
-               列宽（共 7 列，与 ShotRow 的 grid-cols 严格同源）：
-               镜头52 / 美术资产200 / 画面描述minmax / 分镜图156 / 尾帧锚156 / 站位图156 / 时长56 -->
-          <!-- 列头：横向通铺会让卡片 24px 圆角处露出直角缺口，
-               所以用 mx-4 内缩 + 圆角底槽，让它在卡片内"坐"成一个圆角条。 -->
           <div class="sticky top-[53px] z-10 mx-4 mb-1 mt-2 overflow-hidden rounded-panel border border-border/40 bg-bg-secondary/95 shadow-inset backdrop-blur">
             <div class="grid grid-cols-[52px_200px_minmax(280px,1fr)_156px_156px_156px_56px] items-center gap-3 px-4 py-2.5 text-micro font-medium text-text-muted">
             <span>镜头</span>
@@ -569,7 +499,6 @@ async function clearStoryboard() {
             </div>
           </div>
 
-          <!-- 镜头行 -->
           <ShotRow
             v-for="(shot, idx) in scene.shots"
             :key="shot.id"
@@ -588,7 +517,6 @@ async function clearStoryboard() {
       @imported="handleStoryboardImported"
     />
 
-    <!-- ═══ 底部操作栏：主操作唯一且右对齐 ═══ -->
     <div class="shrink-0 px-6 py-4">
       <div class="flex items-center justify-between gap-4 rounded-panel border border-border/50 bg-bg-secondary px-5 py-3 shadow-card">
         <div class="flex min-w-0 items-center gap-2 text-[12px] text-text-muted">

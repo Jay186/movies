@@ -1,10 +1,3 @@
-// 空间组人审基准图（第 3 / 3 层）路由：3 端点薄路由
-//
-// 设计依据：docs/anchor-review/02-incremental-design.md §2
-// 挂载于 /api/generate（server/index.js: app.use('/api/generate', spatialGroupReviewRouter)）
-//
-// 所有 DB 依赖在此接线（运行时才 import 真实 db.js），服务层本身不依赖 db.js，
-// 因此测试可注入 :memory: 库。日志前缀统一 [spatialGroupReview]（共享知识 9）。
 
 import { Router } from 'express'
 import { query, queryOne, execute } from '../db.js'
@@ -12,8 +5,6 @@ import { ensureSceneAnalysis, getLayoutAnchor, collectGroupLayoutMaterials, layo
 import { createSpatialGroupReview } from '../ai/spatialGroupReview.js'
 
 const router = Router()
-// 注入真实实现（2026-09-18）：组视图每组带布局图锚 + 时效判断 → 前端布局图卡。
-// 服务层保持纯工厂（可注入 :memory: 测试），DB 读取与素材汇总在这里接线。
 const review = createSpatialGroupReview({
   query, queryOne, execute, ensureSceneAnalysis,
   getLayoutAnchor,
@@ -21,7 +12,6 @@ const review = createSpatialGroupReview({
   fingerprintOfMaterials: layoutMaterialsFingerprint,
 })
 
-// 校验 episode 是否存在（不存在 → 404）
 function assertEpisode(episodeId, res) {
   const ep = queryOne('SELECT id FROM episodes WHERE id = ?', [episodeId])
   if (!ep) {
@@ -31,7 +21,6 @@ function assertEpisode(episodeId, res) {
   return true
 }
 
-// 2.1 GET /status?episodeId=N —— 批量入口唯一前置调用（内部幂等 sync）
 router.get('/spatial-group-review/status', async (req, res) => {
   const episodeId = Number(req.query.episodeId)
   if (!episodeId) return res.status(400).json({ error: 'episodeId 必填' })
@@ -45,7 +34,6 @@ router.get('/spatial-group-review/status', async (req, res) => {
   }
 })
 
-// 2.2 POST /init —— 显式同步/重置（reset:'pending' = 重开审核；缺省 = 幂等补齐）
 router.post('/spatial-group-review/init', async (req, res) => {
   const { episodeId, reset } = req.body || {}
   const ep = Number(episodeId)
@@ -63,7 +51,6 @@ router.post('/spatial-group-review/init', async (req, res) => {
   }
 })
 
-// 2.3 POST /decide —— confirm 写 spatial 锚行 / skip 删锚行
 router.post('/spatial-group-review/decide', async (req, res) => {
   const { episodeId, group, action } = req.body || {}
   const ep = Number(episodeId)

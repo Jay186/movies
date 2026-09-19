@@ -4,7 +4,6 @@ import { api } from '../services/api'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  // 传入即进入「编辑模式」：标题变「编辑风格」、预填数据、提交走 update
   editStyle: { type: Object, default: null },
 })
 const emit = defineEmits(['update:modelValue', 'created', 'updated'])
@@ -14,9 +13,9 @@ const PROMPT_MAX = 2000
 
 const label = ref('')
 const prompt = ref('')
-const coverFile = ref(null) // 待选文件（未提交）
-const coverPreview = ref('') // 预览地址（新建=FileReader dataURL；编辑=已有封面 URL）
-const pendingClear = ref(false) // 编辑模式下用户主动移除已有封面
+const coverFile = ref(null) 
+const coverPreview = ref('') 
+const pendingClear = ref(false) 
 const submitting = ref(false)
 const errorMsg = ref('')
 const fileInput = ref(null)
@@ -34,7 +33,6 @@ watch(
   () => props.modelValue,
   (v) => {
     if (v) {
-      // 打开时重置（确保多次打开互不污染）
       errorMsg.value = ''
       submitting.value = false
       pendingClear.value = false
@@ -86,7 +84,6 @@ function handleFileChange(e) {
 }
 
 function clearCover() {
-  // 编辑模式下且原本有封面：标记「清除」，提交时传 coverBase64='' 以删除
   if (isEdit.value && props.editStyle?.coverUrl && !coverFile.value) {
     pendingClear.value = true
   }
@@ -112,7 +109,6 @@ async function submit() {
       label: label.value.trim(),
       prompt: prompt.value.trim(),
     }
-    // 封面：新建——有文件才传；编辑——有文件传替换、明确清除传空串、其余不动
     if (coverFile.value) {
       body.coverBase64 = await readFileAsBase64(coverFile.value)
     } else if (isEdit.value && pendingClear.value) {
@@ -143,7 +139,6 @@ async function submit() {
       @click.self="close"
     >
       <div class="flex max-h-[85vh] w-[480px] max-w-[95vw] flex-col overflow-hidden rounded-2xl border border-border bg-bg-card shadow-2xl">
-        <!-- 标题栏 -->
         <div class="flex shrink-0 items-center justify-between border-b border-border px-5 py-3.5">
           <h2 class="text-base font-semibold text-white">{{ isEdit ? '编辑风格' : '新建风格' }}</h2>
           <button
@@ -157,9 +152,7 @@ async function submit() {
           </button>
         </div>
 
-        <!-- 表单 -->
         <div class="flex-1 overflow-y-auto px-5 py-4">
-          <!-- 风格名称 -->
           <div class="mb-4">
             <div class="mb-1.5 flex items-center justify-between">
               <label class="text-xs text-text-secondary">风格名称</label>
@@ -176,7 +169,6 @@ async function submit() {
             />
           </div>
 
-          <!-- 提示词 -->
           <div class="mb-4">
             <div class="mb-1.5 flex items-center justify-between">
               <label class="text-xs text-text-secondary">提示词</label>
@@ -196,7 +188,6 @@ async function submit() {
             </p>
           </div>
 
-          <!-- 封面图 -->
           <div class="mb-1">
             <label class="mb-1.5 block text-xs text-text-secondary">封面图</label>
             <input
@@ -207,7 +198,6 @@ async function submit() {
               @change="handleFileChange"
             />
 
-            <!-- 未选择：虚线框 -->
             <div
               v-if="!coverPreview"
               class="flex cursor-pointer items-center justify-center rounded-lg border border-dashed border-border py-6 transition hover:border-accent/50"
@@ -221,7 +211,6 @@ async function submit() {
               </div>
             </div>
 
-            <!-- 已选择 / 已有封面：预览图 + 移除按钮 -->
             <div v-else class="relative overflow-hidden rounded-lg border border-border bg-white">
               <img :src="coverPreview" alt="封面预览" class="max-h-48 w-full object-contain" />
               <button
@@ -240,13 +229,11 @@ async function submit() {
             </div>
           </div>
 
-          <!-- 错误提示 -->
           <div v-if="errorMsg" class="mt-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-400">
             {{ errorMsg }}
           </div>
         </div>
 
-        <!-- 底部按钮 -->
         <div class="flex shrink-0 justify-end gap-3 border-t border-border px-5 py-3.5">
           <button
             class="rounded-lg border border-border px-4 py-2 text-sm text-text-secondary transition hover:border-border-light hover:text-white"

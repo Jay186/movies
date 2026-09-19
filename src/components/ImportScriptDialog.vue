@@ -11,18 +11,18 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue', 'imported'])
 const store = useProjectStore()
 
-const activeTab = ref('paste') // paste | file
+const activeTab = ref('paste') 
 const pasteText = ref('')
 const fileInput = ref(null)
 const selectedFile = ref(null)
 const fileText = ref('')
 const previewing = ref(false)
-const previewResult = ref(null) // { sceneCount, unparsedCount, unparsedLines, changed, method, normalizedText }
+const previewResult = ref(null) 
 const errorMsg = ref('')
 const importLoading = ref(false)
 const confirmReady = ref(false)
-const importedVersion = ref('') // 导入成功后展示版本号
-const backupInfo = ref(null) // { time, content } 上次导入前的自动备份（恢复入口）
+const importedVersion = ref('') 
+const backupInfo = ref(null) 
 
 const backupKey = () => `script-backup-${props.episodeId}`
 
@@ -35,11 +35,9 @@ function loadBackupInfo() {
     const parsed = JSON.parse(raw)
     if (parsed?.content?.trim()) backupInfo.value = parsed
   } catch {
-    // 备份损坏视为无备份
   }
 }
 
-// 恢复导入前的剧本（备份只存一份，恢复后即消费掉）
 async function restoreBackup() {
   if (!backupInfo.value || !props.episodeId) return
   importLoading.value = true
@@ -103,7 +101,6 @@ function switchTab(tab) {
   confirmReady.value = false
 }
 
-// 读文件：先按 UTF-8 严格解码，失败（中文 Windows 记事本"ANSI"文件等）回落 GB18030
 async function readFileAsText(file) {
   const buf = await file.arrayBuffer()
   try {
@@ -168,7 +165,6 @@ async function confirmImport() {
   if (!confirmReady.value || !previewResult.value || !props.episodeId) return
   importLoading.value = true
   try {
-    // 导入前自动备份当前剧本（"另存为新版本"的最小实现），避免覆盖后无法找回
     const current = store.scriptContent || ''
     if (current.trim()) {
       try {
@@ -177,7 +173,6 @@ async function confirmImport() {
           JSON.stringify({ time: Date.now(), content: current })
         )
       } catch {
-        // localStorage 不可用时跳过备份，不阻塞导入
       }
     }
     await api.updateScript(props.episodeId, {
@@ -204,7 +199,6 @@ async function confirmImport() {
       @click.self="close"
     >
       <div class="flex max-h-[80vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border bg-bg-primary shadow-2xl">
-        <!-- 标题栏 -->
         <div class="flex items-center justify-between border-b border-border px-6 py-4">
           <h2 class="text-base font-medium text-white">导入剧本</h2>
           <button
@@ -217,7 +211,6 @@ async function confirmImport() {
           </button>
         </div>
 
-        <!-- 说明 -->
         <div class="border-b border-border px-6 py-3 text-xs leading-relaxed text-text-secondary">
           <p>支持粘贴任意文本或导入 .txt 文件。系统会自动识别场次标记并转换为标准格式，正文内容不会改动。</p>
           <p class="mt-1 text-text-muted">
@@ -225,7 +218,6 @@ async function confirmImport() {
           </p>
         </div>
 
-        <!-- 自动备份恢复条：导入覆盖前的旧剧本在此找回 -->
         <div
           v-if="backupInfo"
           class="flex items-center justify-between gap-3 border-b border-border bg-amber-500/10 px-6 py-2.5 text-xs"
@@ -251,7 +243,6 @@ async function confirmImport() {
           </span>
         </div>
 
-        <!-- 标签页 -->
         <div class="flex border-b border-border px-6">
           <button
             class="px-4 py-2.5 text-xs transition"
@@ -271,7 +262,6 @@ async function confirmImport() {
 
         <div class="flex min-h-0 flex-1 flex-col p-6">
           <div class="min-h-0 flex-1 overflow-y-auto">
-          <!-- 粘贴面板 -->
           <div v-if="activeTab === 'paste'">
             <textarea
               v-model="pasteText"
@@ -281,7 +271,6 @@ async function confirmImport() {
             />
           </div>
 
-          <!-- 文件面板 -->
           <div v-else>
             <input
               ref="fileInput"
@@ -322,7 +311,6 @@ async function confirmImport() {
           </div>
           </div>
 
-          <!-- 解析反馈（固定展示，不随内容滚动） -->
           <div class="mt-4 shrink-0">
             <button
               class="w-full rounded-lg border border-border bg-bg-secondary py-2 text-xs text-text-secondary transition hover:border-accent/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
@@ -349,7 +337,6 @@ async function confirmImport() {
                 <span class="rounded bg-bg-card px-2 py-1 text-[11px] text-text-secondary">{{ methodText[previewResult.method] || '已转换' }}</span>
               </div>
 
-              <!-- 未识别行列表 -->
               <div v-if="previewResult.unparsedLines?.length" class="rounded border border-border/60 bg-bg-card p-2">
                 <div class="mb-1.5 text-[10px] text-text-muted">以下标记未被识别，正文仍保留</div>
                 <ul class="max-h-24 space-y-1 overflow-y-auto text-[10px] text-text-secondary">
@@ -364,7 +351,6 @@ async function confirmImport() {
           </div>
         </div>
 
-        <!-- 底部按钮 -->
         <div class="flex items-center justify-between border-t border-border px-6 py-4">
           <span class="text-[10px] text-text-muted">导入的剧本暂不确认，确认后才会进入画风与资产提取</span>
           <div class="flex gap-3">

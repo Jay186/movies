@@ -1,37 +1,6 @@
-// 分镜质检码注册表 —— QC 结果的**唯一元数据源**（2026-09-16）。
-//
-// 背景：storyboardValidator.js 会产出十几种 code（SCREEN_SIDE_FLIP / AIRLOCK_CHAR_MISSING /
-// ASSET_MISSING_IMAGE …）。这些 code 此前只散落在各校验函数的字面量里，前端要展示质检面板
-// 就只能自己再抄一份"哪些 code 是什么级别、能不能自动修"的映射表——两边必然漂移
-// （新增一个 code 忘了同步前端 = 面板里这条永远不显示）。
-//
-// 本文件把这些元数据收口到一处：级别、标题、说明、可执行的修复动作、以及是否可批量处理。
-// 校验层只负责产出 { code, shot, message }，**不再关心**这个 code 叫什么、能不能修；
-// 面板与修复接口只读本表，**不再自己判断**。新增一个 QC code 只需在此登记一条。
-//
-// ⚠️ 约定：本表是"展示与调度"元数据，**不是白的准入名单**——未登记的 code 依然会被
-// 面板正常展示（走 UNKNOWN 兜底），只是没有专属标题与修复动作。宁可显示得朴素，
-// 也不能因为忘了登记而让问题从面板上消失。
 
-/**
- * QC 结果级别：
- * - 'error'  —— 必须修（硬错误，生成流程会喂回重试）
- * - 'warning'—— 建议修（弱信号，由人判断）
- * 校验层不直接产出该字段，本表是唯一的"这个 code 归哪级"的定义处。
- */
 export const QC_LEVEL = { ERROR: 'error', WARNING: 'warning' }
 
-/**
- * 可执行的修复动作类型（面板按钮 → 后端接口 dispatch）：
- * - 'airlock_link'   补写 Airlock 跨镜衔接（把上一镜最终画面复刻进本镜开头）
- * - 'axis_reposition'在模块4 动作时间轴补走位动作，让侧位翻转成为合法调度
- * - 'regen_frame'    重抽本镜分镜图（补图后重出即可）—— ⚠️ **预留动作，当前未接线**：
- *                    无 code 使用它、routes/qc.js 也没有对应 handler（ASSET_MISSING_IMAGE
- *                    目前是 manual）。接线前提是先确认"补了设定图 → 重出该镜分镜图"这条链路
- *                    的产品形态（在哪触发、批量还是单镜）。等真出现案例再做，别为预留而实现。
- * - 'camera_diversify'拉开相邻机位/景别轮换（改景别+机位+运镜枚举值并重新生成提示词）
- * - 'manual'         只能人工处理（改描述/改资产/改时间轴等），不提供一键按钮
- */
 export const QC_ACTION = {
   AIRLOCK_LINK: 'airlock_link',
   AXIS_REPOSITION: 'axis_reposition',
@@ -40,21 +9,7 @@ export const QC_ACTION = {
   MANUAL: 'manual',
 }
 
-/**
- * 质检码注册表。
- * key   = storyboardValidator 产出的 code
- * value = { level, title, hint, action, fixLabel }
- *   level     QC_LEVEL.*        问题级别（面板分组 + 计数口径）
- *   title     短标题（面板 chip / 分组头）
- *   hint      一句话"为什么是问题"，面板展开时显示
- *   action    QC_ACTION.*       可用的一键修复动作（manual = 无按钮）
- *   fixLabel  修复按钮文案（action=manual 时忽略）
- */
 export const QC_CODES = {
-  // ===== 硬错误汇总（校验层的 errors 是纯字符串数组、不带 code）=====
-  // 校验层当时把 errors 设计成字符串（直接喂回 LLM 重试），没有 code 字段。
-  // 这里不臆造 code，统一归到 MUST_FIX 一类：面板照样展示与定位，只是没有细分标题。
-  // 若将来要给某个硬错误加专属标题，需同时改校验层产出带 code 的对象。
   MUST_FIX: {
     level: QC_LEVEL.ERROR,
     title: '必须修（硬错误）',
@@ -63,7 +18,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 画风类（错误级：直接违反"全片画风统一"铁律）=====
   STYLE_POISON: {
     level: QC_LEVEL.ERROR,
     title: '画风毒词',
@@ -72,7 +26,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 画面地理 / 越轴类 =====
   AIRLOCK_SIDE_FLIP: {
     level: QC_LEVEL.WARNING,
     title: 'Airlock 复刻侧位相反',
@@ -95,7 +48,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== Airlock 继承类 =====
   AIRLOCK_CHAR_MISSING: {
     level: QC_LEVEL.WARNING,
     title: 'Airlock 角色消失',
@@ -104,7 +56,6 @@ export const QC_CODES = {
     fixLabel: '补 Airlock 衔接',
   },
 
-  // ===== 资产锚类 =====
   ASSET_MISSING_IMAGE: {
     level: QC_LEVEL.WARNING,
     title: '资产缺设定图',
@@ -127,7 +78,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 字段一致性类 =====
   COSTUME_TEXT_MISMATCH: {
     level: QC_LEVEL.WARNING,
     title: '图文服装打架',
@@ -171,7 +121,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 镜头语言类 =====
   EMOTION_SHOT_TOO_WIDE: {
     level: QC_LEVEL.WARNING,
     title: '情绪点景别太远',
@@ -207,7 +156,6 @@ export const QC_CODES = {
     action: QC_ACTION.MANUAL,
     fixLabel: '',
   },
-  // ===== 七层美学心法 P0（2026-09-18）接缝 + 视角 =====
   CUT_WITHOUT_GAIN: {
     level: QC_LEVEL.WARNING,
     title: '切镜收益不足',
@@ -223,7 +171,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 七层美学心法 P2（2026-09-18）光线 + 节奏 + 运镜 + 声弧 =====
   LIGHT_DIRECTION_FLIP: {
     level: QC_LEVEL.WARNING,
     title: '光线跳变',
@@ -267,7 +214,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 第四轮美学级（2026-09-19）因果链 + 长镜 + 音乐语言 + 开场钩子 =====
   CHAIN_REACTION_OVERLOAD: {
     level: QC_LEVEL.WARNING,
     title: '因果链超载',
@@ -297,9 +243,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 第五轮 纪律级（2026-09-19）切点重复 + 动作密度 + 属性分布 =====
-  // 与前四轮的根本区别：前四轮管"该怎么写"，这一轮是"生成结果的纪律体检"——
-  // 三条都是纯机械判据，不依赖模型自觉，重提后照清单过一遍即可。
   CUT_ACTION_OVERLAP: {
     level: QC_LEVEL.WARNING,
     title: '切点动作重复',
@@ -322,7 +265,6 @@ export const QC_CODES = {
     fixLabel: '拉开机位与景别',
   },
 
-  // ===== 声音节奏类 =====
   DIALOGUE_SPEED_TIGHT: {
     level: QC_LEVEL.WARNING,
     title: '台词说不完',
@@ -331,13 +273,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 集级事理类（continuityGuard 产出，2026-09-16 接入）=====
-  // 与上面各组的根本区别：上面查的是"镜头拍得对不对"，这一组查的是"故事接不接得上"。
-  // 全部是**场级 / 集级**结论，不指向具体镜头（shot 位置放场次标签，如"场次2"），
-  // 所以一律 manual——自动改等于替编剧写剧情，改坏了比不修更糟。
-  //
-  // 数据来源：routes/qc.js 的 buildQcReport 额外跑一遍 continuityGuard.checkContinuity。
-  // 该模块自带语言包与判据，面板只负责展示（不引入第二套校验逻辑）。
   ENV_STATE_JUMP: {
     level: QC_LEVEL.WARNING,
     title: '环境状态无交代跳变',
@@ -374,7 +309,6 @@ export const QC_CODES = {
     fixLabel: '',
   },
 
-  // ===== 集级叙事类 =====
   DIALOGUE_FLOOR: {
     level: QC_LEVEL.WARNING,
     title: '台词总量偏低',
@@ -398,7 +332,6 @@ export const QC_CODES = {
   },
 }
 
-/** 未登记 code 的兜底元数据（保证任何 code 都能被面板正常展示） */
 export const QC_UNKNOWN_META = {
   level: QC_LEVEL.WARNING,
   title: '',
@@ -407,52 +340,24 @@ export const QC_UNKNOWN_META = {
   fixLabel: '',
 }
 
-/**
- * 取某个 QC code 的元数据（未登记时返回兜底，绝不返回 null）。
- * @param {string} code
- * @returns {{level:string,title:string,hint:string,action:string,fixLabel:string}}
- */
 export function qcMeta(code) {
   const c = String(code || '')
   return QC_CODES[c] || { ...QC_UNKNOWN_META, title: c || '未分类问题' }
 }
 
-/** 该 code 是否属于错误级（必须修） */
 export function isQcError(code) {
   return qcMeta(code).level === QC_LEVEL.ERROR
 }
 
-/**
- * 该 code 是否已在注册表登记。
- * 与 qcMeta 的区别：qcMeta 永远返回可用对象（兜底），本函数回答"这是兜底还是真登记"。
- * 用于区分「已登记的 manual 类」与「未登记 code」——两者的不可修复原因是不同的，
- * 报错文案需要分开（前者说"需人工"，后者说"未登记修复动作"）。
- */
 export function isRegisteredQcCode(code) {
   return Object.prototype.hasOwnProperty.call(QC_CODES, String(code || ''))
 }
 
-/**
- * 汇总一批 QC 结果 → 面板数据结构。
- * 入参统一从**校验层原始产出**来：{ errors: string[], warnings: [{code,shot,message}] }。
- *
- * ⚠️ errors 是字符串数组、没有 code（校验层当时的取舍）。这里不臆造 code，
- * 统一归到 'MUST_FIX' 这一类，message 原样透出——面板照样能展示与定位，
- * 只是没有专属标题。要给某个 error 加专属标题，就在本表登记一个 code 并改校验层产出。
- *
- * @param {{errors?:string[],warnings?:Array<{code:string,shot:string,message:string}>}} qc
- * @returns {{total:number, errorCount:number, warningCount:number, groups:Array}}
- */
 export function summarizeQc(qc = {}) {
   const errors = Array.isArray(qc.errors) ? qc.errors : []
   const warnings = Array.isArray(qc.warnings) ? qc.warnings : []
-  // 带 code 的硬错误（2026-09-16）：校验器对"有 code 的错误"（当前是画风毒词）额外登记一份，
-  // 面板据此归到专属分组（标题 + hint），而不是全塞进通用的 MUST_FIX。
-  // 这些条目的 message 与 errors 里的字符串是同一份——下面 bump MUST_FIX 时按 message 去重，
-  // 避免同一条问题在面板里出现两次。
   const codedErrors = Array.isArray(qc.codedErrors) ? qc.codedErrors : []
 
-  // byCode: code → { code, level, title, hint, action, fixLabel, items: [{shot, message}] }
   const byCode = new Map()
   const bump = (code, shot, message, levelOverride) => {
     const meta = qcMeta(code)
@@ -466,17 +371,14 @@ export function summarizeQc(qc = {}) {
   }
 
   for (const w of warnings) bump(String(w?.code || 'UNKNOWN'), w?.shot, w?.message, null)
-  // 先归带 code 的硬错误（升格 error 级），再归剩余无 code 的字符串错误
   const codedMessages = new Set(codedErrors.map((e) => String(e?.message || '')))
   for (const e of codedErrors) bump(String(e?.code || 'UNKNOWN'), e?.shot, e?.message, QC_LEVEL.ERROR)
-  // errors 无 code：统一 MUST_FIX（level 升格为 error，覆盖该 code 可能的 warning 级别）
   for (const e of errors) {
-    if (codedMessages.has(String(e))) continue // 已按专属 code 归过类，不再重复计一次
+    if (codedMessages.has(String(e))) continue 
     bump('MUST_FIX', '*', e, QC_LEVEL.ERROR)
   }
 
   const groups = [...byCode.values()].sort((a, b) => {
-    // 错误级优先，其次按问题条数降序（条数多的先处理收益大）
     if (a.level !== b.level) return a.level === QC_LEVEL.ERROR ? -1 : 1
     return b.items.length - a.items.length
   })
@@ -492,10 +394,6 @@ export function summarizeQc(qc = {}) {
   }
 }
 
-/**
- * 校验层 warn/error → 人类可读的一行（面板详情 / toast 复用）。
- * @param {{code:string,shot:string,message:string}} item
- */
 export function formatQcItem(item) {
   const meta = qcMeta(item?.code)
   const title = meta.title || item?.code || ''
@@ -503,11 +401,6 @@ export function formatQcItem(item) {
   return `${title ? `[${title}] ` : ''}${where}${item?.message || ''}`
 }
 
-/**
- * QC 修复结果的统一判定：改写稿是否真的解决了该问题。
- * 各修复动作自己判断"改完有没有效果"（补 Airlock 要看开头、补走位要看有没有走位表达），
- * 这里只做口径归一，避免每个调用方各写一套 success 语义。
- */
 export function qcFixResult({ changed = false, reason = '' } = {}) {
   return { success: !!changed, changed: !!changed, reason: String(reason || '') }
 }

@@ -14,7 +14,6 @@ const expanded = ref(false)
 const STAGE_W = 540
 const STAGE_H = 960
 
-// 坐标越界保护：LLM 偶发输出超出 540×960，clamp 回画布内，避免被 viewBox 裁剪
 const clamp = (v, max) => {
   const n = Number(v)
   if (!Number.isFinite(n)) return Math.round(max / 2)
@@ -39,15 +38,12 @@ const safePlan = computed(() => {
     for (const a of c.actions || []) fixXY(a.to)
   }
   for (const x of clone.intersections || []) fixXY(x)
-  // dialogue 正常是数组；后端/手工数据偶发退化为单对象时 for..of 会抛 TypeError，这里统一兜底
   for (const d of (Array.isArray(clone.dialogue) ? clone.dialogue : (clone.dialogue ? [clone.dialogue] : []))) fixXY(d)
   return clone
 })
 
-// 9:16 梯形舞台顶点（顶窄底宽，模拟竖屏构图）
 const stagePoints = '120,180 420,180 460,840 80,840'
 
-// 角色配色：plan 自带 > 项目 charColors > 默认池
 const CHAR_COLOR_POOL = ['#6b9bd1', '#e8a849', '#a86bd1', '#6bd1a8', '#d16b9b', '#d1a86b']
 function getCharColor(c) {
   if (c?.color) return c.color
@@ -55,7 +51,6 @@ function getCharColor(c) {
   return fromStore || CHAR_COLOR_POOL[0]
 }
 
-// 把角色起点 → 动作序列 → 终点连成轨迹路径
 function buildPath(c) {
   const pts = []
   if (c?.start) pts.push(c.start)
@@ -65,11 +60,9 @@ function buildPath(c) {
   return 'M ' + pts.map((p) => `${p.x},${p.y}`).join(' L ')
 }
 
-// 视线目标坐标：根据 gaze 字段推断视线终点
 function gazeTarget(c) {
   if (!c?.gaze || !c?.start) return null
   const g = String(c.gaze)
-  // 看向@角色名 或 看向@道具名
   const atMatch = g.match(/@(.+)/)
   if (atMatch) {
     const targetName = atMatch[1]
@@ -78,9 +71,7 @@ function gazeTarget(c) {
     const targetProp = (safePlan.value?.props || []).find((x) => x.name === targetName)
     if (targetProp) return { x: targetProp.x, y: targetProp.y }
   }
-  // 看向镜头 = 画布顶部中心
   if (g.includes('镜头')) return { x: STAGE_W / 2, y: 120 }
-  // 方向
   if (g.includes('左')) return { x: Math.max(40, c.start.x - 80), y: c.start.y }
   if (g.includes('右')) return { x: Math.min(STAGE_W - 40, c.start.x + 80), y: c.start.y }
   if (g.includes('上')) return { x: c.start.x, y: Math.max(120, c.start.y - 80) }
@@ -109,7 +100,6 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
   <div v-if="!hasContent" class="empty">未生成</div>
 
   <div v-else class="blocking-chart" :class="{ compact }">
-    <!-- 缩略图（点击放大） -->
     <div class="svg-wrap" @click="toggleExpand">
       <svg :viewBox="`0 0 ${STAGE_W} ${STAGE_H}`" width="100%" height="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="镜头站位图">
         <defs>
@@ -117,12 +107,9 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
             <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </marker>
         </defs>
-        <!-- 舞台梯形 -->
         <polygon :points="stagePoints" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.25)" stroke-width="2" />
-        <!-- 中线辅助 -->
         <line :x1="STAGE_W / 2" y1="180" :y2="840" :x2="STAGE_W / 2" stroke="rgba(255,255,255,0.08)" stroke-width="1" stroke-dasharray="4 6" />
 
-        <!-- 场景布局：墙壁 -->
         <template v-for="(wall, i) in safePlan.sceneLayout?.walls || []" :key="'wall' + i">
           <line
             v-if="wall.points && wall.points.length >= 2"
@@ -133,7 +120,6 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
           <text v-if="!compact && wall.label" :x="(wall.points[0][0] + wall.points[1][0]) / 2" :y="(wall.points[0][1] + wall.points[1][1]) / 2 - 8" text-anchor="middle" fill="rgba(180,180,200,0.6)" font-size="10">{{ wall.label }}</text>
         </template>
 
-        <!-- 场景布局：家具 -->
         <template v-for="(furn, i) in safePlan.sceneLayout?.furniture || []" :key="'furn' + i">
           <rect
             :x="furn.x - (furn.width || 60) / 2" :y="furn.y - (furn.height || 40) / 2"
@@ -144,56 +130,45 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
           <text v-if="!compact" :x="furn.x" :y="furn.y + 4" text-anchor="middle" fill="rgba(180,180,200,0.7)" font-size="10">{{ furn.name }}</text>
         </template>
 
-        <!-- 区域标注 -->
         <template v-for="r in safePlan.regions || []" :key="r.id">
           <circle :cx="r.x" :cy="r.y" r="3" fill="rgba(255,255,255,0.35)" />
           <text v-if="!compact" :x="r.x" :y="r.y - 10" text-anchor="middle" fill="rgba(255,255,255,0.55)" font-size="12">{{ r.id }}</text>
           <text v-if="!compact" :x="r.x" :y="r.y + 8" text-anchor="middle" fill="rgba(255,255,255,0.4)" font-size="10">{{ r.label }}</text>
         </template>
 
-        <!-- 道具 -->
         <template v-for="(p, i) in safePlan.props || []" :key="'p' + i">
           <rect :x="p.x - 9" :y="p.y - 9" width="18" height="18" rx="3" fill="rgba(234,154,73,0.25)" stroke="#e8a849" stroke-width="1.2" />
           <text v-if="!compact" :x="p.x" :y="p.y + 26" text-anchor="middle" fill="#e8a849" font-size="11">{{ p.name }}</text>
         </template>
 
-        <!-- 机位标注（字母 A/B/C/D + 三角形朝向舞台） -->
         <template v-for="(cam, i) in safePlan.cameras || []" :key="'cam' + i">
           <polygon :points="`${cam.x},${cam.y - 10} ${cam.x - 8},${cam.y + 6} ${cam.x + 8},${cam.y + 6}`" fill="rgba(234,154,73,0.35)" stroke="#e8a849" stroke-width="1.2" />
           <text :x="cam.x" :y="cam.y + 2" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">{{ cam.id }}</text>
           <text v-if="!compact" :x="cam.x" :y="cam.y + 22" text-anchor="middle" fill="#e8a849" font-size="9">{{ cam.label }}</text>
         </template>
 
-        <!-- 视线虚线箭头（从角色起点指向视线目标） -->
         <template v-for="(c, i) in safePlan.characters || []" :key="'gaze' + i">
           <line v-if="!compact && gazeTarget(c)" :x1="c.start.x" :y1="c.start.y" :x2="gazeTarget(c).x" :y2="gazeTarget(c).y" stroke="rgba(255,255,255,0.45)" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#gazeArrow)" />
         </template>
 
-        <!-- 角色轨迹与图标 -->
         <template v-for="(c, i) in safePlan.characters || []" :key="'c' + i">
-          <!-- 轨迹虚线 -->
           <path :d="buildPath(c)" :stroke="getCharColor(c)" stroke-width="2.5" fill="none" stroke-dasharray="7 5" opacity="0.75" />
-          <!-- 动作编号点 -->
           <template v-for="(a, ai) in c.actions || []" :key="ai">
             <circle :cx="a.to.x" :cy="a.to.y" r="9" :fill="getCharColor(c)" opacity="0.85" />
             <text v-if="!compact" :x="a.to.x" :y="a.to.y + 4" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">{{ a.seq }}</text>
             <text v-if="!compact" :x="a.to.x" :y="a.to.y - 14" text-anchor="middle" :fill="getCharColor(c)" font-size="10">{{ a.label }}</text>
           </template>
-          <!-- 起点（实心圆 + 首字） -->
           <circle :cx="c.start.x" :cy="c.start.y" r="16" :fill="getCharColor(c)" stroke="#fff" stroke-width="2.5" />
           <text v-if="!compact" :x="c.start.x" :y="c.start.y + 5" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">{{ (c.name || '?').charAt(0) }}</text>
           <text v-if="!compact" :x="c.start.x" :y="c.start.y + 30" text-anchor="middle" :fill="getCharColor(c)" font-size="11">{{ c.name }}</text>
-          <!-- 终点（半透明） -->
           <circle :cx="c.end.x" :cy="c.end.y" r="11" :fill="getCharColor(c)" opacity="0.35" stroke="none" />
         </template>
 
-        <!-- 交汇点 -->
         <template v-for="(x, i) in safePlan.intersections || []" :key="'x' + i">
           <circle :cx="x.x" :cy="x.y" r="14" fill="none" stroke="#e24b4a" stroke-width="3" />
           <text v-if="!compact" :x="x.x" :y="x.y - 18" text-anchor="middle" fill="#e24b4a" font-size="11" font-weight="700">{{ x.label }}</text>
         </template>
 
-        <!-- 对话气泡 -->
         <template v-for="(d, i) in safePlan.dialogue || []" :key="'d' + i">
           <g v-if="!compact">
             <rect :x="d.x - 48" :y="d.y - 22" width="96" height="36" rx="8" fill="rgba(0,0,0,0.65)" stroke="rgba(255,255,255,0.35)" stroke-width="1" />
@@ -204,7 +179,6 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
       </svg>
     </div>
 
-    <!-- 图例 -->
     <div v-if="!compact" class="legend">
       <div class="legend-row" v-for="(c, i) in safePlan.characters || []" :key="i">
         <span class="dot" :style="{ background: getCharColor(c) }"></span>
@@ -220,7 +194,6 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
       </div>
     </div>
 
-    <!-- 全屏预览 -->
     <Teleport to="body">
       <div v-if="expanded" class="overlay" @click="closeExpand">
         <div class="overlay-card">
@@ -239,7 +212,6 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
                   </defs>
                   <polygon :points="stagePoints" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.25)" stroke-width="2" />
                   <line :x1="STAGE_W / 2" y1="180" :y2="840" :x2="STAGE_W / 2" stroke="rgba(255,255,255,0.08)" stroke-width="1" stroke-dasharray="4 6" />
-                  <!-- 场景布局：墙壁 -->
                   <template v-for="(wall, i) in safePlan.sceneLayout?.walls || []" :key="'wall2' + i">
                     <line
                       v-if="wall.points && wall.points.length >= 2"
@@ -249,7 +221,6 @@ const hasContent = computed(() => !!safePlan.value && Array.isArray(safePlan.val
                     />
                     <text v-if="wall.label" :x="(wall.points[0][0] + wall.points[1][0]) / 2" :y="(wall.points[0][1] + wall.points[1][1]) / 2 - 8" text-anchor="middle" fill="rgba(180,180,200,0.6)" font-size="10">{{ wall.label }}</text>
                   </template>
-                  <!-- 场景布局：家具 -->
                   <template v-for="(furn, i) in safePlan.sceneLayout?.furniture || []" :key="'furn2' + i">
                     <rect
                       :x="furn.x - (furn.width || 60) / 2" :y="furn.y - (furn.height || 40) / 2"

@@ -19,11 +19,8 @@ import { assertScriptConfirmed, assertNotStale, assertNoStylePoison } from '../a
 import { uploadsUrlToAbs } from '../ai/shared.js'
 import { relayLastFrameToNextShot } from '../ai/postHooks.js'
 import { generateShotGridApp } from '../ai/rhShotGrid.js'
-// （死 import 已删：buildShotVideoPrompt / cameraPhrase 全项目零调用点。见 ai/videoPrompt.js 头部标识）
 import { checkSeam, checkOpenerTone } from '../ai/seamCheck.js'
 import { reviewShot, reviewShotByShotId } from '../ai/shotReview.js'
-// 系统告警（2026-09-13）：出片后置钩子链失败可见化——落 system_alerts，前端亮角标、响应带 warnings
-// 只导入本文件真正调用的：多导入会在"调用了却没导入"这类接线漏检中制造噪音（见 sceneReview.test.mjs 8b 节）
 import { listAlerts, countUnresolved, resolveAlert, resolveAlertsByShot, resolveAlertsByScene } from '../ai/alerts.js'
 import { buildGlobalSpeakerMap } from '../ai/h3PromptTranslator.js'
 import { validateCameraAngle, inferAngleFromText, angleInjection } from '../ai/cameraAngle.js'
@@ -31,26 +28,17 @@ import { generateImage, generateStoryboardImage, resolveProvider } from '../ai/i
 import { backfillStoryboardAssets } from '../ai/assetBackfill.js'
 import { classifyShotCombat } from '../ai/shotClassifier.js'
 import { config } from '../config.js'
-// cleanText 统一到 ai/shared.js（原此处与 ai/videoPrompt.js 各有一份实现）
 import { clean as cleanText } from '../ai/shared.js'
 import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
 import { routeIp, buildCharacterContext, resolveExplicitCharacters } from '../ai/ipRouter.js'
-// ffmpeg-static 已用于分镜图切分（directorRequest.js），这里复用同一份二进制
-import ffmpegStaticPath from 'ffmpeg-static'
-// LUFS 响度归一（2026-09-14）：逐镜 -20 消段间跳变 + BGM 后整片 -16 终遍，见 audioLoudnorm.js 头注
+import { ffmpegPath as ffmpegStaticPath } from '../ai/ffmpeg.js'
 import { measureLoudness, loudnormFilter, normalizeFinalLoudness, PER_SHOT_TARGET, FINAL_TARGET } from '../audioLoudnorm.js'
 
 const router = Router()
 
-// server/uploads：本路由的文件落盘基准目录（BGM 列表、成片拼接口都基于它）
 const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 fs.mkdirSync(uploadsDir, { recursive: true })
 
-// [清理 2026-09-19] 本文件原先抄有 buildAssetContextForPrompt / persistRemoteAsset / updateTask /
-// dedupeAssets / isFurniture / filterFurnitureProps 六个函数的副本，外加 FRAME_DUAL_KEYFRAME_SEC
-// 与 runningFullTasks 两个常量 —— 经逐一核对**全部零调用点**（本文件只做成片拼接/BGM/后处理，
-// 不做剧本生成、不出图、不建任务），已整块删除。这些函数的唯一使用方分别是
-// generate-script.js（剧本/资产）与 generate-image.js（persistRemoteAsset 落图）。
 
 
 router.get('/bgm-list', (req, res) => {
@@ -65,10 +53,6 @@ router.get('/bgm-list', (req, res) => {
   }
 })
 
-// ===== 系统告警（2026-09-13）：出片后置钩子链失败可见化 =====
-// 背景：末帧接力/接缝检测/色向闸/观片闸全是 fire-and-forget，原本失败只落 console.warn，
-// 批量出片时无人可见——「成片在但验收链全灭」长期静默。现落 system_alerts 表并可查询。
-// GET /alerts?episodeId=&includeResolved=1 → { alerts:[], unresolved:N }
 router.get('/alerts', (req, res) => {
   try {
     const episodeId = req.query.episodeId != null && req.query.episodeId !== '' ? Number(req.query.episodeId) : null
@@ -80,9 +64,6 @@ router.get('/alerts', (req, res) => {
   }
 })
 
-// POST /alerts/resolve { id } | { shotId } | { sceneId }（三选一）→ 处置单条 / 某镜全部 / 某场全部
-// sceneId 于 2026-09-17 加入（A4/A5 场景图质检）：场景告警按场景清，与按镜头清并列而非复用——
-// 两者是不同的域，混用会让"点了处置之后到底清了什么"变得靠猜。
 router.post('/alerts/resolve', (req, res) => {
   try {
     const { id, shotId, sceneId, source } = req.body || {}
@@ -104,16 +85,10 @@ router.post('/alerts/resolve', (req, res) => {
   }
 })
 
-// ===== 保存至成片：把该集所有已生成镜头视频按场次/镜头顺序拼接为一个完整 mp4 =====
-// 每个单镜都是同 workflow 输出（h264+aac，分辨率随项目级 aspect_ratio：9:16/16:9…），
-// 归一化统一编码与音轨（不裁切，保留原始分辨率），再拼接——避免不同镜头音轨缺失导致失败。
-// 转场按宪法第四条「叠化只用于时空转换、动作戏禁叠化」逐接缝判定，
-// 详见函数内「转场策略」注释；fade 参数 true(智能)/false(全硬切)/'all'(全叠化)。
 router.post('/video/compose', async (req, res) => {
   const { episodeId, fade = true, bgm = '', loudnorm = true } = req.body
   if (!episodeId) return res.status(400).json({ error: 'episodeId 必填' })
 
-  // BGM 白名单校验（防路径穿越）：只接受 uploads/bgm/ 下真实存在的音频文件
   let bgmPath = ''
   if (String(bgm || '').trim()) {
     const bgmName = path.basename(String(bgm).trim())
@@ -124,9 +99,6 @@ router.post('/video/compose', async (req, res) => {
     bgmPath = cand
   }
 
-  // 排序口径与分镜页/编号重编一致（scene_number + start_time，同分用 id 稳定），
-  // 不用 ss.id/s.id：场次删插重排后 id 序与逻辑序会漂移，拼出镜头乱序的成片
-  // scene_number / is_combat 供转场策略判定（见下方「转场策略」注释）
   const allShots = query(
     `SELECT s.id, s.shot_number, s.duration, s.video_url, s.is_combat, ss.scene_number
      FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
@@ -135,8 +107,6 @@ router.post('/video/compose', async (req, res) => {
     [episodeId]
   )
   const withVideo = allShots.filter((s) => s.video_url && String(s.video_url).trim())
-  // 未出片镜头不再静默跳过：显式回传镜头号列表，前端弹告警——否则成片叙事断层
-  // （实测 18 镜只出 5 镜时拼出 31 秒残片，剧情直接腰斩且无任何提示）
   const missingShots = allShots
     .filter((s) => !withVideo.some((v) => v.id === s.id))
     .map((s) => s.shot_number || String(s.id))
@@ -147,8 +117,6 @@ router.post('/video/compose', async (req, res) => {
   const tmpDir = path.join(uploadsDir, `.compose_tmp_${episodeId}_${Date.now()}`)
   fs.mkdirSync(tmpDir, { recursive: true })
   try {
-    // 探测媒体真实时长与分辨率（只解码 1 帧，读 stderr header；duration 字段可能
-    // 与成片实际不符——v4 出片有 +1s 补偿 clamp，offset 计算必须用真实值）
     const probeMedia = async (f) => {
       const { stderr } = await execFile(ffmpegStaticPath, ['-hide_banner', '-i', f, '-frames:v', '1', '-f', 'null', '-'])
       const s = String(stderr)
@@ -161,14 +129,8 @@ router.post('/video/compose', async (req, res) => {
       }
     }
 
-    // 1) 逐镜归一化：统一到批次最高分辨率（H3 存在 1MP/0.5MP 交替，分辨率不一致
-    //    会让 xfade 报错、concat 版成片忽大忽小）+ 24fps / 44100Hz + 静音兜底音轨
     const probes = []
     for (const s of withVideo) {
-      // 保留子目录解析（2026-09-16 审核修复 P0-2）：切片回填的 video_url 形如
-      // /uploads/segments/segN/镜号_id.mp4，旧实现用 basename 压到 uploads 根 →
-      // 指向不存在的路径，段级出片后拼片必定 400「视频文件缺失」。
-      // 统一走 shared.uploadsUrlToAbs（与 shotReview/seamCheck 同口径）。
       const absSrc = uploadsUrlToAbs(s.video_url, uploadsDir)
       if (!absSrc) {
         const shown = String(s.video_url).split('/').pop().split('?')[0]
@@ -179,10 +141,6 @@ router.post('/video/compose', async (req, res) => {
     const target = probes.reduce((best, p) => (p.w * p.h > best.w * best.h ? p : best), { w: 0, h: 0 })
     if (!target.w) return res.status(400).json({ error: '无法读取镜头视频信息（分辨率探测失败）' })
 
-    // LUFS 逐镜归一（响度跳变第一层）：每镜独立出音轨，实测 -13~-42dB 跨度 29dB——
-    // 拼起来观众要一直调音量。每镜拉到 -20 LUFS（留 4dB headroom 给 BGM 混音），
-    // 段间跳变即消。静音/近静音镜跳过（归一无意义且会炸 NaN）。
-    // 艺术口子：要保留某镜「故意极响/极轻」的设计时，请求传 loudnorm:false 整链关。
     const perShotLoud = { applied: 0, skipped: 0 }
     const normList = []
     for (const p of probes) {
@@ -215,15 +173,6 @@ router.post('/video/compose', async (req, res) => {
     const outPath = path.join(uploadsDir, outName)
     const FADE = 0.5
 
-    // ── 转场策略（2026-09-14 重做）──
-    // 宪法第四条明文：「严肃动作戏禁叠化，叠化只用于时空转换。0.5s 叠化全片 = PPT。」
-    // 旧实现是 `fade !== false` 就给**所有**接缝上 0.5s 叠化——26 镜 → 25 个接缝全叠化，
-    // 正好撞在宪法禁的那句话上：动作段被"化"出 PPT 感，该硬切的情绪点全在融化。
-    // 现按镜头语义逐个接缝判定，判据全部可机读（不依赖人工逐镜标注）：
-    //   · 同一场次内           = 同一时空连续 → 硬切（宪法：情绪点景别切换必须硬切）
-    //   · 跨场次 + 任一侧武戏   = 动作戏禁叠化 → 硬切
-    //   · 跨场次 + 两侧都文戏   = 时空转换     → 叠化 0.5s
-    // fade 取值：true(默认)=智能判定 / false=全硬切 / 'all'=全叠化（保留旧行为，应急用）
     const dissolveAt = []
     for (let i = 1; i < probes.length; i++) {
       const prev = probes[i - 1].s
@@ -244,19 +193,10 @@ router.post('/video/compose', async (req, res) => {
     let finalSeconds = 0
 
     if (useChain) {
-      // 2a) 混合链式拼接：叠化接缝走 xfade/acrossfade，硬切接缝走 concat，两者可在同一
-      //     filter_complex 内混用。硬切**不能**用「duration≈0 的 xfade」糊弄——那会真的
-      //     渲染一段极短过渡，且 offset 误差逐接缝累积，尾部会漂出黑帧。
       const durations = []
       for (const p of normList) durations.push((await probeMedia(p)).duration)
       const vChain = []
       const aChain = []
-      // 时基统一（2026-09-14 实测踩坑）：xfade 要求两路输入时基一致，而 concat 的**输出**
-      // 时基会被抬到 1/1000000，与原始流的 1/12288 不匹配。于是只要出现「硬切 → 叠化」的
-      // 接缝顺序（真实数据第 1 个接缝就是硬切），xfade 就报
-      //   "First input link main timebase (1/1000000) do not match ... (1/12288)"
-      // 并整体 500。修复：每条输入先 settb=AVTB + setpts 归零，concat/xfade 的输出便同处一个时基。
-      // 回归测试：server/_test_transition_ffmpeg.mjs（含负对照，证明该测试确实能抓到本 bug）
       for (let i = 0; i < normList.length; i++) {
         vChain.push(`[${i}:v]settb=AVTB,setpts=PTS-STARTPTS[vi${i}]`)
         aChain.push(`[${i}:a]asettb=AVTB,asetpts=PTS-STARTPTS[ai${i}]`)
@@ -292,8 +232,6 @@ router.post('/video/compose', async (req, res) => {
       await execFile(ffmpegStaticPath, args)
       finalSeconds = acc
     } else {
-      // 2b) 全硬切（单镜 / 场内全硬切 / 全武戏 / 显式关转场）：concat demuxer 直拼。
-      //     归一化已统一编码与音轨，copy 即可不重编码（比 filter chain 快得多）
       const listPath = path.join(tmpDir, 'list.txt')
       fs.writeFileSync(listPath, normList.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'))
       await execFile(ffmpegStaticPath, [
@@ -307,7 +245,6 @@ router.post('/video/compose', async (req, res) => {
       finalSeconds = (await probeMedia(outPath)).duration
     }
 
-    // 3) BGM 铺底（可选）：循环 + 音量 0.22 + 尾部 2s 淡出；amix normalize=0 不压原声
     let bgmUsed = ''
     if (bgmPath) {
       const total = finalSeconds || 30
@@ -329,9 +266,6 @@ router.post('/video/compose', async (req, res) => {
       bgmUsed = path.basename(bgmPath)
     }
 
-    // 4) LUFS 整片终遍（响度跳变第二层）：必须在 BGM 之后——amix 会改变整体响度，
-    //    放前面就白做。逐镜已各归 -20，终遍把整体（原声+BGM）线性定到 -16 LUFS
-    //    （流媒体交付标准）。视频流 copy 零损失，只重编码音频；静音片自动跳过。
     let loudFinal = { applied: false, reason: 'off' }
     if (loudnorm) {
       loudFinal = await normalizeFinalLoudness(outPath, tmpDir)
@@ -342,9 +276,7 @@ router.post('/video/compose', async (req, res) => {
       url: `/uploads/${outName}`,
       shotCount: normList.length,
       totalSeconds: Math.round(finalSeconds * 10) / 10,
-      // fade 保留旧字段（前端可能读）：语义变为「是否存在叠化接缝」
       fade: dissolveCount > 0,
-      // 转场决策明细：让"为什么这段是硬切/叠化"可解释，不用回头翻代码
       transitions: {
         policy: fade === false ? 'hard-cut' : fade === 'all' ? 'all-dissolve' : 'smart',
         dissolveCount,
@@ -352,7 +284,6 @@ router.post('/video/compose', async (req, res) => {
         dissolveSeconds: FADE,
       },
       bgmUsed,
-      // 响度归一报告（2026-09-14）：perShot=逐镜归一到 -20 的覆盖情况；final=整片终遍
       loudnorm: loudnorm ? {
         perShotTarget: PER_SHOT_TARGET,
         finalTarget: FINAL_TARGET,
@@ -360,7 +291,6 @@ router.post('/video/compose', async (req, res) => {
         final: loudFinal,
       } : null,
       resolution: `${target.w}x${target.h}`,
-      // 未出片镜头号（按播放序）：前端据此弹告警"成片缺 N 镜，剧情可能断层"
       missingShots,
       totalShots: allShots.length,
     })
@@ -368,7 +298,7 @@ router.post('/video/compose', async (req, res) => {
     console.error('[/generate/video/compose] error:', err.message)
     res.status(500).json({ error: `成片合成失败：${err.message}` })
   } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* 临时目录清理失败可忽略 */ }
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch {  }
   }
 })
 
@@ -389,8 +319,6 @@ router.post('/continuity-frame', async (req, res) => {
   }
 })
 
-// 兜底手动接口：重新检测某镜衔接质量（#3；自动钩子失败或阈值调整后想重检时用，正常流程不需要）
-// 路由口径与出片钩子一致：有 continuity 锚 → 接缝检测；无锚（开场镜）→ 色向闸（锁3）。
 router.post('/seam-check', async (req, res) => {
   const { shotId } = req.body
   if (!shotId) return res.status(400).json({ error: 'shotId 必填' })
@@ -409,7 +337,6 @@ router.post('/seam-check', async (req, res) => {
   }
 })
 
-// 兜底手动接口：VLM 观片评审某镜（自动钩子失败/额度恢复后补评存量镜头）
 router.post('/shot-review', async (req, res) => {
   const { shotId } = req.body
   if (!shotId) return res.status(400).json({ error: 'shotId 必填' })
@@ -444,7 +371,6 @@ router.post('/blocking', async (req, res) => {
   const shotRows = query('SELECT * FROM shots WHERE storyboard_scene_id = ? ORDER BY start_time, id', [scene.id])
   if (!shotRows.length) return res.status(400).json({ error: '该场次没有镜头' })
 
-  // 场景设定：按场次标题匹配资产库场景（布局描述与关联道具以此为权威）
   const sceneAsset = queryOne(
     'SELECT title, summary, prop_names FROM scenes WHERE episode_id = ? AND title = ?',
     [scene.episode_id, scene.title]
@@ -460,8 +386,6 @@ router.post('/blocking', async (req, res) => {
     try {
       const obj = typeof d === 'string' ? JSON.parse(d) : d
       if (!obj) return ''
-      // 数据契约：dialogue 是 JSON 数组 [{character,tone,text,startTime}]；
-      // 兼容历史单对象形态。此前按单对象读，数组一律取出空串，站位 AI 拿不到台词
       const list = Array.isArray(obj) ? obj : [obj]
       return list
         .map((x) => [x?.character, x?.text].filter(Boolean).join('：'))

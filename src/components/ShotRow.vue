@@ -6,19 +6,14 @@ import { api } from '../services/api'
 
 const props = defineProps({
   shot: { type: Object, required: true },
-  // 行序号，用于斑马纹（奇数行浅底色），由父级 v-for 传入
   index: { type: Number, default: 0 },
-  // 是否显示「成片」列（默认显示；分镜本编辑页传 false 隐藏。时长列作为分镜信息始终显示，不受此控制）
-  // 出片/预览统一在 VideoView 短片创作页完成，避免编辑页与出片页功能重叠）
   showVideo: { type: Boolean, default: true },
-  // 质检面板点镜头号后高亮该行（2 秒后由父级清除）。纯展示态，本组件不改任何数据
   highlighted: { type: Boolean, default: false },
 })
 
 const store = useProjectStore()
 const showPromptModal = ref(false)
 
-// 戏型（文戏/武戏）：决定出片时打斗 LoRA 是否加载。null=未判定，出片时后端按内容自动判
 const isCombat = computed(() => props.shot.isCombat === 1)
 async function toggleCombat() {
   const next = !isCombat.value
@@ -37,27 +32,22 @@ const charColors = {
   布布: '#e8a849',
 }
 
-// 获取角色详情（含图片）
 function getCharacter(name) {
   return store.characters.find(c => c.name === name) || null
 }
 
-// 获取场景详情（含图片）
 function getScene(name) {
   return store.assetScenes.find(s => s.name === name) || null
 }
 
-// 获取道具详情（含图片）
 function getProp(name) {
   return store.props.find(p => p.name === name) || null
 }
 
-// 获取资产图片 URL
 function getAssetImage(asset) {
   return asset?.imageUrl || asset?.image_url || ''
 }
 
-// 顶部统计：图片/视频/音频数量
 const assetStats = computed(() => {
   const charCount = props.shot.characters?.length || 0
   const sceneCount = props.shot.sceneAssets?.length || 0
@@ -68,7 +58,6 @@ const assetStats = computed(() => {
   return { imageCount, videoCount, audioCount }
 })
 
-// 解析 description，把 @角色 @场景 @道具 拆分成高亮片段
 const parsedDescription = computed(() => {
   const text = props.shot.description || ''
   const allNames = [
@@ -76,7 +65,6 @@ const parsedDescription = computed(() => {
     ...(props.shot.sceneAssets || []).map(n => ({ name: n, type: 'scene' })),
     ...(props.shot.propAssets || []).map(n => ({ name: n, type: 'prop' })),
   ]
-  // 按名称长度降序，避免短名先匹配
   allNames.sort((a, b) => b.name.length - a.name.length)
 
   const segments = []
@@ -107,35 +95,27 @@ const parsedDescription = computed(() => {
   return segments
 })
 
-// 站位图是否有内容（程序化 plan / 旧 blockingUrl / 演示标记）
 const hasBlockingContent = computed(
   () => !!props.shot.blockingPlan || !!props.shot.blockingUrl || props.shot.hasBlocking
 )
 
 const chartRef = ref(null)
 function regenerateBlocking() {
-  // 优先用程序化站位图（LLM 出结构化 JSON，SVG 渲染）；保留旧 blockingUrl 兼容
   store.generateBlocking(props.shot.id)
 }
 function zoomBlocking() {
-  // 仅在有站位图数据时打开放大视图
   if (props.shot.blockingPlan) chartRef.value?.open()
 }
 
-// ===== 成片（跟随全局 videoModel：标准 / 增强 / 未来其他视频 API）=====
 const generatingVideo = computed(() => store.generatingVideoIds.includes(props.shot.id))
 const videoBtnText = computed(() =>
   generatingVideo.value ? '出片中...' : (props.shot.videoUrl ? '重新出片' : '生成成片')
 )
 const videoPhaseText = '云端生成中，约 3~15 分钟'
 function generateVideo() {
-  // 与短片页一致走统一入口：出片引擎 = 页面上方/设定里的全局 videoModel
   store.generateShotVideoByModel(props.shot.id)
 }
 
-// ===== 分镜图（frame）：带角色/场景参考图的多图生图 =====
-// 历史故事板（storyboard_url）已下线，分镜图统一用 frame_url。
-// 每次生成产出 2 张：frameUrl 为主图（参与下游视频参考），frameUrl2 为第二候选
 const frameImage = computed(() => props.shot.frameUrl || '')
 const frameImages = computed(() => {
   const list = [frameImage.value]
@@ -144,12 +124,9 @@ const frameImages = computed(() => {
 })
 const showFrameModal = ref(false)
 function generateFrame() {
-  // 分镜图跟随全局模型选择（zikl / Visionary）
   store.generateShotImage(props.shot.id, 'frame', store.imageModel)
 }
-// 单镜头出 2x2 四宫格：4 格 = 同一镜头的 4 个时间瞬间，整张作为该镜分镜图
 const shotGridLoading = computed(() => store.generatingShotGridIds.includes(props.shot.id))
-// ===== 四宫格出图状态：生成中（含已耗时）/ 失败（红标，点击清除）=====
 const shotGridFailed = computed(() => store.shotGridFailed[props.shot.id] || '')
 const shotGridStartedAt = computed(() => store.shotGridStartedAt[props.shot.id] || 0)
 const nowTick = ref(Date.now())
@@ -173,18 +150,13 @@ function zoomFrame(idx = 0) {
   if (!frameImages.value.length) return
   showFrameModal.value = true
 }
-// 把第 idx 张设为主图（与第二张交换位置，落库）
 async function setPrimary(idx) {
   if (idx === 0) return
   await store.setPrimaryFrame(props.shot.id, idx + 1)
 }
 
-// ===== 质检角标（2026-09-16）=====
-// 数据来自 store.qcReport.shotIndex（由后端 buildQcReport 生成：镜头号 → 命中的 code 列表）。
-// 前端只做展示，不判断"哪个 code 算严重"——级别由后端 qcCodes 注册表给。
 const qcCodes = computed(() => store.qcCodesForShot(props.shot.shotNumber))
 const qcHasError = computed(() => store.qcHasErrorForShot(props.shot.shotNumber))
-// 悬停提示：把该镜命中的问题标题列出来（标题也来自后端分组，前端不硬编码文案）
 const qcTitle = computed(() => {
   if (!qcCodes.value.length) return ''
   const groups = store.qcReport?.groups || []
@@ -196,8 +168,6 @@ const qcTitle = computed(() => {
   return `该镜质检问题（${qcCodes.value.length} 类）：\n${lines.join('\n')}`
 })
 
-// ===== 尾帧锚（keyframe）：本镜结束画面，由 finalFrame 一键出图（2026-09-16）=====
-// 与分镜图（frameUrl＝本镜开头）成对：两张都在，下一镜的接缝才在画面上真正接得上。
 const keyframeImage = computed(() => props.shot.keyframeUrl || '')
 const keyframeLoading = computed(() => store.generatingKeyframeIds.includes(props.shot.id))
 const showKeyframeModal = ref(false)
@@ -206,15 +176,10 @@ function generateKeyframe() {
   store.generateShotImage(props.shot.id, 'keyframe', store.imageModel)
 }
 
-// 悬浮卡开合（状态灯 / 资产统计条共用）。
-// 点灯的状态灯只有 6px，无法承载文字，所以四个点的含义靠悬浮卡补全——
-// 不展开时保持"扫一眼"的低噪音，需要时鼠标停一下就知道每个点的名字。
 const hovKey = ref('')
 function hovEnter(key) { hovKey.value = key }
 function hovLeave(key) { if (hovKey.value === key) hovKey.value = '' }
 
-// 状态灯悬浮卡：把四个点翻译成文字行（名字 + 已就绪/待产出/失败）。
-// 顺序与右侧四列完全一致，鼠标停在任意一个点上都能读到全套映射。
 const statusDetail = computed(() => {
   const qc = qcCodes.value.length
   return {
@@ -229,8 +194,6 @@ const statusDetail = computed(() => {
   }
 })
 
-// 资产统计条悬浮卡：三个计数（图/视/音）分别指向哪类资产。
-// 资产统计条悬浮卡的「已绑定」行：只列出真的有绑定的类别。
 const assetDetail = computed(() => {
   const a = assetStats.value
   return {
@@ -248,10 +211,6 @@ const assetDetail = computed(() => {
 })
 
 
-// 把三路产出物的完成情况压成一组小圆点，替代原来散落各处的角标。
-// 语义：实心=已就绪，描边=未产出，红=失败需处置，不做「正在生成」态（进度条另有地方显示）。
-// 顺序固定为 图 / 尾 / 位 / 片，与右侧四列（分镜图/尾帧锚/站位图/成片）一一对应，
-// 用户从状态灯读到缺哪项，视线右移就能找到那一列，不用记图标含义。
 const statusDots = computed(() => {
   const s = props.shot
   const videoReady = !!(s.videoUrl || s.video_url || s.videoGenerated || s.video_generated)
@@ -262,7 +221,6 @@ const statusDots = computed(() => {
     { key: 'video', label: '成片', done: videoReady, failed: false },
   ]
 })
-// 未完成项汇总，用于 title 提示与「待办」计数徽章
 const pendingLabels = computed(() =>
   statusDots.value.filter((d) => !d.done).map((d) => d.label)
 )
@@ -279,8 +237,6 @@ const statusTitle = computed(() => {
 </script>
 
 <template>
-  <!-- 镜头行：网格列宽与分镜页列头严格对齐（52/200/minmax/156/156/156/56）
-       data-shot-number 供质检面板滚动定位（面板不碰 DOM，靠这个锚点找到行） -->
   <div
     :data-shot-number="shot.shotNumber || ''"
     class="group/row grid grid-cols-[52px_200px_minmax(280px,1fr)_156px_156px_156px_56px] items-stretch gap-3 border-b border-border/60 px-4 py-3 transition-colors duration-150 last:border-b-0 hover:bg-bg-hover/40"
@@ -289,15 +245,11 @@ const statusTitle = computed(() => {
       highlighted ? 'ring-2 ring-inset ring-accent bg-accent/10' : '',
     ]"
   >
-    <!-- 镜头号 + 状态灯：状态灯让「这个镜头缺什么」一眼可辨，不必逐列去看 -->
     <div class="flex flex-col items-start gap-1.5 pt-0.5">
       <span class="rounded-control border border-border bg-bg-primary/70 px-1.5 py-0.5 font-mono text-micro font-medium text-text-secondary transition group-hover/row:border-accent/50 group-hover/row:text-accent">
         {{ shot.shotNumber || shot.displayId || shot.id }}
       </span>
 
-      <!-- 状态灯：图/尾/位/片 四路产出，实心=就绪、描边=待产出、红=失败。
-           6px 的点放不下文字，故悬浮出一张映射卡：四个点分别叫什么、现在什么状态。
-           卡里同时带出质检问题，省去用户去别处找。 -->
       <div
         class="relative flex cursor-help items-center gap-1"
         :title="statusTitle"
@@ -315,7 +267,6 @@ const statusTitle = computed(() => {
               : 'border border-border-strong'"
         ></span>
 
-        <!-- 悬浮卡：状态灯 vs 右侧四列 的映射表（顺序一一对应） -->
         <div
           v-if="hovKey === 'lamp'"
           class="pointer-events-none absolute left-0 top-[calc(100%+8px)] z-30 w-max overflow-hidden rounded-card border border-border bg-bg-card px-3 py-2.5 shadow-pop animate-fade-up"
@@ -344,16 +295,12 @@ const statusTitle = computed(() => {
         </div>
       </div>
 
-      <!-- 待产出计数：只在有缺口时出现。
-           原来写 "0/4" 会被读成「第 0 个 / 共 4 个」，含义歧义；
-           改成「缺 4」——直接说还差几项，动词在前不产生计数误读。 -->
       <span
         v-if="pendingLabels.length"
         class="rounded-tag bg-bg-hover px-1 text-micro leading-snug text-text-muted"
         :title="`待产出：${pendingLabels.join('、')}`"
       >缺 {{ pendingLabels.length }}</span>
 
-      <!-- 质检角标：命中问题才出现。error 红、warning 黄，级别由后端判定 -->
       <span
         v-if="qcCodes.length"
         class="inline-flex items-center gap-0.5 rounded-control border px-1 py-0.5 text-micro font-medium"
@@ -367,11 +314,7 @@ const statusTitle = computed(() => {
       </span>
     </div>
 
-    <!-- 美术资产：角色 / 场景 / 道具，统一 3 组扁平标签 -->
     <div class="space-y-2">
-      <!-- 资产统计条：图/视/音计数。
-           三个色点本身不表意（图/视/音 文字已说明），悬浮卡补的是
-           「这三类资产分别绑在谁身上」——角色/场景/道具的归属关系。 -->
       <div
         class="relative flex flex-wrap gap-1 text-micro"
         @mouseenter="hovEnter('assets')"
@@ -387,7 +330,6 @@ const statusTitle = computed(() => {
           <span class="h-1 w-1 rounded-full bg-ok"></span>音 {{ assetStats.audioCount }}
         </span>
 
-        <!-- 悬浮卡：资产构成（绑定关系 + 已生成的媒体数量） -->
         <div
           v-if="hovKey === 'assets'"
           class="pointer-events-none absolute left-0 top-[calc(100%+8px)] z-30 w-max overflow-hidden rounded-card border border-border bg-bg-card px-3 py-2.5 shadow-pop animate-fade-up"
@@ -417,7 +359,6 @@ const statusTitle = computed(() => {
         </div>
       </div>
 
-      <!-- 角色 -->
       <div v-if="shot.characters?.length" class="space-y-1">
         <div class="text-micro text-text-muted">角色</div>
         <div class="flex flex-wrap gap-1">
@@ -436,7 +377,6 @@ const statusTitle = computed(() => {
         </div>
       </div>
 
-      <!-- 场景 -->
       <div v-if="shot.sceneAssets?.length" class="space-y-1">
         <div class="text-micro text-text-muted">场景</div>
         <div class="flex flex-wrap gap-1">
@@ -455,7 +395,6 @@ const statusTitle = computed(() => {
         </div>
       </div>
 
-      <!-- 道具 -->
       <div v-if="shot.propAssets?.length" class="space-y-1">
         <div class="text-micro text-text-muted">道具</div>
         <div class="flex flex-wrap gap-1">
@@ -474,9 +413,7 @@ const statusTitle = computed(() => {
       </div>
     </div>
 
-    <!-- 画面描述 + 镜头标签 + AI 提示词入口 -->
     <div class="flex min-h-[112px] flex-col rounded-btn border border-border bg-bg-card p-2.5">
-      <!-- 描述文本：点击看全文 -->
       <button
         class="flex-1 cursor-pointer overflow-auto text-left text-[12px] leading-relaxed text-text-secondary transition hover:text-text-primary"
         type="button"
@@ -491,7 +428,6 @@ const statusTitle = computed(() => {
         </template>
       </button>
 
-      <!-- 镜头标签条：只保留高价值信息，避免小徽章堆砌 -->
       <div class="mt-2 flex shrink-0 flex-wrap items-center gap-1 border-t border-border/60 pt-2 text-micro">
         <span v-if="shot.shotType" class="rounded-control border border-info/30 bg-info/10 px-1.5 py-0.5 text-info" title="景别">
           {{ shot.shotType.length > 26 ? shot.shotType.slice(0, 26) + '…' : shot.shotType }}
@@ -505,7 +441,6 @@ const statusTitle = computed(() => {
         <span v-if="shot.overallSoundscape" class="rounded-control border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-ok" title="环境声">环境声</span>
         <span v-if="shot.nonDiegeticMusic" class="rounded-control border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-accent" title="配乐">配乐</span>
 
-        <!-- 提示词状态：齐全 → 一个入口按钮；缺失 → 醒目标记 -->
         <button
           v-if="shot.integratedMultimodalDescription"
           class="ml-auto flex items-center gap-1 rounded-control bg-accent/10 px-2 py-0.5 font-medium text-accent transition hover:bg-accent/20"
@@ -526,7 +461,6 @@ const statusTitle = computed(() => {
       </div>
     </div>
 
-    <!-- 分镜图列 -->
     <div class="group/frame-col relative flex min-h-[112px] flex-col rounded-btn border border-border bg-bg-card p-2">
       <div class="relative flex-1 overflow-hidden rounded-btn bg-bg-primary">
         <div
@@ -563,28 +497,19 @@ const statusTitle = computed(() => {
           </svg>
         </div>
 
-        <!-- 生成中 -->
         <div v-if="store.generatingStoryboardIds.includes(shot.id) || store.batchStoryboardGenerating" class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/75 backdrop-blur-sm">
           <svg class="h-5 w-5 animate-spin text-accent" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
           <span class="text-micro text-white">生成中...</span>
         </div>
 
-        <!-- 四宫格出图 -->
         <div v-else-if="shotGridLoading" class="absolute inset-0 flex flex-col items-center justify-center gap-1.5 bg-black/75 backdrop-blur-sm">
           <svg class="h-5 w-5 animate-spin text-accent" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
           <span class="text-micro font-medium text-text-primary">出四宫格中 {{ shotGridElapsed }}</span>
           <span class="text-micro text-white/60">约 1~3 分钟</span>
         </div>
 
-        <!-- 操作层去掉了 hover 浮层：
-             原来「放大」（免费、随手）与「出四宫格」（花钱、要等 1~3 分钟）挤在同一个
-             淡入浮层里，权重相同且都不可发现。现在拆开——
-             看：点图即放大（图片本体已是 cursor-zoom-in）；
-             出：沉到下方常驻状态条，与状态并排，始终可见。 -->
       </div>
 
-      <!-- 状态条：常驻可点，不依赖 hover（可达性）。
-           左边读状态、右边做出图动作，中间用 ml-auto 隔开，避免误点花钱按钮。 -->
       <div class="mt-1.5 flex shrink-0 items-center gap-1 border-t border-border/50 pt-1.5 text-micro">
         <span
           class="rounded-tag px-1.5"
@@ -602,8 +527,6 @@ const statusTitle = computed(() => {
           title="该镜头时长较长，两张候选分别是动作首帧与尾帧（主图为首帧）"
         >首帧+尾帧</span>
 
-        <!-- 出图：主操作（花钱），有图时是「重出」。用 outline 而非实心，
-             避免与页面唯一的实心主操作（批量生成）抢注意力。 -->
         <button
           class="ml-auto shrink-0 rounded-tag border px-1.5 py-0.5 font-medium transition disabled:cursor-not-allowed disabled:opacity-40"
           :class="frameImage
@@ -623,8 +546,6 @@ const statusTitle = computed(() => {
       </div>
     </div>
 
-    <!-- 尾帧锚列（keyframe）：本镜结束画面，与左列分镜图（本镜开头）成对。
-         有图 → 显示并可放大；无图 → 一键由 final_frame 出图（final_frame 为空则禁用并说明原因）。 -->
     <div class="group/kf-col relative flex min-h-[112px] flex-col rounded-btn border border-border bg-bg-card p-2">
       <div class="relative flex-1 overflow-hidden rounded-btn bg-bg-primary">
         <img
@@ -641,16 +562,13 @@ const statusTitle = computed(() => {
           <span class="text-micro text-text-muted">无尾帧锚</span>
         </div>
 
-        <!-- 生成中遮罩 -->
         <div v-if="keyframeLoading" class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/75 backdrop-blur-sm">
           <svg class="h-5 w-5 animate-spin text-accent" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
           <span class="text-micro text-white">出尾帧中...</span>
         </div>
 
-        <!-- 操作层同「分镜图列」：撤掉 hover 浮层，看=点图、出=常驻状态条 -->
       </div>
 
-      <!-- 状态条 -->
       <div class="mt-1.5 flex shrink-0 items-center gap-1 border-t border-border/50 pt-1.5 text-micro">
         <span
           class="rounded-tag px-1.5"
@@ -683,7 +601,6 @@ const statusTitle = computed(() => {
       </div>
     </div>
 
-    <!-- 站位图列 -->
     <div class="group/block-col relative flex min-h-[112px] flex-col rounded-btn border border-border bg-bg-card p-2">
       <div class="relative flex-1 overflow-hidden rounded-btn bg-bg-primary">
         <BlockingChart
@@ -712,7 +629,6 @@ const statusTitle = computed(() => {
           <span class="text-micro text-white">生成中...</span>
         </div>
 
-        <!-- 操作层同前两列：撤掉 hover 浮层，看=点图、出=常驻状态条 -->
       </div>
 
       <div class="mt-1.5 flex shrink-0 items-center gap-1 border-t border-border/50 pt-1.5 text-micro">
@@ -741,7 +657,6 @@ const statusTitle = computed(() => {
       </div>
     </div>
 
-    <!-- 成片列（分镜本编辑页隐藏，出片统一在短片页完成） -->
     <div v-if="showVideo" class="flex flex-col items-stretch gap-1 pt-1">
       <video
         v-if="shot.videoUrl"
@@ -768,7 +683,6 @@ const statusTitle = computed(() => {
       >{{ videoBtnText }}</button>
     </div>
 
-    <!-- 时长 + 戏型 -->
     <div class="flex flex-col items-center gap-1.5 pt-1">
       <span class="rounded-control bg-accent/15 px-2 py-0.5 font-mono text-[12px] font-medium text-accent">
         {{ shot.duration }}s
@@ -786,9 +700,7 @@ const statusTitle = computed(() => {
     </div>
   </div>
 
-  <!-- AI Prompt 全屏查看（6 模块结构化描述 + 多模态字段） -->
   <Teleport to="body">
-    <!-- 描述完整内容弹窗（点击卡片描述区触发；保留 @角色/场景/道具 高亮，可选中复制） -->
     <div v-if="showDescModal" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" @click.self="showDescModal = false">
       <div class="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-shell border border-border bg-bg-card shadow-pop">
         <div class="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
@@ -834,7 +746,6 @@ const statusTitle = computed(() => {
           </button>
         </div>
         <div class="flex-1 space-y-4 overflow-y-auto p-5 text-xs">
-          <!-- integrated_multimodal_description（6 模块主结构） -->
           <section>
             <h4 class="mb-2 flex items-center gap-2 text-text-secondary">
               <span class="rounded-tag bg-info/20 px-1.5 py-0.5 text-micro font-medium text-info">主结构</span>
@@ -843,7 +754,6 @@ const statusTitle = computed(() => {
             <pre class="whitespace-pre-wrap rounded-btn border border-border bg-bg-card p-3 font-mono text-[11px] leading-relaxed text-text-secondary">{{ shot.integratedMultimodalDescription }}</pre>
           </section>
 
-          <!-- finalFrame -->
           <section v-if="shot.finalFrame">
             <h4 class="mb-2 flex items-center gap-2 text-text-secondary">
               <span class="rounded-tag bg-warn/20 px-1.5 py-0.5 text-micro font-medium text-warn">Final Frame</span>
@@ -852,7 +762,6 @@ const statusTitle = computed(() => {
             <pre class="whitespace-pre-wrap rounded-btn border border-border bg-bg-card p-3 font-mono text-[11px] leading-relaxed text-text-secondary">{{ shot.finalFrame }}</pre>
           </section>
 
-          <!-- 声景 / 音乐 / 台词 -->
           <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
             <section v-if="shot.overallSoundscape">
               <h4 class="mb-2 text-text-secondary">
@@ -882,7 +791,6 @@ const statusTitle = computed(() => {
         </div>
       </div>
     </div>
-    <!-- 分镜图放大查看（两张候选，可切换主图） -->
     <div v-if="showFrameModal" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" @click.self="showFrameModal = false">
       <div class="flex max-h-[85vh] max-w-[90vw] flex-col overflow-hidden rounded-shell border border-border bg-bg-card shadow-pop">
         <div class="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
@@ -921,7 +829,6 @@ const statusTitle = computed(() => {
         </div>
       </div>
     </div>
-    <!-- 尾帧锚放大查看 -->
     <div v-if="showKeyframeModal" class="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" @click.self="showKeyframeModal = false">
       <div class="flex max-h-[85vh] max-w-[90vw] flex-col overflow-hidden rounded-shell border border-border bg-bg-card shadow-pop">
         <div class="flex shrink-0 items-center justify-between border-b border-border px-5 py-3">
@@ -940,7 +847,6 @@ const statusTitle = computed(() => {
             :alt="`镜头 ${shot.id} 尾帧锚`"
             class="max-h-[60vh] w-auto max-w-full self-center rounded-btn object-contain"
           />
-          <!-- 与尾帧锚对应的文字依据：让人能核对"图跟描述是否一致" -->
           <div v-if="shot.finalFrame" class="rounded-btn border border-border bg-bg-secondary/50 p-3">
             <div class="mb-1.5 text-micro font-medium text-warn">本镜最终画面描述（出图依据）</div>
             <p class="whitespace-pre-wrap break-words text-[11px] leading-relaxed text-text-secondary">{{ shot.finalFrame }}</p>

@@ -7,15 +7,12 @@ import ImportScriptDialog from '../components/ImportScriptDialog.vue'
 
 const store = useProjectStore()
 const router = useRouter()
-const showReconfirmDialog = ref(false) // 重新确认剧本的确认弹窗
-const showImportDialog = ref(false) // 导入剧本弹窗
+const showReconfirmDialog = ref(false) 
+const showImportDialog = ref(false) 
 
-// ===== 结构化场次编辑器 =====
-// 正文区按「场次N：标题」切成场次卡；编辑卡 → 防抖重建 scriptContent（保持与后端纯文本兼容）
-// 分隔符兼容冒号与空白（后端 doubao.js/scriptFormat.js 同口径，「场次N 标题」也认）
 const SCENE_HEADER_RE = /^场次[一二三四五六七八九十\d]+[：:\s]\s*(.*)$/
 let sceneBlockSeq = 0
-const sceneBlocks = ref([]) // [{ id, num, title, body }]，id 稳定用于 DOM key
+const sceneBlocks = ref([]) 
 let rebuildTimer = null
 
 function parseSceneBlocks(content) {
@@ -52,15 +49,11 @@ function applyBlocks(next) {
   scheduleRebuild()
 }
 
-// 外部变化（导入 / 改写接受 / 版本回滚 / 确认归一化）→ 重建卡片
 watch(
   () => store.scriptContent,
   (content) => {
-    // 编辑防抖触发的回声：内容与当前卡片一致时跳过，
-    // 否则会重新解析生成全新 id → 所有卡片重挂载 → 焦点丢失且滚动回顶部
     if (sceneBlocks.value.length && content === rebuildScript(sceneBlocks.value)) return
     const next = parseSceneBlocks(content)
-    // 与现有块按位置对齐复用 id，保持 :key 稳定，避免整列表重挂载
     const prev = sceneBlocks.value
     if (prev.length === next.length) {
       next.forEach((b, i) => {
@@ -72,8 +65,6 @@ watch(
 )
 sceneBlocks.value = parseSceneBlocks(store.scriptContent)
 
-// 对话式定点修改（source='chat'）：store 填好 pendingRewrite 后自动弹 diff 预览
-// 与选中改写共用同一套弹窗/接受/回退流程
 watch(
   () => store.pendingRewrite,
   (pr) => {
@@ -141,10 +132,6 @@ function focusScene(sceneId) {
   })
 }
 
-// ===== 正文自适应高度（全部展开，不出现卡内滚动条） =====
-// 注意：量高时先把 height 置 auto 会让长正文瞬间塌缩，导致外层滚动容器
-// 的 scrollTop 被浏览器钳制到 0（表现为"一编辑就回到顶部"），
-// 因此量高前后必须保存并恢复 scrollTop。
 const vAutoGrow = {
   mounted(el) {
     el.style.overflowY = 'hidden'
@@ -163,7 +150,6 @@ const vAutoGrow = {
   },
 }
 
-// ===== Scrollspy：滚动正文时，右侧大纲高亮跟随当前可见场次 =====
 const mainScroll = ref(null)
 let spyTimer = null
 function onMainScroll() {
@@ -183,7 +169,6 @@ function onMainScroll() {
   }, 120)
 }
 
-// 大纲当前项保持可见（scrollspy / 点击锚点后）
 watch(
   () => store.activeSceneId,
   () => {
@@ -193,7 +178,6 @@ watch(
   }
 )
 
-// ===== 未分场块操作 =====
 function convertFreeTextToScene() {
   const text = String(store.scriptContent || '').trim()
   store.scriptContent = '场次1：' + (text.split('\n')[0].slice(0, 16) || '新场次') + '\n' + text
@@ -203,8 +187,6 @@ function ignoreFreeText() {
   store.scriptContent = ''
 }
 
-// ===== 场次卡元数据（原型：摘要/氛围/角色 字段化展示） =====
-// 数据来源为该场正文的「场景：」「人物：」行与首句，编辑仍走正文，不引入新数据模型
 function parseSceneMeta(body) {
   let summary = ''
   let mood = ''
@@ -223,12 +205,10 @@ function parseSceneMeta(body) {
   return { summary, mood, roles }
 }
 
-// 字数 → 预估秒数（1000 字 ≈ 60 秒，与原型/分镜口径一致）
 function durationOf(chars) {
   return Math.max(1, Math.round((chars / 1000) * 60))
 }
 
-// 状态条统计（原型六合一：版本/字数/场次/预估时长/角色/未识别）
 const sceneStats = computed(() => {
   const totalChars = store.wordCount
   const nScenes = sceneBlocks.value.length
@@ -249,7 +229,6 @@ const sceneStats = computed(() => {
   }
 })
 
-// 下游依赖（原型：设定/分镜/视频 数量）
 const downstreamStats = computed(() => {
   const assets = store.characters.length + store.assetScenes.length + store.props.length
   const storyboards = store.storyboardScenes.length
@@ -262,7 +241,6 @@ const downstreamStats = computed(() => {
   return { assets, storyboards, videos }
 })
 
-// 卡头「AI 改写」按钮：整场改写（与选中改写共用 diff 流程）
 function aiRewriteScene(id) {
   const b = sceneBlocks.value.find((x) => x.id === id)
   if (!b) return
@@ -272,15 +250,14 @@ function aiRewriteScene(id) {
   showRewriteBar.value = true
 }
 
-// ===== AI 改稿助手：选中→改写→diff =====
 const showRewriteBar = ref(false)
 const rewriteInstruction = ref('')
 const rewriteLoading = ref(false)
 const rewriteError = ref('')
 const selectedText = ref('')
 const showDiffDialog = ref(false)
-const lockedJustNow = ref(false) // 刚完成"锁定快照"（零副作用），用于切换"进入画风步骤"
-const aiRewrittenIds = ref(new Set()) // 记录 AI 改写过哪些场次（展示徽标）
+const lockedJustNow = ref(false) 
+const aiRewrittenIds = ref(new Set()) 
 
 function detectSelection(e) {
   const el = e?.target
@@ -314,13 +291,11 @@ async function submitRewrite() {
 }
 
 function markAiRewritten() {
-  // 优先标记当前活跃场次
   const active = sceneBlocks.value.find((b) => b.num === store.activeSceneId)
   if (active) {
     aiRewrittenIds.value.add(active.id)
     return
   }
-  // 兜底：找到包含 selectedText 的场次
   const b = sceneBlocks.value.find((b) => b.body.includes(selectedText.value))
   if (b) aiRewrittenIds.value.add(b.id)
 }
@@ -348,7 +323,6 @@ function saveAsVersionDiff() {
   }
 }
 
-// 行级 LCS diff：返回 [{ type: 'same'|'add'|'del', text }]
 function diffLines(oldText, newText) {
   const a = String(oldText || '').split('\n')
   const b = String(newText || '').split('\n')
@@ -403,23 +377,19 @@ function handleLock() {
 }
 
 function handleConfirm() {
-  // 未锁定且未确认：先引导锁定快照（零费用）
   if (!store.scriptConfirmed && !lockedJustNow.value) {
     handleLock()
     return
   }
-  // 已锁定未确认：进入画风步骤（此时才真正确认剧本）
   if (!store.scriptConfirmed) {
     store.confirmScript()
     router.push('/art?from=script')
     return
   }
-  // 已确认过：弹出重新确认弹窗
   showReconfirmDialog.value = true
 }
 
 function confirmReconfirm() {
-  // 重新确认：重新锁定并跳转画风步骤重新选择风格、提取资产
   store.confirmScript()
   showReconfirmDialog.value = false
   router.push('/art?from=script&reconfirm=1')
@@ -429,7 +399,6 @@ function cancelReconfirm() {
   showReconfirmDialog.value = false
 }
 
-// ===== 左侧 AI 抽屉（原型：会话状态胶囊 + 可折叠 288px↔48px） =====
 const drawerCollapsed = ref(false)
 const drawerSession = computed(() => {
   const v = store.scriptVersions[0]?.v || 'V1'
@@ -437,7 +406,6 @@ const drawerSession = computed(() => {
   return `${v} · ${locked ? '已锁定' : '草稿'}`
 })
 
-// 改稿建议卡片（原型：AI 抽屉顶部的快速改稿建议）
 const suggestions = [
   { label: '加强冲突', prompt: '在当前场次中加入更强的冲突或阻碍，让人物动机更鲜明' },
   { label: '减少对白', prompt: '减少当前场次中的对白，多用动作和场景描写推动节奏' },
@@ -450,7 +418,6 @@ function applySuggestion(prompt) {
     store.sendAiMessage()
     return
   }
-  // 对当前活跃场次应用
   const active = sceneBlocks.value.find((b) => b.num === store.activeSceneId) || sceneBlocks.value[0]
   store.activeSceneId = active.num
   selectedText.value = active.body.trim()
@@ -458,8 +425,6 @@ function applySuggestion(prompt) {
   submitRewrite()
 }
 
-// 消息级「应用到当前场次」：只在最后一条 AI 回复、且内容像改稿建议时才显示。
-// 总结/通知类回复（"剧本已生成..."）不出现，避免误导点击。
 const REWRITE_HINT_RE = /建议|改成|改为|修改|润色|调整|节奏|冲突|悬念|铺垫|伏笔|台词|对白|开场|结尾/
 const lastAssistantIndex = computed(() => {
   for (let i = store.aiMessages.length - 1; i >= 0; i--) {
@@ -475,12 +440,10 @@ function canApplyToScene(index) {
 
 <template>
   <div class="flex h-full w-full">
-    <!-- AI 编剧（改稿助手） -->
     <aside
       class="shrink-0 flex-col border-r border-border transition-all duration-200"
       :class="drawerCollapsed ? 'flex w-12' : 'flex w-72'"
     >
-      <!-- 头部：标题 + 会话状态 + 折叠 -->
       <div class="flex items-center justify-between border-b border-border px-4 py-3">
         <template v-if="!drawerCollapsed">
           <div class="flex items-center gap-2">
@@ -511,7 +474,6 @@ function canApplyToScene(index) {
       </div>
 
       <template v-if="!drawerCollapsed">
-        <!-- 改稿建议卡 -->
         <div class="border-b border-border p-3">
           <div class="mb-2 flex items-center justify-between">
             <span class="text-[10px] text-text-muted">改稿建议</span>
@@ -541,7 +503,6 @@ function canApplyToScene(index) {
             class="mb-3 flex items-end gap-2"
             :class="msg.role === 'user' ? 'justify-end' : 'justify-start'"
           >
-            <!-- 助手：小圆点标识（原型：无发光头像） -->
             <div
               v-if="msg.role === 'assistant'"
               class="mb-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[9px] text-accent"
@@ -558,7 +519,6 @@ function canApplyToScene(index) {
             >
               {{ msg.content }}
             </div>
-            <!-- 消息级快速操作：仅最后一条 AI 回复且为改稿建议时显示 -->
             <div
               v-if="msg.role === 'assistant' && canApplyToScene(i)"
               class="mt-1 flex flex-wrap gap-1.5 pl-7"
@@ -569,7 +529,6 @@ function canApplyToScene(index) {
               >应用到当前场次</button>
             </div>
 
-            <!-- 用户：简化头像 -->
             <div
               v-if="msg.role === 'user'"
               class="mb-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-bg-hover text-[9px] text-text-secondary"
@@ -577,7 +536,6 @@ function canApplyToScene(index) {
             >我</div>
           </div>
 
-          <!-- 请求进行中 -->
           <div v-if="store.aiLoading" class="mb-3 flex items-end gap-2">
             <div class="mb-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[9px] text-accent">AI</div>
             <div class="rounded-xl rounded-bl-sm border border-border bg-bg-secondary px-3 py-2 text-xs text-text-secondary">
@@ -607,7 +565,6 @@ function canApplyToScene(index) {
           </div>
         </div>
 
-        <!-- 版本历史（点击可回滚） -->
         <div v-if="store.scriptVersions.length" class="max-h-44 overflow-y-auto border-t border-border p-3">
           <div class="mb-2 text-[10px] text-text-muted">版本历史 · 点击可回到该版本</div>
           <button
@@ -624,7 +581,6 @@ function canApplyToScene(index) {
       </template>
     </aside>
 
-    <!-- 剧本正文 -->
     <section class="mx-auto flex w-full max-w-[900px] flex-1 flex-col">
       <div class="flex items-center justify-between border-b border-border px-6 py-3">
         <h2 class="text-sm font-medium">剧本正文</h2>
@@ -640,7 +596,6 @@ function canApplyToScene(index) {
       </div>
 
       <div ref="mainScroll" class="flex-1 overflow-y-auto px-6 py-4" @scroll="onMainScroll">
-        <!-- 无场次标记：未分场块（原型 unknown-block，确认剧本时后端自动归一化） -->
         <template v-if="!sceneBlocks.length">
           <div class="mb-3 overflow-hidden rounded-xl border border-border bg-bg-secondary">
             <div class="flex items-center justify-between border-b border-border bg-bg-card/60 px-4 py-2">
@@ -674,7 +629,6 @@ function canApplyToScene(index) {
           </div>
         </template>
 
-        <!-- 结构化场次卡片列表 -->
         <template v-else>
           <div
             v-for="(scene, index) in sceneBlocks"
@@ -686,7 +640,6 @@ function canApplyToScene(index) {
               'border-border hover:border-border-light': store.activeSceneId !== scene.num,
             }"
           >
-            <!-- 卡头：场次号 + 标题 + 操作 -->
             <div class="card-head flex items-center gap-2 border-b border-border bg-bg-card/60 px-4 py-2">
               <span class="shrink-0 font-mono text-[11px] font-medium text-accent">S{{ String(scene.num).padStart(2, '0') }}</span>
               <span
@@ -732,7 +685,6 @@ function canApplyToScene(index) {
               </div>
             </div>
 
-            <!-- 元数据行（原型：摘要 / 氛围 / 角色） -->
             <div class="meta-row flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/50 px-4 py-1.5">
               <span class="flex items-center gap-1.5 text-[10px] text-text-muted">
                 摘要
@@ -755,7 +707,6 @@ function canApplyToScene(index) {
               </span>
             </div>
 
-            <!-- 卡体：该场正文（自适应高度，全部展开） -->
             <textarea
               :value="scene.body"
               v-auto-grow
@@ -767,7 +718,6 @@ function canApplyToScene(index) {
               @keyup="detectSelection"
             />
 
-            <!-- 卡脚：字数 / 预估秒数 -->
             <div class="scene-foot flex items-center gap-3 border-t border-border/50 px-4 py-1.5 text-[10px] text-text-muted">
               <span><b class="text-text-secondary">{{ scene.body.replace(/\s/g, '').length }}</b> 字</span>
               <span>约 <b class="text-text-secondary">{{ durationOf(scene.body.replace(/\s/g, '').length) }}</b> 秒</span>
@@ -782,7 +732,6 @@ function canApplyToScene(index) {
         </template>
       </div>
 
-      <!-- AI 改稿助手：选中段落后的改写浮层 -->
       <div
         v-if="showRewriteBar"
         class="flex items-center gap-2 border-t border-border bg-bg-secondary px-6 py-2.5"
@@ -848,18 +797,15 @@ function canApplyToScene(index) {
       </div>
     </section>
 
-    <!-- 分场大纲 -->
     <aside class="flex w-64 shrink-0 flex-col border-l border-border">
       <div class="border-b border-border px-4 py-3">
         <h2 class="text-sm font-medium">分场大纲</h2>
       </div>
 
-      <!-- 空状态 -->
       <div
         v-if="!store.scenes.length"
         class="flex flex-1 items-center justify-center p-6"
       >
-        <!-- 正文有内容但解析不到场次：多为外部粘贴的非标准格式，确认剧本时后端会自动转换 -->
         <p v-if="store.scriptContent.trim()" class="text-xs text-text-muted">
           未识别到标准场次标记（如「场次1：标题」），
           确认剧本时将自动转换为标准格式
@@ -867,7 +813,6 @@ function canApplyToScene(index) {
         <p v-else class="text-xs text-text-muted">编写或粘贴剧本后，将自动解析分场大纲</p>
       </div>
 
-      <!-- 场次列表（剧本正文有内容即实时显示） -->
       <template v-else>
         <div class="outline-list flex-1 overflow-y-auto p-3">
           <button
@@ -888,7 +833,6 @@ function canApplyToScene(index) {
           </button>
         </div>
 
-        <!-- 六合一统计（原型右侧 statGrid） -->
         <div class="grid grid-cols-3 gap-px border-t border-border bg-border">
           <div class="bg-bg-primary px-3 py-2">
             <div class="text-[10px] text-text-muted">版本</div>
@@ -916,7 +860,6 @@ function canApplyToScene(index) {
           </div>
         </div>
 
-        <!-- 下游依赖（原型 downstream） -->
         <div class="flex items-center gap-3 border-t border-border px-4 py-2.5 text-[10px] text-text-muted">
           <span>设定 <b class="text-text-secondary">{{ downstreamStats.assets }}</b></span>
           <span>分镜 <b class="text-text-secondary">{{ downstreamStats.storyboards }}</b></span>
@@ -925,7 +868,6 @@ function canApplyToScene(index) {
       </template>
     </aside>
 
-    <!-- AI 改写 diff 预览弹窗 -->
     <Teleport to="body">
       <div
         v-if="showDiffDialog && store.pendingRewrite"
@@ -992,13 +934,11 @@ function canApplyToScene(index) {
       </div>
     </Teleport>
 
-    <!-- 导入剧本弹窗 -->
     <ImportScriptDialog
       v-model="showImportDialog"
       :episode-id="store.currentEpisodeId"
     />
 
-    <!-- 重新确认剧本确认弹窗 -->
     <Teleport to="body">
       <div v-if="showReconfirmDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60" @click.self="cancelReconfirm">
         <div class="w-[440px] rounded-xl border border-border bg-bg-secondary p-6 shadow-2xl">
@@ -1030,7 +970,6 @@ function canApplyToScene(index) {
 </template>
 
 <style scoped>
-/* 正文区 Editorial 衬线质感（设计令牌：正文 Noto Serif SC 17px/行距1.9） */
 .scene-body,
 .scene-title-input,
 .meta-row {
@@ -1039,11 +978,9 @@ function canApplyToScene(index) {
 .scene-body {
   min-height: 96px;
 }
-/* 锚点跳转时卡片不贴死顶部 */
 .scene-card {
   scroll-margin-top: 12px;
 }
-/* 活跃场次卡：左侧 3px 强调条（原型 .scene-card.active） */
 .scene-card.active {
   border-left: 3px solid var(--accent, #c8f542);
   border-left-color: #c8f542;
