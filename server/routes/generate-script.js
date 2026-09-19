@@ -2,43 +2,28 @@ import { Router } from 'express'
 import { randomUUID } from 'crypto'
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
 import { query, queryOne, execute, transaction } from '../db.js'
 import { scriptHash } from '../scriptHash.js'
 
-const execFile = promisify(execFileCb)
-import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, extractBlockingForScene, assembleBlockingPlan, enrichShotIntegrated, chatCompletion, fixAxisFlips, extractFinalFrameFromIntegrated } from '../ai/doubao.js'
+import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, enrichShotIntegrated, fixAxisFlips, extractFinalFrameFromIntegrated } from '../ai/doubao.js'
 import { ensureStandardScript } from '../ai/scriptFormat.js'
-import { buildSceneGridPrompt, buildShotGridPrompt, buildShotGridContentApp, allocateShotRefs, splitSceneGrid } from '../ai/directorRequest.js'
-import { runWorkflow, uploadImageV2, insecureDownload } from '../ai/runninghub.js'
-import { generateShotVideoCombat } from '../ai/combatVideo.js'
-import { generateShotVideoV4, buildShotVideoPromptV4 } from '../ai/v4Video.js'
-import { assertScriptConfirmed, assertNotStale, assertNoStylePoison } from '../ai/guards.js'
-import { relayLastFrameToNextShot } from '../ai/postHooks.js'
-import { generateShotGridApp } from '../ai/rhShotGrid.js'
-import { checkSeam, checkOpenerTone } from '../ai/seamCheck.js'
-import { reviewShot, reviewShotByShotId } from '../ai/shotReview.js'
+import { assertScriptConfirmed, assertNotStale } from '../ai/guards.js'
 import { clearQcIgnores } from './qc.js'
 import { recordAlert } from '../ai/alerts.js'
-import { buildGlobalSpeakerMap } from '../ai/h3PromptTranslator.js'
-import { validateCameraAngle, inferAngleFromText, angleInjection } from '../ai/cameraAngle.js'
-import { generateImage, generateStoryboardImage, resolveProvider } from '../ai/image.js'
 import { backfillStoryboardAssets } from '../ai/assetBackfill.js'
 import { runLightingChecks } from '../ai/lightingCheckRuntime.js'
 import { snapshotBeforeExtract, computeExtractDiff } from '../ai/extractGuard.js'
 import { classifyShotCombat } from '../ai/shotClassifier.js'
 import { config } from '../config.js'
-import { clean as cleanText, CJK_DIRTY_RE } from '../ai/shared.js'
+import { CJK_DIRTY_RE } from '../ai/shared.js'
 import { parseDialogue, serializeDialogue } from '../ai/dialogue.js'
 import { buildAliasMap } from '../ai/storyboardValidator.js'
 import { reportProgress, finishProgress, makeReporter, getProgress, getActiveProgress, listProgress } from '../ai/progressBus.js'
 import { PHASE } from '../ai/progressPhases.js'
-import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
+import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
 import { routeIp, buildCharacterContext, resolveExplicitCharacters } from '../ai/ipRouter.js'
-import { ffmpegPath as ffmpegStaticPath } from '../ai/ffmpeg.js'
 import { remapSceneRefs } from '../ai/sceneIdRemap.js'
+import { uploadsDir } from '../paths.js'
 
 const SB_TASK = {
   GENERATE: 'storyboard',
@@ -93,7 +78,6 @@ async function buildAssetContextForPrompt(prompt, episodeId, characterIds = null
   }
 }
 
-const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 fs.mkdirSync(uploadsDir, { recursive: true })
 
 const runningFullTasks = new Set()

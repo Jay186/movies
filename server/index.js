@@ -2,15 +2,12 @@ import 'dotenv/config'
 import express from 'express'
 import path from 'path'
 import fs from 'fs'
-import { fileURLToPath } from 'url'
 import { config } from './config.js'
 import { initDB } from './db.js'
 import { runBootChecks, printBootReport } from './bootCheck.js'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
 
-const crashLogPath = path.join(__dirname, 'crash.log')
+const crashLogPath = path.join(serverDir, 'crash.log')
 function logCrash(kind, err) {
   const line = `\n[${new Date().toISOString()}] ${kind}: ${err?.stack || err?.message || JSON.stringify(err)}\n`
   try { fs.appendFileSync(crashLogPath, line) } catch {  }
@@ -50,6 +47,7 @@ if (apiToken) {
 initDB()
 
 import { startSalvageWorker } from './salvageWorker.js'
+import { serverDir } from './paths.js'
 startSalvageWorker()
 
 try {
@@ -64,7 +62,7 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() })
 })
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
+app.use('/uploads', express.static(path.join(serverDir, 'uploads')))
 
 app.use('/api/projects', projectsRouter)
 app.use('/api/episodes', episodesRouter)

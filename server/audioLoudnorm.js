@@ -1,11 +1,7 @@
 
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
 import fs from 'node:fs'
 import path from 'node:path'
-import { ffmpegPath as ffmpegStaticPath } from './ai/ffmpeg.js'
 
-const execFile = promisify(execFileCb)
 
 export const PER_SHOT_TARGET = -20 
 export const FINAL_TARGET = -16    
@@ -14,7 +10,7 @@ export const TRUE_PEAK = -1.5
 export async function measureLoudness(file) {
   let stderr = ''
   try {
-    ;({ stderr } = await execFile(ffmpegStaticPath, [
+    ;({ stderr } = await runFfmpeg([
       '-hide_banner', '-nostats',
       '-i', file,
       '-af', `loudnorm=I=${FINAL_TARGET}:TP=${TRUE_PEAK}:LRA=11:print_format=json`,
@@ -52,7 +48,7 @@ export async function normalizeFinalLoudness(file, tmpDir, { target = FINAL_TARG
   const measured = await measureLoudness(file)
   if (!measured) return { applied: false, reason: 'silent-or-unreadable' }
   const out = path.join(tmpDir, `ln_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.mp4`)
-  await execFile(ffmpegStaticPath, [
+  await runFfmpeg([
     '-y', '-i', file,
     '-af', loudnormFilter(measured, target),
     '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k',

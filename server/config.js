@@ -188,11 +188,16 @@ export const config = {
 
   image: {
     provider: process.env.IMAGE_PROVIDER || 'zikl',
+    ref: {
+      maxBytes: Number(process.env.IMAGE_REF_MAX_BYTES) || 400 * 1024,
+      maxEdge: Number(process.env.IMAGE_REF_MAX_EDGE) || 1024,
+    },
     zikl: {
       apiKey: process.env.ZIKL_API_KEY || '',
       baseURL: process.env.ZIKL_BASE_URL || 'https://img.zikl.dev',
       model: process.env.ZIKL_IMAGE_MODEL || 'gpt-image-2',
       size: process.env.ZIKL_IMAGE_SIZE || '1K',
+      assetSize: process.env.ZIKL_ASSET_SIZE || '1536x1024',
       proxy: LOCAL_PROXY_URL,
     },
     visionary: {
@@ -202,6 +207,7 @@ export const config = {
       model: process.env.VISIONARY_IMAGE_MODEL || 'nano-banana-pro',
       resolution: process.env.VISIONARY_IMAGE_RESOLUTION || '2K',
       size: process.env.VISIONARY_IMAGE_SIZE || '16:9',
+      assetSize: process.env.VISIONARY_ASSET_SIZE || '16:9',
       optimizeChineseText: process.env.VISIONARY_OPTIMIZE_CHINESE_TEXT === 'true',
       pollIntervalMs: Number(process.env.VISIONARY_POLL_INTERVAL_MS) || 3000,
       maxPollMs: Number(process.env.VISIONARY_MAX_POLL_MS) || 600000,
@@ -235,6 +241,17 @@ export const config = {
     combatDurationMin: Math.max(1, Number(process.env.COMBAT_SHOT_MIN_SEC) || 5),
     combatDurationMax: Math.max(1, Number(process.env.COMBAT_SHOT_MAX_SEC) || 15),
     combatDefaultDuration: Math.max(1, Number(process.env.COMBAT_SHOT_DEFAULT_SEC) || 6),
+    megapixels: String(process.env.VIDEO_MEGAPIXELS || '0.5,0.75,1.0').split(',').map((s) => s.trim()).filter(Boolean),
+    defaultMegapixels: process.env.VIDEO_DEFAULT_MEGAPIXELS || '0.5',
+    shotDurationMin: Math.max(1, Number(process.env.VIDEO_SHOT_MIN_SEC) || 3),
+    shotDurationMax: Math.max(1, Number(process.env.VIDEO_SHOT_MAX_SEC) || 15),
+    shotDefaultDuration: Math.max(1, Number(process.env.VIDEO_SHOT_DEFAULT_SEC) || 5),
+  },
+
+  asset: {
+    maxRefs: Math.max(1, Number(process.env.ASSET_MAX_REFS) || 4),
+    maxSpatialRefs: Math.max(1, Number(process.env.ASSET_MAX_SPATIAL_REFS) || 2),
+    maxPropRefs: Math.max(1, Number(process.env.ASSET_MAX_PROP_REFS) || 2),
   },
 
   ipRouter: {

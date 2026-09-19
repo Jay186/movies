@@ -1,20 +1,14 @@
 import { config } from '../config.js'
 import { logAiCall } from './aiLog.js'
-import { mimeFromExt, netErrMsg, assertSafeDownloadTarget } from './shared.js'
+import { mimeFromExt, netErrMsg, assertSafeDownloadTarget, allowHosts } from './shared.js'
 import { insecureDownload } from './runninghub.js'
 import undiciPkg from 'undici'
 const { fetch: undiciFetch, EnvHttpProxyAgent } = undiciPkg
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import os from 'node:os'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { uploadsDir } from '../paths.js'
+import { shrinkRefImage } from './refImage.js'
 
-const execFileAsync = promisify(execFile)
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 
 async function resolveImageSource(source) {
@@ -37,33 +31,8 @@ async function resolveImageSource(source) {
   return { kind: 'base64', value: `data:${mime};base64,${buffer.toString('base64')}` }
 }
 
-const REF_MAX_BYTES = 400 * 1024
-const REF_MAX_EDGE = 1024
 async function shrinkRef(buffer, filename, mimeType) {
-  if (buffer.length <= REF_MAX_BYTES) return { buffer, filename, mimeType }
-  const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-  const tmpDir = os.tmpdir()
-  const inPath = path.join(tmpDir, `visionary_ref_in_${stamp}.img`)
-  const outPath = path.join(tmpDir, `visionary_ref_out_${stamp}.jpg`)
-  try {
-    const ffmpegPath = (await import('ffmpeg-static')).default
-    fs.writeFileSync(inPath, buffer)
-    await execFileAsync(ffmpegPath, [
-      '-y', '-i', inPath,
-      '-vf', `scale='min(${REF_MAX_EDGE},iw)':-2`,
-      '-q:v', '4', outPath,
-    ])
-    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) {
-      return { buffer: fs.readFileSync(outPath), filename: 'ref.jpg', mimeType: 'image/jpeg' }
-    }
-  } catch (e) {
-    console.warn('[visionaryImage] 参考图压缩失败，改用原图:', e.message)
-  } finally {
-    for (const p of [inPath, outPath]) {
-      try { fs.rmSync(p, { force: true }) } catch {  }
-    }
-  }
-  return { buffer, filename, mimeType }
+  return shrinkRefImage(buffer, 'visionary', filename, mimeType)
 }
 
 async function buildReferenceImages(sources) {
@@ -165,7 +134,6 @@ async function pollTask(taskId, initialRetryAfter, ctx) {
   throw new Error(`生图任务轮询超时(${Math.round(maxPollMs / 1000)}s)`)
 }
 
-const DOWNLOAD_ALLOW_HOSTS = config.security?.downloadAllowHosts || []
 let visionaryDispatcher = null
 function getVisionaryDispatcher() {
   if (!visionaryDispatcher) {
@@ -179,7 +147,7 @@ function getVisionaryDispatcher() {
 }
 
 async function proxiedDownload(url, maxRedirects = 3, timeoutMs = 180000) {
-  await assertSafeDownloadTarget(url, DOWNLOAD_ALLOW_HOSTS)
+  await assertSafeDownloadTarget(url, allowHosts())
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {

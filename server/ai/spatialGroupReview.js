@@ -1,9 +1,9 @@
 
 import { SPATIAL_ANCHOR_TYPE, REVIEW_STATUS, REVIEW_ACTION } from './anchorTypes.js'
+import { bareUrl } from './shared.js'
 
 export { SPATIAL_ANCHOR_TYPE }
 
-const bareUrl = (u) => String(u || '').split('?')[0].trim()
 
 function HttpError(status, message) {
   const e = new Error(message)

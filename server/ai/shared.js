@@ -153,6 +153,26 @@ export function uploadsUrlToAbs(url, uploadDir) {
   }
 }
 
+export function parseDefectReview(raw, allowedTypes = [], defaultType = '') {
+  try {
+    const m = String(raw || '').match(/\{[\s\S]*\}/)
+    if (!m) return { defects: [], summary: '' }
+    const parsed = JSON.parse(m[0])
+    const fallback = defaultType || allowedTypes[0] || ''
+    const defects = Array.isArray(parsed.defects)
+      ? parsed.defects
+          .filter((d) => d && typeof d.type === 'string')
+          .map((d) => ({
+            type: allowedTypes.includes(d.type) ? d.type : fallback,
+            evidence: String(d.evidence || '').slice(0, 200),
+          }))
+      : []
+    return { defects, summary: String(parsed.summary || '').slice(0, 200) }
+  } catch {
+    return { defects: [], summary: '' }
+  }
+}
+
 const UPLOAD_REF_SQL = [
   'SELECT image_url AS u FROM characters UNION ALL SELECT audio_url AS u FROM characters',
   'SELECT image_url AS u FROM project_characters UNION ALL SELECT audio_url AS u FROM project_characters',

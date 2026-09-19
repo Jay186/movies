@@ -1,15 +1,13 @@
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { runWorkflow, uploadMediaFileName, uploadAudioV2, insecureDownload, downloadWithRetry, isPlausibleMp4 } from './runninghub.js'
 import { translateShotFields, translateShotSize, translateCameraMovement, translateCameraAngle, translateTone } from './h3PromptTranslator.js'
 import { config } from '../config.js'
-import { clean as cleanShared, pickEnglish, stripResidualCjk, resolveAssetName, truncateStyle, formatCutTimestamp, pickInjectableEnglish } from './shared.js'
+import { clean as cleanShared, pickEnglish, stripResidualCjk, resolveAssetName, truncateStyle, formatCutTimestamp, pickInjectableEnglish, cleanDesc, lowerFirst, resolveDesc, normalizeTone } from './shared.js'
 import { parseDialogue } from './dialogue.js'
+import { uploadsDir } from '../paths.js'
 export { pickEnglish, stripResidualCjk }
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const BLANK_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
@@ -36,36 +34,15 @@ function silenceWavDataUri(seconds = 1) {
 }
 const SILENCE_WAV = silenceWavDataUri(1)
 
-const VIDEO_ASPECT_RATIOS = [
-  '1:1 (Square)', '2:3 (Portrait Photo)', '3:2 (Photo)', '3:4 (Portrait Standard)',
-  '4:3 (Standard)', '9:16 (Portrait Widescreen)', '16:9 (Widescreen)', '21:9 (Ultrawide)',
-]
-const VIDEO_MEGAPIXELS = ['0.5', '0.75', '1.0']
-
 function normalizeVideoParams(params = {}) {
   return {
-    aspectRatio: VIDEO_ASPECT_RATIOS.includes(params.aspectRatio) ? params.aspectRatio : '9:16 (Portrait Widescreen)',
-    megapixels: VIDEO_MEGAPIXELS.includes(String(params.megapixels)) ? String(params.megapixels) : '0.5',
-    duration: Math.min(15, Math.max(3, Math.round(Number(params.duration) || 5))),
+    aspectRatio: config.video.combatAspectRatios.includes(params.aspectRatio) ? params.aspectRatio : config.video.defaultAspectRatio,
+    megapixels: config.video.megapixels.includes(String(params.megapixels)) ? String(params.megapixels) : config.video.defaultMegapixels,
+    duration: Math.min(config.video.shotDurationMax, Math.max(config.video.shotDurationMin, Math.round(Number(params.duration) || config.video.shotDefaultDuration))),
   }
 }
 
 const clean = cleanShared
-const cleanDesc = (s) => clean(s).replace(/[。.]+$/, '')
-
-
-const lowerFirst = (s) => (s ? s.charAt(0).toLowerCase() + s.slice(1) : '')
-const resolveDesc = (descEn, descCn) => lowerFirst(cleanDesc(pickEnglish(descEn) || pickEnglish(descCn)))
-
-
-
-const normalizeTone = (t) => {
-  const v = clean(t)
-  if (!v) return ''
-  if (/^(in|with|through|at|while)\b/i.test(v)) return v
-  if (/ly$/i.test(v)) return v
-  return `in a ${v.replace(/\s+tone$/i, '')} tone`
-}
 
 const DE_SHOUT_PAIRS = [
   [/\bwhile shouting\b/gi, 'in a firm steady voice'],

@@ -3,11 +3,8 @@ import { getDB } from '../db.js'
 import { removeLocalUploads } from '../ai/shared.js'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
+import { uploadsDir } from '../paths.js'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads')
 
 const router = Router()
 
@@ -94,7 +91,7 @@ router.post('/upload', (req, res) => {
     const timestamp = Date.now()
     const random = Math.random().toString(36).substring(2, 8)
     const filename = `mine_${timestamp}_${random}.${ext}`
-    const filepath = path.join(UPLOAD_DIR, filename)
+    const filepath = path.join(uploadsDir, filename)
 
     fs.writeFileSync(filepath, Buffer.from(base64Data, 'base64'))
 
@@ -157,7 +154,7 @@ router.delete('/:id', (req, res) => {
     }
 
     if (asset.cover_url && asset.cover_url.startsWith('/uploads/')) {
-      removeLocalUploads([asset.cover_url], UPLOAD_DIR)
+      removeLocalUploads([asset.cover_url], uploadsDir)
     }
 
     db.prepare('DELETE FROM library_assets WHERE id = ?').run(id)

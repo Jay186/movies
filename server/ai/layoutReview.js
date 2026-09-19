@@ -1,13 +1,10 @@
 
 import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { config } from '../config.js'
 import { chatCompletion } from './doubao.js'
-import { mimeFromExt } from './shared.js'
+import { mimeFromExt, uploadsUrlToAbs, parseDefectReview } from './shared.js'
+import { uploadsDir } from '../paths.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const UPLOADS_DIR = path.resolve(__dirname, '../uploads')
 
 export const MAX_LAYOUT_ATTEMPTS = 3
 
@@ -19,34 +16,9 @@ export const LAYOUT_DEFECT_TYPES = [
   'atmosphere',  
 ]
 
-export function resolveLocalLayoutImage(storedUrl) {
-  const s = String(storedUrl || '').trim()
-  if (!s) return null
-  const m = s.match(/^\/uploads\/([^/?#]+)$/)
-  if (!m) return null
-  const abs = path.join(UPLOADS_DIR, m[1])
-  if (!abs.startsWith(UPLOADS_DIR)) return null
-  return fs.existsSync(abs) ? abs : null
-}
+export const resolveLocalLayoutImage = (storedUrl) => uploadsUrlToAbs(storedUrl, uploadsDir)
 
-export function parseLayoutReview(raw) {
-  try {
-    const m = String(raw || '').match(/\{[\s\S]*\}/)
-    if (!m) return { defects: [], summary: '' }
-    const parsed = JSON.parse(m[0])
-    const defects = Array.isArray(parsed.defects)
-      ? parsed.defects
-          .filter((d) => d && typeof d.type === 'string')
-          .map((d) => ({
-            type: LAYOUT_DEFECT_TYPES.includes(d.type) ? d.type : 'text',
-            evidence: String(d.evidence || '').slice(0, 200),
-          }))
-      : []
-    return { defects, summary: String(parsed.summary || '').slice(0, 200) }
-  } catch {
-    return { defects: [], summary: '' }
-  }
-}
+export const parseLayoutReview = (raw) => parseDefectReview(raw, LAYOUT_DEFECT_TYPES, 'text')
 
 export async function reviewLayoutImage(storedUrl, opts = {}) {
   const model = config.llm?.vlmModel

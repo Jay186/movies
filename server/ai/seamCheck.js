@@ -1,15 +1,9 @@
 import path from 'node:path'
 import fs from 'node:fs'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import { fileURLToPath } from 'node:url'
-import { ffmpegPath as ffmpegStaticPath } from './ffmpeg.js'
 import { queryOne, execute } from '../db.js'
 import { resolveLocalMedia } from './runninghub.js'
+import { uploadsDir } from '../paths.js'
 
-const execFile = promisify(execFileCb)
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const SEAM_ALERT = {
   cctDiffK: 1000, 
@@ -43,7 +37,7 @@ function rgbToCct(r, g, b) {
 }
 
 async function frameGrid8(filePath) {
-  const { stdout } = await execFile(ffmpegStaticPath, [
+  const { stdout } = await runFfmpeg([
     '-y', '-i', filePath,
     '-vf', 'scale=8:8:flags=area',
     '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1',
@@ -75,7 +69,7 @@ async function extractFirstFrame(absVideo, shotId) {
   const contDir = path.join(uploadsDir, 'continuity')
   fs.mkdirSync(contDir, { recursive: true })
   const outPath = path.join(contDir, `shot_${shotId}_first.jpg`)
-  await execFile(ffmpegStaticPath, ['-y', '-i', absVideo, '-update', '1', '-frames:v', '1', outPath])
+  await runFfmpeg(['-y', '-i', absVideo, '-update', '1', '-frames:v', '1', outPath])
   if (!fs.existsSync(outPath)) throw new Error('首帧抽取失败：输出为空')
   return outPath
 }

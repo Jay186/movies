@@ -1,42 +1,21 @@
 import { Router } from 'express'
-import { randomUUID } from 'crypto'
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import { query, queryOne, execute, transaction } from '../db.js'
-import { scriptHash } from '../scriptHash.js'
+import { query, queryOne, execute } from '../db.js'
 
-const execFile = promisify(execFileCb)
-import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, extractBlockingForScene, assembleBlockingPlan, enrichShotIntegrated, chatCompletion } from '../ai/doubao.js'
-import { ensureStandardScript } from '../ai/scriptFormat.js'
-import { buildSceneGridPrompt, buildShotGridPrompt, buildShotGridContentApp, allocateShotRefs, splitSceneGrid } from '../ai/directorRequest.js'
-import { runWorkflow, uploadImageV2, insecureDownload } from '../ai/runninghub.js'
-import { generateShotVideoCombat } from '../ai/combatVideo.js'
-import { generateShotVideoV4, buildShotVideoPromptV4 } from '../ai/v4Video.js'
-import { assertScriptConfirmed, assertNotStale, assertNoStylePoison } from '../ai/guards.js'
+import { extractBlockingForScene, assembleBlockingPlan } from '../ai/doubao.js'
+import { assertScriptConfirmed } from '../ai/guards.js'
 import { uploadsUrlToAbs } from '../ai/shared.js'
 import { relayLastFrameToNextShot } from '../ai/postHooks.js'
-import { generateShotGridApp } from '../ai/rhShotGrid.js'
 import { checkSeam, checkOpenerTone } from '../ai/seamCheck.js'
-import { reviewShot, reviewShotByShotId } from '../ai/shotReview.js'
+import { reviewShotByShotId } from '../ai/shotReview.js'
 import { listAlerts, countUnresolved, resolveAlert, resolveAlertsByShot, resolveAlertsByScene } from '../ai/alerts.js'
-import { buildGlobalSpeakerMap } from '../ai/h3PromptTranslator.js'
-import { validateCameraAngle, inferAngleFromText, angleInjection } from '../ai/cameraAngle.js'
-import { generateImage, generateStoryboardImage, resolveProvider } from '../ai/image.js'
-import { backfillStoryboardAssets } from '../ai/assetBackfill.js'
-import { classifyShotCombat } from '../ai/shotClassifier.js'
-import { config } from '../config.js'
-import { clean as cleanText } from '../ai/shared.js'
-import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
-import { routeIp, buildCharacterContext, resolveExplicitCharacters } from '../ai/ipRouter.js'
-import { ffmpegPath as ffmpegStaticPath } from '../ai/ffmpeg.js'
+import { mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
 import { measureLoudness, loudnormFilter, normalizeFinalLoudness, PER_SHOT_TARGET, FINAL_TARGET } from '../audioLoudnorm.js'
+import { uploadsDir } from '../paths.js'
 
 const router = Router()
 
-const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 fs.mkdirSync(uploadsDir, { recursive: true })
 
 
@@ -118,7 +97,7 @@ router.post('/video/compose', async (req, res) => {
   fs.mkdirSync(tmpDir, { recursive: true })
   try {
     const probeMedia = async (f) => {
-      const { stderr } = await execFile(ffmpegStaticPath, ['-hide_banner', '-i', f, '-frames:v', '1', '-f', 'null', '-'])
+      const { stderr } = await runFfmpeg(['-hide_banner', '-i', f, '-frames:v', '1', '-f', 'null', '-'])
       const s = String(stderr)
       const dm = s.match(/Duration: ([\d:.]+),/)
       const vm = s.match(/Video:.*?, (\d+)x(\d+)/)
@@ -165,7 +144,7 @@ router.post('/video/compose', async (req, res) => {
           perShotLoud.skipped++
         }
       }
-      await execFile(ffmpegStaticPath, [...normArgs, normPath])
+      await runFfmpeg([...normArgs, normPath])
       normList.push(normPath)
     }
 
@@ -229,12 +208,12 @@ router.post('/video/compose', async (req, res) => {
         '-movflags', '+faststart',
         outPath,
       )
-      await execFile(ffmpegStaticPath, args)
+      await runFfmpeg(args)
       finalSeconds = acc
     } else {
       const listPath = path.join(tmpDir, 'list.txt')
       fs.writeFileSync(listPath, normList.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n'))
-      await execFile(ffmpegStaticPath, [
+      await runFfmpeg([
         '-y',
         '-f', 'concat', '-safe', '0',
         '-i', listPath,
@@ -249,7 +228,7 @@ router.post('/video/compose', async (req, res) => {
     if (bgmPath) {
       const total = finalSeconds || 30
       const tmpMix = path.join(tmpDir, 'mix.mp4')
-      await execFile(ffmpegStaticPath, [
+      await runFfmpeg([
         '-y',
         '-i', outPath,
         '-stream_loop', '-1', '-i', bgmPath,

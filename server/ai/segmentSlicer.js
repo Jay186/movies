@@ -1,28 +1,22 @@
 
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { ffmpegPath as ffmpegStatic } from './ffmpeg.js'
 import { query, queryOne, execute, transaction } from '../db.js'
 import { segmentStaleness } from './segmentBuilder.js'
 import { recordAlert } from './alerts.js'
 import { uploadsUrlToAbs } from './shared.js'
+import { uploadsDir } from '../paths.js'
 
-const execFile = promisify(execFileCb)
-const ffmpeg = ffmpegStatic || './node_modules/ffmpeg-static/ffmpeg.exe'
 
-const UPLOAD_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 
 const MIN_SLICE_SEC = 0.8
 
 export function uploadsToAbs(url) {
-  return uploadsUrlToAbs(url, UPLOAD_DIR)
+  return uploadsUrlToAbs(url, uploadsDir)
 }
 
 async function probeDuration(absPath) {
-  const probe = await execFile(ffmpeg, ['-i', absPath], { maxBuffer: 4 * 1024 * 1024 }).catch((e) => e)
+  const probe = await runFfmpeg(['-i', absPath], { maxBuffer: 4 * 1024 * 1024 }).catch((e) => e)
   const m = /Duration: (\d+):(\d+):([\d.]+)/.exec(String(probe?.stderr || ''))
   return m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : null
 }
@@ -31,7 +25,7 @@ async function cutOne(absIn, outAbs, startSec, durSec) {
   fs.mkdirSync(path.dirname(outAbs), { recursive: true })
   const tmpAbs = `${outAbs}.${process.pid}.tmp.mp4`
   try {
-    await execFile(ffmpeg, [
+    await runFfmpeg([
       '-y',
       '-i', absIn,
       '-ss', String(startSec),
@@ -147,7 +141,7 @@ export async function sliceSegment(segmentId, opts = {}) {
   }
 
   const outDirRel = path.join('segments', `seg${segmentId}`)
-  const outDirAbs = path.join(UPLOAD_DIR, outDirRel)
+  const outDirAbs = path.join(uploadsDir, outDirRel)
   fs.mkdirSync(outDirAbs, { recursive: true })
 
   const slices = []
@@ -210,11 +204,11 @@ export async function extractSegmentLastFrame(segmentId) {
   if (!absIn) return { success: false, warning: `段成片本地缺失：${seg.video_url}` }
 
   const relPath = path.join('continuity', `seg${segmentId}_last.jpg`)
-  const absOut = path.join(UPLOAD_DIR, relPath)
+  const absOut = path.join(uploadsDir, relPath)
   fs.mkdirSync(path.dirname(absOut), { recursive: true })
 
   try {
-    await execFile(ffmpeg, ['-y', '-sseof', '-0.1', '-i', absIn, '-update', '1', '-frames:v', '1', absOut])
+    await runFfmpeg(['-y', '-sseof', '-0.1', '-i', absIn, '-update', '1', '-frames:v', '1', absOut])
   } catch (err) {
     return { success: false, warning: `段${segmentId} 末帧抽取失败：${String(err.message || err).slice(0, 200)}` }
   }

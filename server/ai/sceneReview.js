@@ -1,13 +1,10 @@
 
 import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { config } from '../config.js'
 import { chatCompletion } from './doubao.js'
-import { mimeFromExt } from './shared.js'
+import { mimeFromExt, uploadsUrlToAbs, parseDefectReview } from './shared.js'
+import { uploadsDir } from '../paths.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const UPLOADS_DIR = path.resolve(__dirname, '../uploads')
 
 export const SCENE_DEFECT_TYPES = [
   'element_missing', 
@@ -17,34 +14,9 @@ export const SCENE_DEFECT_TYPES = [
   'extra_object',    
 ]
 
-export function resolveLocalSceneImage(storedUrl) {
-  const s = String(storedUrl || '').trim()
-  if (!s) return null
-  const m = s.match(/^\/uploads\/([^/?#]+)$/)
-  if (!m) return null
-  const abs = path.join(UPLOADS_DIR, m[1])
-  if (!abs.startsWith(UPLOADS_DIR)) return null   
-  return fs.existsSync(abs) ? abs : null
-}
+export const resolveLocalSceneImage = (storedUrl) => uploadsUrlToAbs(storedUrl, uploadsDir)
 
-export function parseSceneReview(raw) {
-  try {
-    const m = String(raw || '').match(/\{[\s\S]*\}/)
-    if (!m) return { defects: [], summary: '' }
-    const parsed = JSON.parse(m[0])
-    const defects = Array.isArray(parsed.defects)
-      ? parsed.defects
-          .filter((d) => d && typeof d.type === 'string')
-          .map((d) => ({
-            type: SCENE_DEFECT_TYPES.includes(d.type) ? d.type : 'element_missing',
-            evidence: String(d.evidence || '').slice(0, 200),
-          }))
-      : []
-    return { defects, summary: String(parsed.summary || '').slice(0, 200) }
-  } catch {
-    return { defects: [], summary: '' }
-  }
-}
+export const parseSceneReview = (raw) => parseDefectReview(raw, SCENE_DEFECT_TYPES, 'element_missing')
 
 export function shouldReviewScene(ctx) {
   const el = Array.isArray(ctx?.elements) ? ctx.elements.filter(Boolean) : []

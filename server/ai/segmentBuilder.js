@@ -1,7 +1,7 @@
 
 import { createHash } from 'node:crypto'
 import { parseDialogue } from './dialogue.js'
-import { query, queryOne, execute } from '../db.js'
+import { query, execute } from '../db.js'
 
 export const SEG_MIN_SEC = 3
 export const SEG_MAX_SEC = 15

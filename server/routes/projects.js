@@ -1,14 +1,11 @@
 import { Router } from 'express'
-import path from 'node:path'
-import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { query, queryOne, execute } from '../db.js'
 import { removeLocalUploads, filterUnreferencedUploadUrls } from '../ai/shared.js'
 import { config } from '../config.js'
+import { uploadsDir } from '../paths.js'
 
 const router = Router()
 
-const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 
 const ASPECT_RATIO_WHITELIST = new Set(config.video.aspectRatios)
 

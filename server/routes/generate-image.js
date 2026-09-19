@@ -1,25 +1,12 @@
 import { Router } from 'express'
-import { randomUUID } from 'crypto'
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import { query, queryOne, execute, transaction } from '../db.js'
-import { scriptHash } from '../scriptHash.js'
+import { query, queryOne, execute } from '../db.js'
 
-const execFile = promisify(execFileCb)
-import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, extractBlockingForScene, assembleBlockingPlan, enrichShotIntegrated, chatCompletion } from '../ai/doubao.js'
-import { ensureStandardScript } from '../ai/scriptFormat.js'
 import { buildSceneGridPrompt, buildShotGridPrompt, buildShotGridContentApp, allocateShotRefs, splitSceneGrid } from '../ai/directorRequest.js'
-import { runWorkflow, uploadImageV2, insecureDownload } from '../ai/runninghub.js'
-import { generateShotVideoCombat } from '../ai/combatVideo.js'
-import { generateShotVideoV4, buildShotVideoPromptV4 } from '../ai/v4Video.js'
+import { insecureDownload } from '../ai/runninghub.js'
 import { assertScriptConfirmed, assertNotStale, assertNoStylePoison } from '../ai/guards.js'
-import { relayLastFrameToNextShot } from '../ai/postHooks.js'
 import { generateShotGridApp } from '../ai/rhShotGrid.js'
-import { checkSeam, checkOpenerTone } from '../ai/seamCheck.js'
-import { reviewShot, reviewShotByShotId } from '../ai/shotReview.js'
 import { reviewFrameImage } from '../ai/frameReview.js'
 import { reviewSceneImage, buildSceneRetryNote } from '../ai/sceneReview.js'
 import { recordAlert, resolveAlertsByShot, resolveAlertsByScene } from '../ai/alerts.js'
@@ -30,21 +17,15 @@ import { isSpatialSeriesAnchor } from '../ai/anchorTypes.js'
 import { buildElementNote, buildSharedEnvNote, ELEMENT_NOTE_TAG, SHARED_ENV_NOTE_TAG } from '../ai/anchorTypes.js'
 import { reviewLayoutImage, buildLayoutRetryNote, MAX_LAYOUT_ATTEMPTS } from '../ai/layoutReview.js'
 import { acquireSpatialGroupLock, releaseSpatialGroupLock } from '../ai/spatialGroupLock.js'
-import { buildGlobalSpeakerMap } from '../ai/h3PromptTranslator.js'
-import { validateCameraAngle, inferAngleFromText, angleInjection } from '../ai/cameraAngle.js'
 import { generateImage, generateStoryboardImage, resolveProvider } from '../ai/image.js'
-import { backfillStoryboardAssets } from '../ai/assetBackfill.js'
-import { classifyShotCombat } from '../ai/shotClassifier.js'
 import { config } from '../config.js'
-import { clean as cleanText } from '../ai/shared.js'
-import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
-import { ffmpegPath as ffmpegStaticPath } from '../ai/ffmpeg.js'
+import { mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
+import { uploadsDir } from '../paths.js'
 
 const router = Router()
 
 const FRAME_DUAL_KEYFRAME_SEC = 7
 
-const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 fs.mkdirSync(uploadsDir, { recursive: true })
 
 
@@ -649,8 +630,8 @@ router.post('/asset-image', async (req, res) => {
     const imgOpts = { filename: uniqueName, provider }
     if (type === 'character') {
       const { provider: rp } = resolveProvider({ provider })
-      if (rp === 'visionary') imgOpts.size = '16:9'
-      else if (rp === 'zikl') imgOpts.size = '1536x1024'
+      const assetSize = config.image[rp]?.assetSize
+      if (assetSize) imgOpts.size = assetSize
     }
     const styleAnchor = (type === 'scene' || type === 'prop') ? resolveStyleAnchorUrl(asset.episode_id) : ''
     const anchorLive = styleAnchor && !liveRefs.includes(styleAnchor) && isLiveRefUrl(styleAnchor) ? styleAnchor : ''
@@ -709,7 +690,7 @@ router.post('/asset-image', async (req, res) => {
       : ''
     if (refList.length && liveRefs.length) {
       const instruction = String(editInstruction || basePrompt).trim()
-      const saRefs = sceneAnchorRefs.slice(0, Math.max(0, 4 - liveRefs.length))
+      const saRefs = sceneAnchorRefs.slice(0, Math.max(0, config.asset.maxRefs - liveRefs.length))
       const editPrompt =
         `以参考图中的${subject}为唯一形象基准，` +
         `严格保持其物种/体型/毛色/五官/表情风格/配色/描边等一切既有特征完全不变，` +
@@ -731,7 +712,7 @@ router.post('/asset-image', async (req, res) => {
         result = await generateStoryboardImage(p2, refs2, { filename: fileName, provider })
       }
     } else if (liveRefs.length) {
-      const saRefs = sceneAnchorRefs.slice(0, Math.max(0, 4 - liveRefs.length))
+      const saRefs = sceneAnchorRefs.slice(0, Math.max(0, config.asset.maxRefs - liveRefs.length))
       const saRoleNote = saRefs.length
         ? `（参考图${liveRefs.length + 1}${saRefs.length > 1 ? `~${liveRefs.length + saRefs.length}` : ''}为【同空间邻场锚点】：` +
           `仅用于校准与本场共有物体的形态、颜色、材质与破损状态，以及跨场空间结构的连续性；` +

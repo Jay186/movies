@@ -3,33 +3,11 @@ import { query, queryOne } from '../db.js'
 import { segmentDurationSec } from './segmentBuilder.js'
 import { translateShotFields, translateShotSize, translateCameraMovement, translateCameraAngle, translateTone } from './h3PromptTranslator.js'
 import { deShout, cleanVoiceDescription } from './v4Video.js'
-import { clean as cleanShared, pickEnglish, stripResidualCjk, resolveAssetName, truncateStyle, formatCutTimestamp, CJK_DIRTY_RE } from './shared.js'
+import { clean as cleanShared, pickEnglish, stripResidualCjk, resolveAssetName, truncateStyle, formatCutTimestamp, CJK_DIRTY_RE, cleanDesc, lowerFirst, resolveDesc, normalizeTone, dedupeArticles } from './shared.js'
+import { parseDialogue } from './dialogue.js'
 
 const clean = (s) => cleanShared(s)
-const cleanDesc = (s) => clean(s).replace(/[。.]+$/, '')
-const lowerFirst = (s) => (s ? s.charAt(0).toLowerCase() + s.slice(1) : '')
-const resolveDesc = (descEn, descCn) => lowerFirst(cleanDesc(pickEnglish(descEn) || pickEnglish(descCn)))
-import { parseDialogue } from './dialogue.js'
-const normalizeTone = (t) => {
-  const s = clean(t)
-  if (!s) return ''
-  return s.replace(/[。.]+$/, '').toLowerCase()
-}
 
-const ARTICLE_REPEAT_PAIRS = [
-  [/\b(the)\s+the\b/gi, 'the'],
-  [/\b(a)\s+a\b/gi, 'a'],
-  [/\b(an)\s+an\b/gi, 'an'],
-]
-const dedupeArticles = (s) => {
-  let out = String(s || '')
-  let prev = ''
-  while (prev !== out) {
-    prev = out
-    for (const [re, rep] of ARTICLE_REPEAT_PAIRS) out = out.replace(re, rep)
-  }
-  return out.replace(/\s+/g, ' ').trim()
-}
 const GUARD = 'Director guidance below is for visual generation only: do not read aloud, narrate, or quote any of it — speak only the dialogue inside <d> tags. The generated video must contain no on-screen text, subtitles, watermark, or logo.'
 
 

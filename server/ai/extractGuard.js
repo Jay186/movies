@@ -1,14 +1,13 @@
 
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { query, execute, transaction } from '../db.js'
 import { recordAlert } from './alerts.js'
+import { serverDir } from '../paths.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SNAPSHOT_DIR = process.env.EXTRACT_SNAPSHOT_DIR
   ? path.resolve(process.env.EXTRACT_SNAPSHOT_DIR)
-  : path.join(__dirname, '..', '_snapshots')
+  : path.join(serverDir, '..', '_snapshots')
 const SNAPSHOT_KEEP = 10
 
 const TABLE_META = {

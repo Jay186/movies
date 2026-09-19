@@ -1,5 +1,5 @@
 
-import { getLanguagePack, buildLexicon } from './continuityGuard.js'
+import { buildLexicon } from './continuityGuard.js'
 
 const DEFAULT_STATE_KEY = 'intact'   
 const DEFAULT_STATE_MARKER = '__default__' 

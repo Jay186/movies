@@ -1,12 +1,10 @@
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { query, execute } from './db.js'
 import { insecureDownload, isPlausibleMp4, queryTaskOutput } from './ai/runninghub.js'
 import { recordAlert } from './ai/alerts.js'
+import { uploadsDir } from './paths.js'
 
-const serverDir = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(serverDir, 'uploads')
 
 const WINDOW_MS = 50 * 60 * 1000   
 const INTERVAL_MS = 5 * 60 * 1000  

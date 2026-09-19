@@ -1,12 +1,10 @@
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
 import { mimeFromExt } from './shared.js'
+import { uploadsDir } from '../paths.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const HARD_DEFECT_RULE = `只检查下列【硬伤】，不要评价构图美感、不要评价表演、不要评价分镜设计是否合理：
 1. limb_anomaly 肢体畸形：手指数量明显错误、四肢断裂或扭曲成不可能的角度、多出一条手臂或一条腿、身体与头部连接错位。

@@ -1,13 +1,12 @@
 import { config } from '../config.js'
 import { logAiCall } from './aiLog.js'
-import { mimeFromExt, assertSafeDownloadTarget, uploadsUrlToAbs } from './shared.js'
+import { mimeFromExt, assertSafeDownloadTarget, uploadsUrlToAbs, allowHosts } from './shared.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import https from 'node:https'
-import { fileURLToPath } from 'node:url'
+import { uploadsDir } from '../paths.js'
 
 const { apiKey, baseURL, workflows, nodeMap } = config.runninghub
-const DOWNLOAD_ALLOW_HOSTS = config.security?.downloadAllowHosts || []
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   const controller = new AbortController()
@@ -22,9 +21,6 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
   }
 }
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const uploadCache = new Map()
 const UPLOAD_CACHE_TTL = 20 * 60 * 60 * 1000
@@ -44,7 +40,7 @@ function cacheSet(key, value) {
 }
 
 export async function insecureDownload(url, maxRedirects = 3, timeoutMs = 180000) {
-  await assertSafeDownloadTarget(url, DOWNLOAD_ALLOW_HOSTS)
+  await assertSafeDownloadTarget(url, allowHosts())
   return new Promise((resolve, reject) => {
     const req = https.get(url, { rejectUnauthorized: false }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && maxRedirects > 0) {

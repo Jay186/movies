@@ -1,9 +1,9 @@
 import { Router } from 'express'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 import { query } from '../db.js'
 import { removeLocalUploads, filterUnreferencedUploadUrls } from '../ai/shared.js'
+import { uploadsDir } from '../paths.js'
 import {
   listIpCharacters,
   getIpCharacter,
@@ -16,9 +16,7 @@ import {
   promoteProjectCharacterToIp,
 } from '../ipLibrary.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads')
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true })
 
 const router = Router()
 
@@ -86,7 +84,7 @@ router.post('/:id/audio', (req, res) => {
     if (ext === 'mpeg') ext = 'mp3'
 
     const filename = `ip_audio_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`
-    fs.writeFileSync(path.join(UPLOAD_DIR, filename), Buffer.from(base64Data, 'base64'))
+    fs.writeFileSync(path.join(uploadsDir, filename), Buffer.from(base64Data, 'base64'))
     updateIpCharacter(id, { audio_url: `/uploads/${filename}`, audioUrl: `/uploads/${filename}` })
     res.json(getIpCharacter(id))
   } catch (e) {
@@ -102,7 +100,7 @@ router.delete('/:id/audio', (req, res) => {
   const oldAudioUrl = ip.audio_url
   updateIpCharacter(id, { audio_url: '' })
   if (oldAudioUrl) {
-    removeLocalUploads(filterUnreferencedUploadUrls([oldAudioUrl]), UPLOAD_DIR)
+    removeLocalUploads(filterUnreferencedUploadUrls([oldAudioUrl]), uploadsDir)
   }
   res.json(getIpCharacter(id))
 })

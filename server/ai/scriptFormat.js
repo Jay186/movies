@@ -1,9 +1,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { chatCompletion } from './doubao.js'
+import { tasksDir } from '../paths.js'
 
-const tasksDirForBackup = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'tasks')
+
 
 const CANONICAL_SCENE_RE = /^场次[一二三四五六七八九十\d]+[：:]\s*(.+)/
 
@@ -183,8 +183,8 @@ export async function ensureStandardScript(script, opts = {}) {
 
 function backupOriginalScript(original, episodeId, tag) {
   try {
-    if (!fs.existsSync(tasksDirForBackup)) fs.mkdirSync(tasksDirForBackup, { recursive: true })
-    const file = path.join(tasksDirForBackup, `script-original-${episodeId || 'unknown'}-${Date.now()}-${tag}.txt`)
+    if (!fs.existsSync(tasksDir)) fs.mkdirSync(tasksDir, { recursive: true })
+    const file = path.join(tasksDir, `script-original-${episodeId || 'unknown'}-${Date.now()}-${tag}.txt`)
     fs.writeFileSync(file, original, 'utf8')
   } catch {
   }

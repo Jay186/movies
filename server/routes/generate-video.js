@@ -1,46 +1,32 @@
 import { Router } from 'express'
-import { randomUUID } from 'crypto'
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import { query, queryOne, execute, transaction } from '../db.js'
-import { scriptHash } from '../scriptHash.js'
+import { query, queryOne, execute } from '../db.js'
 
-const execFile = promisify(execFileCb)
-import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, extractBlockingForScene, assembleBlockingPlan, enrichShotIntegrated, chatCompletion } from '../ai/doubao.js'
-import { ensureStandardScript } from '../ai/scriptFormat.js'
-import { buildSceneGridPrompt, buildShotGridPrompt, buildShotGridContentApp, allocateShotRefs, splitSceneGrid } from '../ai/directorRequest.js'
-import { runWorkflow, uploadImageV2, insecureDownload, queryTaskOutput, isPlausibleMp4 } from '../ai/runninghub.js'
+import { chatCompletion } from '../ai/doubao.js'
+import { insecureDownload, queryTaskOutput, isPlausibleMp4 } from '../ai/runninghub.js'
 import { generateShotVideoCombat } from '../ai/combatVideo.js'
 import { generateShotVideoV4, buildShotVideoPromptV4 } from '../ai/v4Video.js'
 import { assertScriptConfirmed, assertNotStale, assertNoStylePoison } from '../ai/guards.js'
 import { relayLastFrameToNextShot, anchorEpisodeStyle } from '../ai/postHooks.js'
 import { resolveMc } from '../ai/mcPolicy.js'
-import { generateShotGridApp } from '../ai/rhShotGrid.js'
 import { checkSeam, checkOpenerTone } from '../ai/seamCheck.js'
-import { reviewShot, reviewShotByShotId } from '../ai/shotReview.js'
+import { reviewShot } from '../ai/shotReview.js'
 import { recordAlert, resolveAlertsByShot } from '../ai/alerts.js'
 import { enqueueSalvage } from '../salvageWorker.js'
 import { buildGlobalSpeakerMap } from '../ai/h3PromptTranslator.js'
-import { validateCameraAngle, inferAngleFromText, angleInjection } from '../ai/cameraAngle.js'
-import { generateImage, generateStoryboardImage, resolveProvider } from '../ai/image.js'
-import { backfillStoryboardAssets } from '../ai/assetBackfill.js'
 import { classifyShotCombat } from '../ai/shotClassifier.js'
 import { config } from '../config.js'
 import { clean as cleanText, pickInjectableEnglish } from '../ai/shared.js'
 import { parseDialogue, hasDialogue } from '../ai/dialogue.js'
-import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
-import { routeIp, buildCharacterContext, resolveExplicitCharacters } from '../ai/ipRouter.js'
-import { ffmpegPath as ffmpegStaticPath } from '../ai/ffmpeg.js'
-import { ASSET_TYPES } from '../ai/assetTypes.js'
+import { mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
+import { ASSET_TYPES, TYPE_PROP } from '../ai/assetTypes.js'
 import { resolveState } from '../ai/assetState.js'
 import { resolvePropName } from '../ai/propNameMatch.js'
 import { pickEnglish as pickEnglishGuard, stripResidualCjk as stripCjkGuard } from '../ai/v4Video.js'
+import { uploadsDir } from '../paths.js'
 const router = Router()
 
-const TYPE_PROP = ASSET_TYPES.includes('prop') ? 'prop' : ASSET_TYPES[ASSET_TYPES.length - 1]
 
 function propStateDescEn(shot, propName, baseDescEn) {
   const base = String(baseDescEn || '').trim()
@@ -72,7 +58,6 @@ function propStateDescEn(shot, propName, baseDescEn) {
 export const __propStateDescEn = propStateDescEn
 
 
-const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 fs.mkdirSync(uploadsDir, { recursive: true })
 
 function episodeSpeakerIds(shot) {

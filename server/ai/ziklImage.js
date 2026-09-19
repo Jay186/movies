@@ -4,15 +4,11 @@ import { insecureDownload } from './runninghub.js'
 import { mimeFromExt, netErrMsg } from './shared.js'
 import undiciPkg from 'undici'
 const { fetch: undiciFetch, EnvHttpProxyAgent, FormData: UndiciFormData } = undiciPkg
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { uploadsDir } from '../paths.js'
+import { shrinkRefImage } from './refImage.js'
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 let ziklDispatcher = null
 function getZiklDispatcher() {
@@ -62,34 +58,10 @@ async function fetchWithRetry(url, init, { timeoutMs = 300000, attempts = 3, bac
   return res
 }
 
-const REF_MAX_BYTES = 400 * 1024
-const REF_MAX_EDGE = 1024
-const execFile = promisify(execFileCb)
 async function shrinkRef(ref) {
-  if (!ref?.buffer || ref.buffer.length <= REF_MAX_BYTES) return ref
-  const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-  const tmpDir = os.tmpdir()
-  const inPath = path.join(tmpDir, `zikl_ref_in_${stamp}.img`)
-  const outPath = path.join(tmpDir, `zikl_ref_out_${stamp}.jpg`)
-  try {
-    const ffmpegPath = (await import('ffmpeg-static')).default
-    fs.writeFileSync(inPath, ref.buffer)
-    await execFile(ffmpegPath, [
-      '-y', '-i', inPath,
-      '-vf', `scale='min(${REF_MAX_EDGE},iw)':-2`,
-      '-q:v', '4', outPath,
-    ])
-    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) {
-      return { buffer: fs.readFileSync(outPath), filename: 'ref.jpg', mimeType: 'image/jpeg' }
-    }
-  } catch (e) {
-    console.warn('[ziklImage] 参考图压缩失败，改用原图:', e.message)
-  } finally {
-    for (const p of [inPath, outPath]) {
-      try { fs.rmSync(p, { force: true }) } catch {  }
-    }
-  }
-  return ref
+  if (!ref?.buffer) return ref
+  const out = await shrinkRefImage(ref.buffer, 'zikl', ref.filename, ref.mimeType)
+  return { ...ref, ...out }
 }
 
 export async function ziklGenerateImage(prompt, options = {}) {

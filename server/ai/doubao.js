@@ -1,6 +1,5 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { config } from '../config.js'
 import { logAiCall, classifyError } from './aiLog.js'
 import { validateStoryboard, extractScreenSides, hasExplicitReposition, buildAliasMap } from './storyboardValidator.js'
@@ -12,7 +11,7 @@ import {
   actionDensityRule, cameraAngleRule, frameGeographyRule, cinematicGrammarRule, styleLockRule,
 } from './storyboardRules.js'
 
-const tasksDirForDebug = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'tasks')
+
 
 const BLOCKING_STAGE = { aspectRatio: '9:16', width: 540, height: 960 }
 
@@ -355,6 +354,7 @@ export async function rewriteFullScript(script, instruction) {
 }
 
 import { escapeRegExp, CJK_DIRTY_RE } from './shared.js'
+import { tasksDir } from '../paths.js'
 
 function normalizeForMatch(s) {
   return String(s)
@@ -1164,8 +1164,8 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
           return normalizeStoryboard(JSON.parse(jsonStr), normTarget)
         } catch (parseError) {
           try {
-            const dumpPath = path.join(tasksDirForDebug, `storyboard-raw-${Date.now()}.txt`)
-            fs.mkdirSync(tasksDirForDebug, { recursive: true })
+            const dumpPath = path.join(tasksDir, `storyboard-raw-${Date.now()}.txt`)
+            fs.mkdirSync(tasksDir, { recursive: true })
             fs.writeFileSync(dumpPath, raw)
             console.warn(`[generateStoryboard] JSON 解析失败，原始输出已存 ${dumpPath}:`, parseError.message)
           } catch {  }
@@ -1173,8 +1173,8 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
         }
       }
       try {
-        const dumpPath = path.join(tasksDirForDebug, `storyboard-raw-${Date.now()}.txt`)
-        fs.mkdirSync(tasksDirForDebug, { recursive: true })
+        const dumpPath = path.join(tasksDir, `storyboard-raw-${Date.now()}.txt`)
+        fs.mkdirSync(tasksDir, { recursive: true })
         fs.writeFileSync(dumpPath, raw)
         console.warn(`[generateStoryboard] 输出中未提取到 JSON，原始输出已存 ${dumpPath}（长度 ${String(raw || '').length}）`)
       } catch {  }
@@ -1527,8 +1527,8 @@ ${assetListPrompt}【JSON 语法要求】字符串值内部禁止未转义双引
           return { storyboard, rawText: text, parseError: null, unmatched }
         } catch (parseError) {
           try {
-            const dumpPath = path.join(tasksDirForDebug, `storyboard-file-raw-${Date.now()}.txt`)
-            fs.mkdirSync(tasksDirForDebug, { recursive: true })
+            const dumpPath = path.join(tasksDir, `storyboard-file-raw-${Date.now()}.txt`)
+            fs.mkdirSync(tasksDir, { recursive: true })
             fs.writeFileSync(dumpPath, raw)
             console.warn(`[generateStoryboardFromFile] JSON 解析失败，原始输出已存 ${dumpPath}:`, parseError.message)
           } catch {  }

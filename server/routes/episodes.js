@@ -1,15 +1,11 @@
 import { Router } from 'express'
 import fs from 'fs'
 import path from 'path'
-import { fileURLToPath } from 'url'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads')
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true })
 
 import { removeLocalUploads as removeLocalUploadsShared, filterUnreferencedUploadUrls } from '../ai/shared.js'
-const removeLocalUploads = (urls) => removeLocalUploadsShared(urls, UPLOAD_DIR)
+const removeLocalUploads = (urls) => removeLocalUploadsShared(urls, uploadsDir)
 
 import { query, queryOne, execute, transaction } from '../db.js'
 import { ensureStandardScript } from '../ai/scriptFormat.js'
@@ -34,6 +30,7 @@ import { clearQcIgnores } from './qc.js'
 import { config } from '../config.js'
 import { ASSET_TYPES } from '../ai/assetTypes.js'
 import { fingerprintOf } from '../ai/sceneAnchors.js'
+import { serverDir, uploadsDir } from '../paths.js'
 
 const router = Router()
 
@@ -764,7 +761,7 @@ router.delete('/:id/storyboard', (req, res) => {
     })
     clearQcIgnores(episodeId)
     if (segIds.length) {
-      const trashDir = path.join(__dirname, '..', '_video_trash', String(Date.now()))
+      const trashDir = path.join(serverDir, '..', '_video_trash', String(Date.now()))
       for (const sid of segIds) recycleSliceDir(path.join('segments', `seg${sid}`), trashDir)
     }
     res.json({ success: true })
@@ -961,7 +958,7 @@ router.put('/:id/shots/:shotId', (req, res) => {
 
 
 function moveUploadsToTrash(urls, trashDir) {
-  const root = path.resolve(UPLOAD_DIR)
+  const root = path.resolve(uploadsDir)
   let moved = 0
   for (const u of urls || []) {
     if (!u || !String(u).startsWith('/uploads/')) continue
@@ -985,7 +982,7 @@ function moveUploadsToTrash(urls, trashDir) {
 }
 
 function recycleSliceDir(relDir, trashDir) {
-  const root = path.resolve(UPLOAD_DIR)
+  const root = path.resolve(uploadsDir)
   const absDir = path.resolve(root, relDir)
   if (absDir === root || !absDir.startsWith(root + path.sep)) return 0
   if (!fs.existsSync(absDir)) return 0
@@ -1091,7 +1088,7 @@ function deleteShotVideos(episodeId, rawShotIds) {
   let alertsCleared = 0
   for (const sid of shotIdsToClear) alertsCleared += resolveAlertsByShot(sid, 'del')
 
-  const trashDir = path.join(__dirname, '..', '_video_trash', String(Date.now()))
+  const trashDir = path.join(serverDir, '..', '_video_trash', String(Date.now()))
   const movedFiles = moveUploadsToTrash(filterUnreferencedUploadUrls(fileCandidates), trashDir)
   let removedSliceDirs = 0
   for (const relDir of segmentSliceDirs) {
@@ -1154,7 +1151,7 @@ router.post('/:id/characters/:characterId/audio', (req, res) => {
     const timestamp = Date.now()
     const random = Math.random().toString(36).substring(2, 8)
     const filename = `char_audio_${timestamp}_${random}.${ext}`
-    const filepath = path.join(UPLOAD_DIR, filename)
+    const filepath = path.join(uploadsDir, filename)
 
     fs.writeFileSync(filepath, Buffer.from(base64Data, 'base64'))
 

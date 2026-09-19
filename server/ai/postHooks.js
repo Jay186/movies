@@ -1,16 +1,11 @@
 import path from 'node:path'
 import fs from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
 import { queryOne, execute } from '../db.js'
 import { insecureDownload } from './runninghub.js'
 import { checkSeamByShotId } from './seamCheck.js'
 import { uploadsUrlToAbs } from './shared.js'
-import { ffmpegPath as ffmpegStaticPath } from './ffmpeg.js'
+import { uploadsDir } from '../paths.js'
 
-const execFile = promisify(execFileCb)
-const uploadsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'uploads')
 
 export async function relayLastFrameToNextShot(shot) {
   const videoUrl = String(shot.video_url || '').trim()
@@ -50,7 +45,7 @@ export async function relayLastFrameToNextShot(shot) {
   fs.mkdirSync(contDir, { recursive: true })
   const outName = `shot_${shot.id}_last.jpg`
   const outPath = path.join(contDir, outName)
-  await execFile(ffmpegStaticPath, ['-y', '-sseof', '-0.1', '-i', absVideo, '-update', '1', '-frames:v', '1', outPath])
+  await runFfmpeg(['-y', '-sseof', '-0.1', '-i', absVideo, '-update', '1', '-frames:v', '1', outPath])
   if (!fs.existsSync(outPath)) throw new Error('末帧抽取失败：输出为空')
 
   if (crossScene) {

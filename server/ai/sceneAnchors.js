@@ -4,23 +4,20 @@ import { query, queryOne, execute } from '../db.js'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
 import { recordAlert } from './alerts.js'
-import { ASSET_TYPES } from './assetTypes.js'
+import { ASSET_TYPES, TYPE_PROP } from './assetTypes.js'
 import { SCENE_ANCHOR_TYPE, PROP_ANCHOR_TYPE, SPATIAL_ANCHOR_TYPE, LAYOUT_ANCHOR_TYPE, LAYOUT_ANCHOR_HINT, parseElementList } from './anchorTypes.js'
 import { loadGroupLocks, applyGroupLocks, getGroupLockOverview } from './sceneGroupLock.js'
 import {
   buildAnchorKey, stripStateSuffix, scanOrphanStates, resolveState, displayLabel,
 } from './assetState.js'
 import { resolvePropName, buildPropLexiconHint } from './propNameMatch.js'
+import { bareUrl } from './shared.js'
 
-const TYPE_PROP = ASSET_TYPES.includes('prop') ? 'prop' : ASSET_TYPES[ASSET_TYPES.length - 1]
 
-const MAX_SPATIAL_REFS = 2
-const MAX_PROP_REFS = 2
 
 const MAX_ELEMENT_COUNT = 5
 const MAX_SHARED_ENV_COUNT = 6
 
-const bareUrl = (u) => String(u || '').split('?')[0].trim()
 
 const GROUP_ANCHOR_HINT =
   '本空间的「人审基准图」已作为参考图提供：本场景与基准图是同一物理空间，' +
@@ -368,7 +365,7 @@ export async function buildAnchorRefsForScene(episodeId, sceneId) {
        WHERE sa.episode_id = ? AND sa.spatial_group = ? AND sa.scene_id != ? AND TRIM(s.image_url) != ''
        ORDER BY ABS(s.scene_number - ?) ASC`,
       [episodeId, row.spatial_group, sceneId, cur?.scene_number || 0]
-    ).slice(0, MAX_SPATIAL_REFS)
+    ).slice(0, config.asset.maxSpatialRefs)
 
     for (const m of mates) {
       const img = bareUrl(m.image_url)
@@ -388,7 +385,7 @@ export async function buildAnchorRefsForScene(episodeId, sceneId) {
   try { props = JSON.parse(row.props_json || '[]') } catch { props = [] }
   let propCount = 0
   for (const name of props) {
-    if (propCount >= MAX_PROP_REFS) break
+    if (propCount >= config.asset.maxPropRefs) break
     const stateKey = defaultPropStateKey(name)
     const keyWithState = buildAnchorKey(name, stateKey)
     let a = keyWithState === name

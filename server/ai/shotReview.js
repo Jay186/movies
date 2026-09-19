@@ -1,17 +1,11 @@
 import path from 'node:path'
 import fs from 'node:fs'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import { fileURLToPath } from 'node:url'
-import { ffmpegPath as ffmpegStaticPath } from './ffmpeg.js'
 import { query, queryOne, execute } from '../db.js'
 import { chatCompletion } from './doubao.js'
 import { config } from '../config.js'
 import { resolveLocalMedia } from './runninghub.js'
+import { uploadsDir } from '../paths.js'
 
-const execFile = promisify(execFileCb)
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 const REVIEW_FRAME_COUNT = 5
 
@@ -24,7 +18,7 @@ async function extractFrames(absVideo, shotId, durationSec) {
   for (let i = 0; i < REVIEW_FRAME_COUNT; i++) {
     const t = Math.max(0, dur * (0.1 + 0.2 * i) - 0.05).toFixed(2)
     const p = path.join(dir, `shot_${shotId}_f${i}.jpg`)
-    await execFile(ffmpegStaticPath, ['-y', '-ss', t, '-i', absVideo, '-frames:v', '1', '-update', '1', '-q:v', '4', p])
+    await runFfmpeg(['-y', '-ss', t, '-i', absVideo, '-frames:v', '1', '-update', '1', '-q:v', '4', p])
     if (!fs.existsSync(p)) throw new Error(`第 ${i} 帧抽取失败：输出为空`)
     out.push(p)
   }

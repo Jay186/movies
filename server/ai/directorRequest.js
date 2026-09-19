@@ -2,14 +2,8 @@ import { execute } from '../db.js'
 import { clean as cleanShared } from './shared.js'
 import path from 'node:path'
 import fs from 'node:fs'
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import { fileURLToPath } from 'node:url'
-import { ffmpegPath } from './ffmpeg.js'
+import { uploadsDir } from '../paths.js'
 
-const execFile = promisify(execFileCb)
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const uploadsDir = path.join(__dirname, '..', 'uploads')
 
 
 
@@ -242,7 +236,7 @@ export async function splitSceneGrid(gridImagePath, shots, sceneId) {
     const outName = `scene_${sceneId}_cell_${shot.id}_${Date.now()}.png`
     const outPath = path.join(uploadsDir, outName)
     try {
-      await execFile(ffmpegPath, [
+      await runFfmpeg([
         '-y', '-i', absSrc,
         '-vf', `crop=${cellW}:${cellH}:${x}:${y}`,
         outPath,

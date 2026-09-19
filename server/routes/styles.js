@@ -1,17 +1,14 @@
 import { Router } from 'express'
 import path from 'path'
 import fs from 'fs'
-import { fileURLToPath } from 'url'
 import { query, execute } from '../db.js'
 import { translateStylePrompt } from '../ai/stylePromptEn.js'
 import { recordAlert } from '../ai/alerts.js'
+import { uploadsDir } from '../paths.js'
 
 const router = Router()
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-const UPLOAD_DIR = path.join(__dirname, '..', 'uploads')
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true })
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true })
 
 const LABEL_MAX = 32
 const PROMPT_MAX = 2000
@@ -139,7 +136,7 @@ router.post('/', (req, res) => {
       return res.status(400).json({ error: `封面图格式不支持：${ext}` })
     }
     const filename = `style_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
-    const filepath = path.join(UPLOAD_DIR, filename)
+    const filepath = path.join(uploadsDir, filename)
     try {
       fs.writeFileSync(filepath, Buffer.from(m[2], 'base64'))
       coverPath = `/uploads/${filename}`
@@ -216,7 +213,7 @@ router.patch('/:key', (req, res) => {
         return res.status(400).json({ error: `封面图格式不支持：${ext}` })
       }
       const filename = `style_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`
-      const filepath = path.join(UPLOAD_DIR, filename)
+      const filepath = path.join(uploadsDir, filename)
       try {
         fs.writeFileSync(filepath, Buffer.from(m[2], 'base64'))
         if (existing.cover_path) removeCoverFile(existing.cover_path)
@@ -295,7 +292,7 @@ router.delete('/:key', (req, res) => {
 function removeCoverFile(coverPath) {
   if (!coverPath || !/^\/uploads\/style_/.test(coverPath)) return
   const filename = path.basename(coverPath)
-  const filepath = path.join(UPLOAD_DIR, filename)
+  const filepath = path.join(uploadsDir, filename)
   if (fs.existsSync(filepath)) fs.unlinkSync(filepath)
 }
 
