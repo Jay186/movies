@@ -5,8 +5,7 @@ import { chatCompletion } from './doubao.js'
 import { mimeFromExt, uploadsUrlToAbs, parseDefectReview } from './shared.js'
 import { uploadsDir } from '../paths.js'
 
-
-export const SCENE_DEFECT_TYPES = [
+const SCENE_DEFECT_TYPES = [
   'element_missing', 
   'env_mismatch',    
   'structure_mismatch', 
@@ -14,18 +13,18 @@ export const SCENE_DEFECT_TYPES = [
   'extra_object',    
 ]
 
-export const resolveLocalSceneImage = (storedUrl) => uploadsUrlToAbs(storedUrl, uploadsDir)
+const resolveLocalSceneImage = (storedUrl) => uploadsUrlToAbs(storedUrl, uploadsDir)
 
-export const parseSceneReview = (raw) => parseDefectReview(raw, SCENE_DEFECT_TYPES, 'element_missing')
+const parseSceneReview = (raw) => parseDefectReview(raw, SCENE_DEFECT_TYPES, 'element_missing')
 
-export function shouldReviewScene(ctx) {
+function shouldReviewScene(ctx) {
   const el = Array.isArray(ctx?.elements) ? ctx.elements.filter(Boolean) : []
   const env = Array.isArray(ctx?.sharedEnv) ? ctx.sharedEnv.filter(Boolean) : []
   const role = String(ctx?.spatialRole || '').trim()
   return el.length > 0 || env.length > 0 || !!ctx?.hasSpatialRef || !!role
 }
 
-export function buildSceneReviewChecklist(ctx) {
+function buildSceneReviewChecklist(ctx) {
   const parts = []
   const el = Array.isArray(ctx?.elements) ? ctx.elements.filter(Boolean) : []
   const env = Array.isArray(ctx?.sharedEnv) ? ctx.sharedEnv.filter(Boolean) : []

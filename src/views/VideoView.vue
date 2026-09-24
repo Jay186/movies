@@ -11,7 +11,6 @@ import { ASPECT_RATIO_OPTIONS } from '../constants/app'
 const store = useProjectStore()
 
 const settingsOpen = ref(false)
-const segmentPanelOpen = ref(false)
 const settingsRef = ref(null)
 function onDocClick(e) {
   if (settingsOpen.value && settingsRef.value && !settingsRef.value.contains(e.target)) {
@@ -32,11 +31,7 @@ onBeforeUnmount(() => {
 
 const allShots = computed(() => store.storyboardScenes.flatMap((s) => s.shots))
 const displayVideoUrl = (shot) => shot.videoUrl || ''
-const fallbackSegUrl = (shot) => (shot.videoUrl ? '' : shot.segmentVideoUrl || '')
-const displayFallbackOffset = (shot) => (shot.videoUrl ? 0 : Number(shot.segmentOffset) || 0)
-const isFallbackOnly = (shot) => !shot.videoUrl && !!shot.segmentVideoUrl
-const hasDisplayVideo = (shot) => !!(shot.videoUrl || shot.videoGenerated || shot.segmentVideoUrl)
-const segmentTip = (shot) => (shot.segmentLabel ? `本镜与 ${shot.segmentLabel} 同批生成（段级出片，已按镜切片）` : '')
+const hasDisplayVideo = (shot) => !!(shot.videoUrl || shot.videoGenerated)
 const playableCount = computed(() => allShots.value.filter((s) => hasDisplayVideo(s)).length)
 const shotVideoCount = computed(
   () => allShots.value.filter((s) => !!(s.videoUrl || s.videoGenerated)).length
@@ -48,16 +43,6 @@ const generatedPercent = computed(() => {
   return Math.round((playableCount.value / allShots.value.length) * 100)
 })
 const seamAlert = (shot) => hasDisplayVideo(shot) && !!shot.seamCheck?.alert
-const reviewAlert = (shot) => hasDisplayVideo(shot) && ['fail', 'warn'].includes(shot.shotReview?.verdict)
-const reviewTip = (shot) => {
-  const r = shot.shotReview
-  if (!r) return ''
-  const dims = [`情绪${r.emotion}`, `叙事${r.clarity}`]
-  if (r.dialogueFace != null) dims.push(`台词对脸${r.dialogueFace}`)
-  dims.push(`画面${r.visualQuality}`)
-  const issues = (r.issues || []).length ? ` · 问题：${r.issues.join('；')}` : ''
-  return `观片评审：${dims.join(' / ')}，均分 ${r.avgScore}（${r.verdict}）· ${r.summary || '无总评'}${issues}`
-}
 const seamTip = (shot) => {
   const c = shot.seamCheck
   if (!c) return ''
@@ -103,7 +88,7 @@ async function dismissShotAlerts(shot) {
   if (!n) return
   const ok = await confirmDialog({
     title: `标记镜 ${shot.shotNumber || shot.id} 的 ${n} 条告警为已处置`,
-    description: '仅记录「已知悉」，不会重跑接力 / 接缝 / 观片钩子。如需真正修好，重生该镜即可重跑全链。',
+    description: '仅记录「已知悉」，不会重跑接力 / 接缝钩子。如需真正修好，重生该镜即可重跑全链。',
     confirmText: `标记 ${n} 条已处置`,
     cancelText: '先不标',
     tone: 'warn',
@@ -208,32 +193,28 @@ const shotFilter = ref('all')
 const shotStates = computed(() =>
   allShots.value.map((shot) => {
     const shotVideo = !!(shot.videoUrl || shot.videoGenerated)
-    const segFallback = !shotVideo && !!shot.segmentVideoUrl
-    const alert = seamAlert(shot) || reviewAlert(shot)
-    return { shot, shotVideo, segFallback, hasVideo: shotVideo || segFallback, alert }
+    const alert = seamAlert(shot)
+    return { shot, shotVideo, hasVideo: shotVideo, alert }
   })
 )
 const filterCounts = computed(() => ({
   all: shotStates.value.length,
   alert: shotStates.value.filter((x) => x.alert).length,
   pending: shotStates.value.filter((x) => !x.hasVideo).length,
-  slice: shotStates.value.filter((x) => x.segFallback).length,
   done: shotStates.value.filter((x) => x.shotVideo).length,
 }))
 const visibleShots = computed(() => {
   const list = shotStates.value
   if (shotFilter.value === 'alert') return list.filter((x) => x.alert).map((x) => x.shot)
   if (shotFilter.value === 'pending') return list.filter((x) => !x.hasVideo).map((x) => x.shot)
-  if (shotFilter.value === 'slice') return list.filter((x) => x.segFallback).map((x) => x.shot)
   if (shotFilter.value === 'done') return list.filter((x) => x.shotVideo).map((x) => x.shot)
   return list.map((x) => x.shot)
 })
 
 const shotFilterChips = computed(() => [
   { key: 'all', label: '全部', n: filterCounts.value.all, activeClass: 'bg-bg-elevated text-text-primary', tip: '全部镜头' },
-  { key: 'alert', label: '待处理', n: filterCounts.value.alert, activeClass: 'bg-danger/15 text-danger ring-1 ring-inset ring-danger/25', tip: '接缝异常或观片未通过，需要处置' },
-  { key: 'pending', label: '未出片', n: filterCounts.value.pending, activeClass: 'bg-bg-elevated text-text-primary', tip: '连段切片都没有，画面完全空着' },
-  { key: 'slice', label: '仅切片', n: filterCounts.value.slice, activeClass: 'bg-warn/15 text-warn ring-1 ring-inset ring-warn/25', tip: '只有段成片切出来的一段，本镜未单独出片' },
+  { key: 'alert', label: '待处理', n: filterCounts.value.alert, activeClass: 'bg-danger/15 text-danger ring-1 ring-inset ring-danger/25', tip: '接缝异常，需要处置' },
+  { key: 'pending', label: '未出片', n: filterCounts.value.pending, activeClass: 'bg-bg-elevated text-text-primary', tip: '本镜还没有成片' },
   { key: 'done', label: '单独出片', n: filterCounts.value.done, activeClass: 'bg-ok/15 text-ok ring-1 ring-inset ring-ok/25', tip: '本镜已独立生成视频' },
 ])
 
@@ -283,21 +264,6 @@ function invertVisible() {
   selectedShotIds.value = [...cur]
 }
 
-function owningSegments(shotId) {
-  return segmentPlan.value.filter(
-    (seg) => seg.status === 'done' && Array.isArray(seg.shotIds) && seg.shotIds.includes(shotId)
-  )
-}
-function computeDeleteImpact(shotIds) {
-  const idSet = new Set(shotIds.map(Number))
-  const segMap = new Map()
-  for (const sid of shotIds) for (const seg of owningSegments(sid)) segMap.set(seg.id, seg)
-  const linked = new Set()
-  for (const seg of segMap.values()) {
-    for (const sid of seg.shotIds) if (!idSet.has(Number(sid))) linked.add(Number(sid))
-  }
-  return { segments: [...segMap.values()], linkedShotIds: [...linked] }
-}
 const shotLabel = (id) => {
   const s = allShots.value.find((x) => Number(x.id) === Number(id))
   return s ? (s.shotNumber || s.displayId || s.id) : `#${id}`
@@ -306,24 +272,7 @@ function buildDeleteConfirm(shotIds) {
   const nums = shotIds.map((id) => shotLabel(id))
   const shown = nums.slice(0, 10).join('、')
   const more = nums.length > 10 ? ` …等共 ${nums.length} 镜` : ''
-  const { segments, linkedShotIds } = computeDeleteImpact(shotIds)
-
   const details = [{ label: '镜号', value: `${shown}${more}` }]
-  if (segments.length) {
-    const linkedNums = linkedShotIds.map((id) => shotLabel(id))
-    const lShown = linkedNums.slice(0, 10).join('、')
-    const lMore = linkedNums.length > 10 ? ` …等共 ${linkedNums.length} 镜` : ''
-    details.push({
-      label: '连带段',
-      value: `${segments.length} 段（${segments.map((s) => s.shotNumbers).join('、')}）`,
-      tone: 'danger',
-    })
-    details.push({
-      label: '一并退回',
-      value: `同段 ${linkedShotIds.length} 镜${linkedShotIds.length ? `：${lShown}${lMore}` : ''}`,
-      tone: 'warn',
-    })
-  }
   details.push({ label: '文件去向', value: '移入服务端回收站，可手工找回' })
 
   return {
@@ -337,9 +286,8 @@ function buildDeleteConfirm(shotIds) {
 }
 function summarizeDelete(r) {
   const n = r?.shots?.length ?? 0
-  const segs = r?.segments?.length ?? 0
   const files = r?.movedFiles ?? 0
-  const message = `已删除 ${n} 个镜头的成片` + (segs ? `，连带清理 ${segs} 段段成片` : '')
+  const message = `已删除 ${n} 个镜头的成片`
   const lines = [`${files} 个文件移入回收站`]
   const alerts = r?.alertsCleared ?? 0
   if (alerts) lines.push(`顺手销掉 ${alerts} 条已失效告警`)
@@ -445,255 +393,28 @@ function generateSingle(shotId) {
   generateShot(shotId)
 }
 
-const segmentPlan = computed(() => store.segmentPlan || [])
-const sceneSegmentStats = computed(() => {
-  const m = new Map()
-  for (const seg of segmentPlan.value) {
-    const k = seg.sceneNumber
-    if (!m.has(k)) m.set(k, { total: 0, done: 0, pending: 0, running: 0, unusable: 0 })
-    const s = m.get(k)
-    s.total++
-    if (seg.status === 'done') s.done++
-    else if (seg.status === 'running') s.running++
-    else if (seg.status === 'unusable') s.unusable++
-    else s.pending++
-  }
-  return m
-})
-const hasSegmentPlan = computed(() => segmentPlan.value.length > 0)
-const segmentGenerating = ref(false)
-const segmentProgress = ref('')
-const segmentRecomputing = ref(false)
-const segmentRecomputedHint = ref('')
-let recomputeHintTimer = null
-const segmentsStale = ref(false)
-const segmentsStaleInfo = ref(null)
-
-async function generateScene(sceneNumber) {
-  if (segmentGenerating.value) return
-  const segs = segmentPlan.value
-    .filter((s) => s.sceneNumber === sceneNumber && s.status !== 'unusable')
-    .sort((a, b) => a.segmentIndex - b.segmentIndex)
-  if (!segs.length) {
-    toastInfo(`场 ${sceneNumber} 没有待出片的段`)
-    return
-  }
-  const todo = segs.filter((s) => s.status !== 'done')
-  const doneCnt = segs.length - todo.length
-  if (!todo.length) {
-    toastSuccess(`场 ${sceneNumber} 的 ${segs.length} 段全部已出片`)
-    return
-  }
-  const totalSec = todo.reduce((n, s) => n + (Number(s.duration) || 0), 0)
-  const eng = videoEngine.value
-  const ok = await confirmDialog({
-    title: `按场出片 · 场 ${sceneNumber}`,
-    description: '每段一次生成，出片后自动按镜边界切片，每镜各得独立视频。',
-    details: [
-      { label: '段数', value: `${todo.length} 段 · 约 ${totalSec}s` },
-      { label: '段内容', value: todo.map((s) => s.shotNumbers).join(' / ') },
-      {
-        label: '计费',
-        value: eng.coinLow != null
-          ? `约 ${eng.coinLow}~${eng.coinHigh} 币/段（${eng.label}）`
-          : `按 RunningHub 计费（${eng.label}）`,
-        tone: 'warn',
-      },
-      ...(doneCnt ? [{ label: '跳过', value: `已出片 ${doneCnt} 段不再重跑` }] : []),
-    ],
-    confirmText: `开始出片 · ${todo.length} 段`,
-    cancelText: '再想想',
-    tone: 'warn',
-  })
-  if (!ok) return
-
-  segmentGenerating.value = true
-  let failed = 0
-  const failReasons = []
-  try {
-    for (let i = 0; i < todo.length; i++) {
-      const seg = todo[i]
-      segmentProgress.value = `场 ${sceneNumber} · 第 ${i + 1}/${todo.length} 段（${seg.shotNumbers}）`
-      try {
-        const r = await api.generateVideoSegment(seg.id)
-        if (!r?.success) {
-          failed++
-          if (r?.error) { console.warn(`[按场出片] 段${seg.id} 失败：`, r.error); failReasons.push(r.error) }
-        }
-      } catch (e) {
-        failed++
-        console.warn(`[按场出片] 段${seg.id} 异常：`, e?.message || e)
-        failReasons.push(e?.message || String(e))
-      }
-      await refreshEpisodeData()
-    }
-  } finally {
-    segmentGenerating.value = false
-    segmentProgress.value = ''
-  }
-  const remain = segmentPlan.value.filter((s) => s.sceneNumber === sceneNumber && s.status !== 'done' && s.status !== 'unusable').length
-  if (failed > 0 || remain > 0) {
-    const uniq = [...new Set(failReasons)].slice(0, 3)
-    toastWarn(`场 ${sceneNumber} 出片完成，${failed} 段失败、${remain} 段未完成`, {
-      detail: uniq.length ? `失败原因：\n${uniq.join('\n')}` : `可重试该场`,
-    })
-  }
-  else toastSuccess(`场 ${sceneNumber} 全部出片完成`)
-}
-
-async function recomputeSegments(persist = false) {
-  const epId = store.currentEpisodeId
-  if (!epId) { toastError('当前没有选中的集'); return null }
-  if (segmentRecomputing.value) return null
-  segmentRecomputing.value = true
-  try {
-    const r = await api.saveEpisodeSegments(epId, { persist, replace: persist })
-    const t = r?.totals
-    if (!t) { toastError('段方案计算失败'); return null }
-    const details = [
-      { label: '规模', value: `${t.sceneCount} 场 · ${t.shotCount} 镜 · ${t.segCount} 段` },
-      { label: '总时长', value: `${t.totalSec}s` },
-      { label: '生成次数', value: `${t.shotCount} → ${t.segCount}（省 ${t.savedGenerations} 次）`, tone: 'warn' },
-    ]
-    const unusable = Array.isArray(r?.unusableSegments) ? r.unusableSegments : []
-    if (unusable.length) {
-      details.push({
-        label: '需逐镜出片',
-        value: `${unusable.length} 段时长不在 3–15s（${unusable.map((u) => u.shotNumbers).join(' / ')}）`,
-        tone: 'danger',
-      })
-    }
-    if (!persist) {
-      const ok = await confirmDialog({
-        title: '按此方案重新分段',
-        description: unusable.length
-          ? '已出片的段会保留，不会被清掉。非法段不会被落库，需逐镜出片。'
-          : '已出片的段会保留，不会被清掉。',
-        details,
-        confirmText: '落库并应用',
-        cancelText: '仅预览',
-        tone: 'warn',
-      })
-      if (!ok) return r
-      segmentRecomputing.value = true
-      const w = await api.saveEpisodeSegments(epId, { persist: true, replace: true })
-      const wt = w?.totals
-      await refreshEpisodeData()
-      const segCount = segmentPlan.value.length
-      toastSuccess('分段方案已重建', {
-        detail: [
-          `已写入 ${segCount} 个段，段与镜表的指纹已对齐`,
-          unusable.length ? `${unusable.length} 段非法，需逐镜出片` : '',
-          '此后出片与切片可正常进行',
-        ].filter(Boolean).join('\n'),
-        duration: 0,
-      })
-      setRecomputeHint(`已重建 ${segCount} 段`)
-      await refreshSegmentsStaleness()
-      return w ?? r
-    } else {
-      const segCount = segmentPlan.value.length
-      toastSuccess('分段方案已应用', {
-        detail: details.map((d) => `${d.label}：${d.value}`).join('\n'),
-      })
-      setRecomputeHint(`已重建 ${segCount} 段`)
-      await refreshSegmentsStaleness()
-    }
-    return r
-  } catch (e) {
-    toastError('段方案计算失败', { detail: String(e?.message || e) })
-    return null
-  } finally {
-    segmentRecomputing.value = false
-  }
-}
-
-function setRecomputeHint(text) {
-  segmentRecomputedHint.value = text
-  if (recomputeHintTimer) clearTimeout(recomputeHintTimer)
-  recomputeHintTimer = setTimeout(() => { segmentRecomputedHint.value = '' }, 8000)
-}
-
-async function resliceSegments(force = false) {
-  const epId = store.currentEpisodeId
-  if (!epId) { toastError('当前没有选中的集'); return }
-  segmentGenerating.value = true
-  segmentProgress.value = '正在按镜边界切片…'
-  try {
-    const r = force ? await api.sliceEpisodeSegments(epId, { force: true }) : await api.sliceEpisodeSegments(epId)
-    const sliced = r?.sliced?.length ?? 0
-    const skipped = r?.skipped?.length ?? 0
-    toastSuccess(`切片完成：新切 ${sliced} 镜，跳过 ${skipped} 镜`)
-    await refreshEpisodeData()
-  } catch (e) {
-    toastError('切片失败', { detail: String(e?.message || e) })
-  } finally {
-    segmentGenerating.value = false
-    segmentProgress.value = ''
-  }
-}
-
 async function refreshEpisodeData() {
   const epId = store.currentEpisodeId
   if (!epId) return
-  try { await store.loadEpisode(epId) } catch (e) { console.warn('[段出片] 刷新集数据失败：', e?.message || e) }
+  try { await store.loadEpisode(epId) } catch (e) { console.warn('[刷新集数据] 失败：', e?.message || e) }
   try { await store.loadAlerts?.() } catch {  }
-  await refreshSegmentsStaleness()
-}
-
-async function refreshSegmentsStaleness() {
-  const epId = store.currentEpisodeId
-  if (!epId) { segmentsStale.value = false; segmentsStaleInfo.value = null; return }
-  try {
-    const r = await api.getSegmentsStaleness(epId)
-    segmentsStale.value = !!r?.stale
-    segmentsStaleInfo.value = r || null
-  } catch {
-    segmentsStale.value = false
-    segmentsStaleInfo.value = null
-  }
 }
 
 const playModal = ref(false)
 const playingIndex = ref(0)
 const playVideoRef = ref(null)
-const playList = computed(() => allShots.value.filter((s) => displayVideoUrl(s) || fallbackSegUrl(s)))
+const playList = computed(() => allShots.value.filter((s) => displayVideoUrl(s)))
 const playingShot = computed(() => playList.value[playingIndex.value] || null)
 function syncPlayerToShot() {
   const shot = playingShot.value
   const v = playVideoRef.value
   if (!v || !shot) return
-  const url = displayVideoUrl(shot) || fallbackSegUrl(shot)
+  const url = displayVideoUrl(shot)
   if (!url) return
   let abs = ''
   try { abs = new URL(url, window.location.href).href } catch { return }
   if (v.src !== abs) return 
-  const off = displayFallbackOffset(shot)
-  if (off > 0.05 && Math.abs(v.currentTime - off) > 0.2) {
-    try { v.currentTime = off } catch {  }
-  }
   v.play?.().catch(() => {})
-}
-function onPlayerMeta() {
-  const shot = playingShot.value
-  const v = playVideoRef.value
-  if (!v || !shot) return
-  const off = displayFallbackOffset(shot)
-  if (off > 0.05) { try { v.currentTime = off } catch {  } }
-}
-function onPlayerTimeUpdate() {
-  const shot = playingShot.value
-  const v = playVideoRef.value
-  if (!v || !shot) return
-  if (!isFallbackOnly(shot)) return 
-  const off = displayFallbackOffset(shot)
-  const dur = Number(shot.duration) || 0
-  if (dur > 0 && v.currentTime > off + dur + 0.3) {
-    if (playingIndex.value < playList.value.length - 1) {
-      playingIndex.value++
-      syncPlayerToShot()
-    }
-  }
 }
 function jumpTo(idx) {
   playingIndex.value = idx
@@ -718,26 +439,8 @@ function openPlayerAtShot(shotId) {
   playModal.value = true
   setTimeout(() => playVideoRef.value?.play?.().catch(() => {}), 100)
 }
-function onPreviewLoaded(evt, shot) {
-  const off = displayFallbackOffset(shot)
-  if (off > 0.05) { try { evt.target.currentTime = off } catch {  } }
-}
-function previewSeekPlay(evt, shot) {
-  const v = evt.target
-  const off = displayFallbackOffset(shot)
-  if (off > 0.05 && Math.abs(v.currentTime - off) > 0.3) {
-    try { v.currentTime = off } catch {  }
-  }
-  v.play()
-}
-function keepPreviewRange(evt, shot) {
-  const off = displayFallbackOffset(shot)
-  if (off <= 0.05) return
-  const v = evt.target
-  const end = off + (Number(shot.duration) || 0) + 0.35
-  if (v.currentTime < off - 0.25 || v.currentTime > end) {
-    try { v.currentTime = off } catch {  }
-  }
+function previewSeekPlay(evt) {
+  evt.target.play()
 }
 function closePlayer() {
   playModal.value = false
@@ -831,7 +534,6 @@ function onGlobalKeydown(e) {
 onMounted(() => {
   window.addEventListener('keydown', onGlobalKeydown)
   store.loadAlerts()
-  refreshSegmentsStaleness()
   alertPoll = setInterval(() => {
     if (store.generatingVideoIds.length || store.systemAlertCount) store.loadAlerts()
   }, 8000)
@@ -840,7 +542,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   playVideoRef.value?.pause?.()
   if (alertPoll) { clearInterval(alertPoll); alertPoll = null }
-  if (recomputeHintTimer) { clearTimeout(recomputeHintTimer); recomputeHintTimer = null }
 })
 </script>
 
@@ -885,7 +586,7 @@ onBeforeUnmount(() => {
           <div class="flex min-w-0 items-center gap-3">
             <span
               class="shrink-0 font-mono text-[13px]"
-              :title="`可播放 ${playableCount} 镜（含仅靠段切片兜底的 ${filterCounts.slice} 镜）；本镜独立出片 ${shotVideoCount} 镜`"
+              :title="`可播放 ${playableCount} 镜；本镜独立出片 ${shotVideoCount} 镜`"
             >
               <span class="font-medium text-text-primary">{{ playableCount }}</span><span class="text-text-muted">/{{ allShots.length }}</span>
             </span>
@@ -895,13 +596,6 @@ onBeforeUnmount(() => {
                 :style="{ width: generatedPercent + '%' }"
               ></div>
             </div>
-            <span
-              v-if="filterCounts.slice > 0"
-              class="flex shrink-0 items-center gap-1 rounded-full bg-warn/10 px-2 py-0.5 text-micro text-warn"
-              title="这些镜头只有段成片切出来的一段，未单独出片。要单独的成片需逐镜出片。"
-            >
-              <span class="font-mono font-medium">{{ filterCounts.slice }}</span> 镜仅切片
-            </span>
             <span
               class="hidden shrink-0 font-mono text-micro text-text-muted sm:inline"
               title="全片预计时长"
@@ -1017,7 +711,7 @@ onBeforeUnmount(() => {
 
           <button
             class="flex h-8 items-center gap-2 rounded-control bg-accent px-4 text-[12px] font-medium text-black transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
-            :disabled="batchGenerating || segmentGenerating"
+            :disabled="batchGenerating"
             title="为所有未出片的镜头批量生成视频"
             @click="generateAllVideos"
           >
@@ -1028,114 +722,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <div v-if="hasSegmentPlan" class="mt-2.5">
-      <div class="overflow-hidden rounded-control border border-border/50 bg-bg-secondary/50">
-        <button
-          class="flex w-full items-center gap-2.5 px-3.5 py-2 text-left transition hover:bg-bg-hover/40"
-          title="一段一次生成，出片后按镜自动切片"
-          @click="segmentPanelOpen = !segmentPanelOpen"
-        >
-          <svg
-            class="h-3 w-3 shrink-0 text-text-muted transition-transform duration-200"
-            :class="segmentPanelOpen ? 'rotate-90' : ''"
-            fill="none" stroke="currentColor" viewBox="0 0 24 24"
-          ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
-          <span class="text-[12px] text-text-secondary">段级出片</span>
-          <span class="font-mono text-micro text-text-muted">
-            {{ segmentPlan.length }} 段 · 完成 <span class="text-text-secondary">{{ segmentPlan.filter((s) => s.status === 'done').length }}</span>
-          </span>
-          <span
-            v-if="segmentGenerating"
-            class="rounded-full bg-info/15 px-2 py-0.5 text-micro text-info"
-          >{{ segmentProgress }}</span>
-          <span
-            v-else-if="segmentsStale"
-            class="rounded-full bg-warn/15 px-2 py-0.5 text-micro text-warn"
-          >分镜已改动 · 需重算</span>
-          <span class="ml-auto text-micro text-text-muted">{{ segmentPanelOpen ? '收起' : '展开' }}</span>
-        </button>
 
-        <div
-          v-if="segmentsStale && !segmentGenerating"
-          class="mx-3.5 mb-3 mt-0.5 flex items-start gap-3 rounded-control border border-warn/35 bg-warn/[0.08] px-3.5 py-3"
-        >
-          <svg class="mt-0.5 h-4 w-4 shrink-0 text-warn" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-          </svg>
-          <div class="min-w-0 flex-1">
-            <div class="text-[12px] font-medium text-warn">分镜已改动，需要重算分段</div>
-            <div class="mt-0.5 text-micro leading-relaxed text-text-muted">
-              {{ segmentsStaleInfo?.staleCount || 0 }}/{{ segmentsStaleInfo?.total || 0 }} 个段的时间轴与当前分镜对不上。
-              <template v-if="segmentsStaleInfo?.fingerprintMismatch">
-                分镜的镜长、镜头数量或顺序被改过；</template>
-              <template v-else-if="segmentsStaleInfo?.emptyFingerprint">
-                这些段是早期数据，缺少与分镜的对应标记；</template>
-              现在出片会在切片那一步失败，白花生成费用。请先点右侧「重算分段」。
-            </div>
-          </div>
-          <button
-            class="h-7 shrink-0 rounded-control border border-warn/45 bg-warn/15 px-3 text-[12px] font-medium text-warn transition hover:bg-warn/25 disabled:cursor-not-allowed disabled:opacity-40"
-            :disabled="segmentRecomputing || segmentGenerating || batchGenerating"
-            @click="recomputeSegments(false)"
-          >立即重算</button>
-        </div>
-
-        <div v-if="segmentPanelOpen" class="flex flex-wrap items-center gap-2 border-t border-border/40 py-2.5 pl-7 pr-3.5 animate-fade-up">
-          <button
-            v-for="[sceneNo, st] in [...sceneSegmentStats.entries()]"
-            :key="sceneNo"
-            class="flex h-7 items-center gap-1.5 rounded-control border px-2.5 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40"
-            :class="st.pending + st.running > 0
-              ? 'border-info/35 bg-info/10 text-info hover:bg-info/20'
-              : 'border-border bg-bg-card text-text-muted'"
-            :disabled="segmentGenerating || batchGenerating"
-            :title="st.unusable ? `场 ${sceneNo}：${st.unusable} 段非法（时长不在 4–15s），这些段需逐镜出片` : `场 ${sceneNo}：${st.total} 段，已完成 ${st.done}，待出 ${st.pending + st.running}`"
-            @click="generateScene(sceneNo)"
-          >
-            场 {{ sceneNo }}
-            <span class="rounded-full bg-bg-primary/70 px-1.5 py-px font-mono text-micro">{{ st.done }}/{{ st.total }}</span>
-            <span v-if="st.unusable" class="text-warn" title="含非法段">⚠</span>
-          </button>
-
-          <div class="ml-auto flex items-center gap-2">
-            <span
-              v-if="segmentRecomputing || segmentRecomputedHint"
-              class="flex items-center gap-1 text-micro"
-              :class="segmentRecomputing ? 'text-info' : 'text-ok'"
-            >
-              <svg
-                v-if="!segmentRecomputing"
-                class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-              ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" /></svg>
-              {{ segmentRecomputing ? '正在重算…' : segmentRecomputedHint }}
-            </span>
-            <button
-              class="flex h-7 items-center gap-1.5 rounded-control border px-2.5 text-[12px] transition disabled:cursor-not-allowed disabled:opacity-40"
-              :class="segmentRecomputing
-                ? 'border-border-light bg-bg-hover text-text-primary'
-                : 'border-border bg-bg-card text-text-muted hover:border-border-light hover:text-text-primary'"
-              :disabled="segmentGenerating || batchGenerating || segmentRecomputing"
-              title="按当前镜长重算段边界（相邻镜拼成 4–15s 的段）。镜长改过才需要重算；已出片的段会保留。"
-              @click="recomputeSegments(false)"
-            >
-              <svg
-                class="h-3 w-3" :class="segmentRecomputing && 'animate-spin'" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-              ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-              {{ segmentRecomputing ? '处理中' : '重算分段' }}
-            </button>
-            <button
-              class="flex h-7 items-center gap-1.5 rounded-control border border-border bg-bg-card px-2.5 text-[12px] text-text-muted transition hover:border-border-light hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="segmentGenerating || batchGenerating || !segmentPlan.some((s) => s.status === 'done')"
-              title="按镜边界重切所有已出片段（覆盖旧切片）。段重新生成后必须点一次，否则卡片播的是旧切片。"
-              @click="resliceSegments(true)"
-            >
-              <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.121 14.121L19 19m-7-7l7-7m-7 7l-2.879 2.879M12 12L9.121 9.121m0 5.758a3 3 0 10-4.243 4.243 3 3 0 004.243-4.243zm0-5.758a3 3 0 10-4.243-4.243 3 3 0 004.243 4.243z" /></svg>
-              重切切片
-            </button>
-          </div>
-        </div>
-        </div>
-      </div>
     </div>
 
     <div v-if="composeResult" class="shrink-0 px-6 pt-3">
@@ -1315,16 +902,14 @@ onBeforeUnmount(() => {
             ]"
           >
             <video
-              v-if="displayVideoUrl(shot) || fallbackSegUrl(shot)"
-              :src="displayVideoUrl(shot) || fallbackSegUrl(shot)"
+              v-if="displayVideoUrl(shot)"
+              :src="displayVideoUrl(shot)"
               class="h-full w-full object-cover"
               muted
               loop
               preload="auto"
-              @loadeddata="onPreviewLoaded($event, shot)"
-              @mouseenter="previewSeekPlay($event, shot)"
+              @mouseenter="previewSeekPlay($event)"
               @mouseleave="$event.target.pause()"
-              @timeupdate="keepPreviewRange($event, shot)"
             />
             <div v-else class="flex h-full w-full flex-col items-center justify-center gap-2 bg-bg-secondary">
               <span class="flex h-10 w-10 items-center justify-center rounded-full border border-dashed border-border-strong/70">
@@ -1399,15 +984,6 @@ onBeforeUnmount(() => {
                   <svg class="h-3 w-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
                   <span class="truncate">{{ shot.seamCheck?.checkType === 'openerTone' ? `色调跑偏 R-B${shot.seamCheck?.rb}` : `衔接异常${shot.seamCheck?.cctDiffK != null ? ` CCT差${shot.seamCheck.cctDiffK}K` : ''}` }}</span>
                 </span>
-                <span
-                  v-if="reviewAlert(shot)"
-                  :title="reviewTip(shot)"
-                  class="flex h-5 max-w-full items-center gap-1 rounded-full px-2 text-micro font-medium text-white"
-                  :class="shot.shotReview?.verdict === 'fail' ? 'bg-danger' : 'bg-warn'"
-                >
-                  <svg class="h-3 w-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
-                  <span class="truncate">观片{{ shot.shotReview?.verdict === 'fail' ? '不合格' : '待复核' }} {{ shot.shotReview?.avgScore }}</span>
-                </span>
               </div>
 
               <div
@@ -1417,11 +993,10 @@ onBeforeUnmount(() => {
               >
                 <span
                   v-if="hasDisplayVideo(shot)"
-                  :title="isFallbackOnly(shot) ? `本镜切片缺失，暂播整段成片 ${shot.segmentLabel}（可在段管线补切）` : segmentTip(shot)"
                   class="flex h-5 items-center gap-1 rounded-full bg-black/65 px-2 text-micro font-medium text-white ring-1 ring-inset ring-white/15 backdrop-blur-sm"
                 >
-                  <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="isFallbackOnly(shot) ? 'bg-warn' : 'bg-ok'"></span>
-                  {{ isFallbackOnly(shot) ? '段成片' : '已生成' }}
+                  <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-ok"></span>
+                  已生成
                 </span>
                 <span
                   v-if="shotErrAlerts(shot).length"
@@ -1446,11 +1021,6 @@ onBeforeUnmount(() => {
               >
                 {{ store.generatingVideoIds.includes(shot.id) ? '出片中' : '出片' }}
               </button>
-              <span
-                v-else-if="isFallbackOnly(shot)"
-                class="flex h-6 shrink-0 items-center rounded-control bg-warn/15 px-2 text-micro text-warn"
-                :title="`本镜切片缺失，暂播整段成片 ${shot.segmentLabel}（点击卡片画面可看，建议在段管线补切）`"
-              >切片缺失</span>
               <button
                 v-else
                 class="h-6 shrink-0 rounded-control border border-border px-2 text-micro text-text-secondary transition hover:border-border-light hover:bg-bg-hover hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40"
@@ -1462,9 +1032,7 @@ onBeforeUnmount(() => {
                 v-if="hasDisplayVideo(shot)"
                 class="h-6 shrink-0 rounded-control px-2 text-micro text-text-muted transition hover:bg-danger/10 hover:text-danger disabled:cursor-not-allowed disabled:opacity-40"
                 :disabled="store.generatingVideoIds.includes(shot.id) || deleting"
-                :title="isFallbackOnly(shot)
-                  ? '删除本镜成片：本镜无独立切片，按段联动会连带删除其所属整段成片'
-                  : '删除本镜成片，镜头退回未出片'"
+                title="删除本镜成片，镜头退回未出片"
                 @click.stop="deleteSingleShotVideo(shot)"
               >删除</button>
             </div>
@@ -1497,7 +1065,7 @@ onBeforeUnmount(() => {
         <button
           class="flex h-8 items-center gap-1.5 rounded-control border border-danger/40 bg-danger/10 px-3 text-[12px] font-medium text-danger transition hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-40"
           :disabled="!selectedCount || deleting"
-          title="删除选中镜头的成片（文件移入服务端回收站，可手工找回；段级出片会连带整段）"
+          title="删除选中镜头的成片（文件移入服务端回收站，可手工找回）"
           @click="deleteSelectedShotVideos"
         >
           <svg v-if="!deleting" class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -1532,7 +1100,7 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
                 <div class="mt-0.5 truncate text-micro text-text-muted">
-                  镜头 {{ playingShot?.shotNumber || playingShot?.displayId || playingShot?.id }} · {{ playingShot?.duration }}s{{ isFallbackOnly(playingShot) ? ` · ${playingShot.segmentLabel} 段内起播` : '' }}
+                  镜头 {{ playingShot?.shotNumber || playingShot?.displayId || playingShot?.id }} · {{ playingShot?.duration }}s
                 </div>
               </div>
             </div>
@@ -1547,13 +1115,11 @@ onBeforeUnmount(() => {
           <div class="relative flex items-center justify-center bg-black">
             <video
               ref="playVideoRef"
-              :src="playingShot ? (displayVideoUrl(playingShot) || fallbackSegUrl(playingShot)) : ''"
+              :src="playingShot ? displayVideoUrl(playingShot) : ''"
               controls
               autoplay
               class="h-[68vh] w-auto max-w-[92vw] object-contain"
               @ended="onPlayEnded"
-              @loadedmetadata="onPlayerMeta"
-              @timeupdate="onPlayerTimeUpdate"
             ></video>
             <button
               class="absolute left-3 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white ring-1 ring-inset ring-white/20 backdrop-blur transition hover:bg-black/80 disabled:cursor-not-allowed disabled:opacity-30"

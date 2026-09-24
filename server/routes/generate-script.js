@@ -7,9 +7,9 @@ import { scriptHash } from '../scriptHash.js'
 
 import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, enrichShotIntegrated, fixAxisFlips, extractFinalFrameFromIntegrated } from '../ai/doubao.js'
 import { ensureStandardScript } from '../ai/scriptFormat.js'
-import { assertScriptConfirmed, assertNotStale } from '../ai/guards.js'
+import { assertScriptConfirmed, assertNotStale, assertAssetsExist } from '../ai/guards.js'
 import { clearQcIgnores } from './qc.js'
-import { recordAlert } from '../ai/alerts.js'
+import { recordAlert, clearAlertsByRef } from '../ai/alerts.js'
 import { backfillStoryboardAssets } from '../ai/assetBackfill.js'
 import { runLightingChecks } from '../ai/lightingCheckRuntime.js'
 import { snapshotBeforeExtract, computeExtractDiff } from '../ai/extractGuard.js'
@@ -23,7 +23,16 @@ import { PHASE } from '../ai/progressPhases.js'
 import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
 import { routeIp, buildCharacterContext, resolveExplicitCharacters } from '../ai/ipRouter.js'
 import { remapSceneRefs } from '../ai/sceneIdRemap.js'
-import { uploadsDir } from '../paths.js'
+import { uploadsDir, tasksDir } from '../paths.js'
+
+// 项目画风的类别（realistic / 3d-special / 2d …），供毒词豁免分桶使用；查不到返回空（退回仅按画风名豁免）。
+function styleCategoryOf(label) {
+  const s = String(label || '').trim()
+  if (!s) return ''
+  try {
+    return String(queryOne('SELECT category_key FROM style_presets WHERE label = ? LIMIT 1', [s])?.category_key || '')
+  } catch { return '' }
+}
 
 const SB_TASK = {
   GENERATE: 'storyboard',
@@ -245,7 +254,7 @@ function recordPipelineDiff(trigger, episodeId, table, oldMap, incoming) {
   }
 }
 
-async function runFullPipeline(taskId, episodeId, prompt, options) {  const { generateImages = true, generateVideos = true } = options
+async function runFullPipeline(taskId, episodeId, prompt, options) {  const { generateImages = true } = options
 
   const assetContext = await buildAssetContextForPrompt(prompt, episodeId, options.characterIds)
 
@@ -378,6 +387,7 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
   const storyboard = await generateStoryboard(script, project?.art_style || config.defaultArtStyle, assets, {
     targetDuration: options.targetDuration,
     onProgress: makeReporter(episodeId, SB_TASK.GENERATE),
+    styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle),
   })
 
   backfillStoryboardAssets(storyboard, assets)
@@ -387,10 +397,15 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
 
   const shotIds = transaction(() => {
     const oldScenes = query('SELECT id FROM storyboard_scenes WHERE episode_id = ?', [episodeId])
+    const removedShotIds = []
     for (const s of oldScenes) {
+      const ids = query('SELECT id FROM shots WHERE storyboard_scene_id = ?', [s.id]).map((r) => r.id)
+      removedShotIds.push(...ids)
       execute('DELETE FROM shots WHERE storyboard_scene_id = ?', [s.id])
     }
+    clearAlertsByRef('shot', removedShotIds)
     execute('DELETE FROM storyboard_scenes WHERE episode_id = ?', [episodeId])
+    clearAlertsByRef('scene', oldScenes.map((s) => s.id))
 
     const ids = []
     for (let si = 0; si < (storyboard.scenes || []).length; si++) {
@@ -404,8 +419,8 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
       for (let shi = 0; shi < (s.shots || []).length; shi++) {
         const shot = s.shots[shi]
         const shotResult = execute(
-          `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             sceneId,
             `${si + 1}-${shi + 1}`,
@@ -429,6 +444,13 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
               ? (shot.isCombat ? 1 : 0)
               : (classifyShotCombat(shot) ? 1 : 0),
             shot.camera_angle || shot.cameraAngle || '',
+            // /full 为 DELETE 后全新建，无旧值，叙事层字段直接写值（与 episodes.js 的 narrativeFields 同口径）
+            shot.purpose || null,
+            shot.goal || null,
+            shot.emotionTone || shot.emotion_tone || null,
+            shot.infoPoints?.length ? JSON.stringify(shot.infoPoints)
+              : (shot.info_points?.length ? JSON.stringify(shot.info_points) : null),
+            shot.worldStateOut || shot.world_state_out || null,
           ]
         )
         ids.push(shotResult.lastInsertRowid)
@@ -438,47 +460,6 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
   })
   clearQcIgnores(episodeId)
   updateTask(taskId, { progress: 50, message: '分镜脚本生成完成' })
-
-  const assetIndex = new Map()
-  for (const c of mergeMasterIntoEpisodeCharacters(
-    query('SELECT id, name, description, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
-  )) {
-    if (c.description) assetIndex.set(c.name, `角色「${c.name}」：${c.description}`)
-  }
-  for (const sc of query('SELECT title, summary FROM scenes WHERE episode_id = ?', [episodeId])) {
-    if (sc.summary) assetIndex.set(sc.title, `场景「${sc.title}」：${sc.summary}`)
-  }
-  for (const p of query('SELECT name, description FROM props WHERE episode_id = ?', [episodeId])) {
-    if (p.description) assetIndex.set(p.name, `道具「${p.name}」：${p.description}`)
-  }
-  function buildShotAssetBrief(shot) {
-    try {
-      const names = [
-        ...JSON.parse(shot.characters || '[]'),
-        ...JSON.parse(shot.scene_assets || '[]'),
-        ...JSON.parse(shot.prop_assets || '[]'),
-      ]
-      const parts = names.map((n) => assetIndex.get(n)).filter(Boolean)
-      if (!parts.length) return ''
-      return `。画面要素必须严格遵循以下设定：【${parts.join('；')}】`
-    } catch {
-      return ''
-    }
-  }
-  function parseShotBlocking(s) {
-    try { return s.blocking_plan ? JSON.parse(s.blocking_plan) : null } catch { return null }
-  }
-  let stylePromptText = project?.art_style || ''
-  try {
-    if (stylePromptText) {
-      const sp = queryOne('SELECT prompt FROM style_presets WHERE label = ? LIMIT 1', [stylePromptText])
-      if (sp?.prompt) stylePromptText = sp.prompt
-    }
-  } catch {  }
-  const stylePrefix = stylePromptText ? `${stylePromptText}，` : ''
-  const styleGuard = project?.art_style
-    ? `。【画风统一约束】整幅画面严格统一为「${project.art_style}」画风，线条、上色、光影、质感与上述画风描述完全一致，禁止偏离画风`
-    : ''
 
   const failedImageCount = 0
   const attemptedImages = generateImages ? shotIds.length : 0
@@ -649,6 +630,13 @@ router.post('/enrich-storyboard', async (req, res) => {
   const { episodeId, onlyMissing = false } = req.body
   if (!episodeId) return res.status(400).json({ error: 'episodeId 必填' })
 
+  try {
+    assertScriptConfirmed(episodeId)
+    assertAssetsExist(episodeId)
+  } catch (err) {
+    return res.status(err.status || 400).json({ error: err.message })
+  }
+
   const episode = queryOne('SELECT * FROM episodes WHERE id = ?', [episodeId])
   if (!episode) return res.status(404).json({ error: '集不存在' })
   const project = queryOne('SELECT art_style FROM projects WHERE id = ?', [episode.project_id])
@@ -720,7 +708,7 @@ router.post('/enrich-storyboard', async (req, res) => {
           if (attempt > 0) {
             await new Promise(r => setTimeout(r, 3000 * attempt))
           }
-          const integrated = await enrichShotIntegrated(shotForAI, assets, project?.art_style || config.defaultArtStyle, { directorNotes: episode.director_notes || '' })
+          const integrated = await enrichShotIntegrated(shotForAI, assets, project?.art_style || config.defaultArtStyle, { directorNotes: episode.director_notes || '', styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle) })
           if (integrated) {
             const finalFrame = extractFinalFrameFromIntegrated(integrated)
             execute(
@@ -835,6 +823,7 @@ router.post('/storyboard', async (req, res) => {
   try {
     assertScriptConfirmed(episodeId)
     assertNotStale(episodeId, 'assets')
+    assertAssetsExist(episodeId)
   } catch (err) {
     return res.status(err.status || 400).json({ error: err.message })
   }
@@ -862,6 +851,7 @@ router.post('/storyboard', async (req, res) => {
       targetDuration,
       directorNotes: episode.director_notes || '',
       onProgress: makeReporter(episodeId, SB_TASK.GENERATE),
+      styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle),
     })
     backfillStoryboardAssets(storyboard, assets)
     res.json({ success: true, storyboard, unmatched: storyboard.unmatched || [] })
@@ -885,6 +875,7 @@ router.post('/storyboard-from-file', async (req, res) => {
 
   try {
     assertNotStale(episodeId, 'assets')
+    assertAssetsExist(episodeId)
   } catch (err) {
     return res.status(err.status || 400).json({ error: err.message })
   }
@@ -918,6 +909,7 @@ router.post('/storyboard-from-file', async (req, res) => {
     const storyboard = await generateStoryboardFromFile(fileContent, project?.art_style || config.defaultArtStyle, assets, {
       directorNotes: episode.director_notes || '',
       onProgress: makeReporter(episodeId, SB_TASK.FROM_FILE),
+      styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle),
     })
     backfillStoryboardAssets(storyboard, assets)
     res.json({ success: true, storyboard, unmatched: storyboard.unmatched || [] })

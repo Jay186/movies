@@ -1,11 +1,12 @@
 {
-  "name": "short-drama-platform",
+  "name": "ai-short-drama-platform",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "start": "node start.js",
+    "test": "node --test \"server/__tests__/*.test.mjs\" \"src/utils/__tests__/*.test.js\"",
     "build": "vite build",
     "preview": "vite preview"
   },

@@ -8,7 +8,7 @@ export const PROP_ANCHOR_TYPE = 'prop'
 
 export const LAYOUT_ANCHOR_TYPE = 'layout'
 
-export const SPATIAL_SERIES_ANCHOR_TYPES = ['scene', SPATIAL_ANCHOR_TYPE, LAYOUT_ANCHOR_TYPE]
+const SPATIAL_SERIES_ANCHOR_TYPES = ['scene', SPATIAL_ANCHOR_TYPE, LAYOUT_ANCHOR_TYPE]
 
 export function isSpatialSeriesAnchor(anchor) {
   return SPATIAL_SERIES_ANCHOR_TYPES.includes(String(anchor?.type || ''))
@@ -24,10 +24,11 @@ export const REVIEW_STATUS = {
 export const REVIEW_ACTION = {
   CONFIRM: 'confirm',
   SKIP: 'skip',
+  CLEAR: 'clear',
 }
 
 
-export function normalizeElementPhrase(x) {
+function normalizeElementPhrase(x) {
   return String(x ?? '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -88,7 +89,7 @@ export const LAYOUT_IMAGE_NEGATIVE =
   '⚠️ 画面中**绝对不要出现任何文字、汉字、字母、数字、标签、注记、标题、题注**——' +
   '常见的"示意图带名称标注"范式在这里是错的，被标注的物体用图形本身表达即可，不要用文字指认。' +
   '不要出现图例框、比例尺、指北针、箭头、指引线、坐标格、边框、眼睛/机位图标或任何符号标记。' +
-  '不要出现任何角色、人物、动物（包括本片主角），也不要画雪地脚印、足迹或任何暗示角色在场的痕迹。' +
+  '不要出现任何角色、人物、动物（包括本片主角），也不要画脚印、足迹或任何暗示角色在场的痕迹。' +
   '不要新增未被列出的物体（不要自行添加树木、花草动物、建筑、器物）。' +
   '不要画天空、不要画地平线、不要画光照氛围与光线方向、不要表现色温或色调氛围。' +
-  '不要画雾、云、水汽、雨、雪等任何大气现象，也不要画雪地反光、冰面高光或云絮质感——本图只表达地形与物体的平面位置和朝向。'
+  '不要画雾、云、水汽、雨、雪等任何大气现象，也不要画湿地反光、水面高光或云絮质感——本图只表达地形与物体的平面位置和朝向。'

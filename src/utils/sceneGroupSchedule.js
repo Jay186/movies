@@ -1,8 +1,16 @@
 
-export function buildSceneGroupChains(targets, groupInfo) {
+// targets：待出图场景；groupInfo：场景ID → { group, sceneNumber }；
+// options.parallel === true 时组内不编链——每个目标独立成单链，
+// 由批量层的 worker 池按 concurrency 统一并发（同组也并行）。
+// 默认（parallel 不开）：同组编一条链严格串行，保证锚点生效时序。
+export function buildSceneGroupChains(targets, groupInfo, options = {}) {
   const list = Array.isArray(targets) ? targets.slice() : []
 
-  if (!groupInfo || !Object.keys(groupInfo).length) return list.length ? [list] : []
+  if (!list.length) return []
+
+  if (options.parallel) return list.map((t) => [t])
+
+  if (!groupInfo || !Object.keys(groupInfo).length) return [list]
 
   const buckets = new Map() 
   const solo = [] 

@@ -9,8 +9,6 @@ import path from 'node:path'
 import { uploadsDir } from '../paths.js'
 import { shrinkRefImage } from './refImage.js'
 
-
-
 async function resolveImageSource(source) {
   const s = String(source).trim()
 
@@ -54,8 +52,7 @@ async function buildReferenceImages(sources) {
   return out
 }
 
-
-async function fetchJson(url, init, timeoutMs = 30000) {
+async function fetchJson(url, init, timeoutMs = config.timeouts.http.default) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -146,7 +143,7 @@ function getVisionaryDispatcher() {
   return visionaryDispatcher
 }
 
-async function proxiedDownload(url, maxRedirects = 3, timeoutMs = 180000) {
+async function proxiedDownload(url, maxRedirects = 3, timeoutMs = config.timeouts.http.download) {
   await assertSafeDownloadTarget(url, allowHosts())
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -170,7 +167,7 @@ async function proxiedDownload(url, maxRedirects = 3, timeoutMs = 180000) {
   }
 }
 
-export async function persistResult(url, filename) {
+async function persistResult(url, filename) {
   fs.mkdirSync(uploadsDir, { recursive: true })
   let buf
   try {

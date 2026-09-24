@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS projects (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL DEFAULT '新项目',
   theme TEXT DEFAULT '',
-  art_style TEXT DEFAULT '吉卜力风格',
+  art_style TEXT DEFAULT '',
   aspect_ratio TEXT DEFAULT '9:16 (Portrait Widescreen)',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS scenes (
   location TEXT DEFAULT '',
   time_of_day TEXT DEFAULT '',
   prop_names TEXT DEFAULT '[]',
+  gen_context TEXT DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
@@ -144,10 +145,41 @@ CREATE TABLE IF NOT EXISTS shots (
   non_diegetic_music TEXT DEFAULT '',
   integrated_multimodal_description TEXT DEFAULT '',
   blocking_plan TEXT DEFAULT '', 
-  final_frame TEXT DEFAULT '', 
+  final_frame TEXT DEFAULT '',
+  locked INTEGER DEFAULT 0,
+  purpose TEXT DEFAULT '',
+  goal TEXT DEFAULT '',
+  emotion_tone TEXT DEFAULT '',
+  info_points TEXT DEFAULT '[]',
+  world_state_in TEXT DEFAULT '',
+  world_state_out TEXT DEFAULT '',
+  shot_role TEXT DEFAULT '',
+  related_shot_id INTEGER,
+  script_span TEXT DEFAULT '',
+  qc_status TEXT DEFAULT '',
+  qc_report TEXT DEFAULT '',
+  qc_waived TEXT DEFAULT '[]',
+  version INTEGER DEFAULT 1,
+  parent_id INTEGER,
+  edited_by TEXT DEFAULT '',
+  anchor_refs_snapshot TEXT DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (storyboard_scene_id) REFERENCES storyboard_scenes(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS shot_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  shot_id INTEGER NOT NULL,
+  episode_id INTEGER NOT NULL,
+  storyboard_scene_id INTEGER NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  edited_by TEXT DEFAULT '',
+  reason TEXT DEFAULT '',
+  snapshot TEXT NOT NULL DEFAULT '{}',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shot_versions_shot ON shot_versions(shot_id, version);
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
@@ -256,25 +288,6 @@ CREATE TABLE IF NOT EXISTS asset_image_history (
 );
 CREATE INDEX IF NOT EXISTS idx_asset_hist_asset ON asset_image_history(asset_type, asset_id, id);
 
-CREATE TABLE IF NOT EXISTS video_segments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  episode_id INTEGER NOT NULL,
-  scene_number INTEGER NOT NULL,          
-  segment_index INTEGER NOT NULL,       
-  shot_ids TEXT NOT NULL,                
-  shot_numbers TEXT NOT NULL DEFAULT '',
-  start_time REAL,                       
-  end_time REAL,                         
-  video_url TEXT DEFAULT '',             
-  anchor_frame_url TEXT DEFAULT '',      
-  trim_start REAL NOT NULL DEFAULT 0,    
-  shots_fp TEXT NOT NULL DEFAULT '',     
-  status TEXT NOT NULL DEFAULT 'pending',
-  error TEXT DEFAULT ''                  
-);
-CREATE INDEX IF NOT EXISTS idx_video_segments_ep ON video_segments(episode_id, scene_number, segment_index);
-
 CREATE TABLE IF NOT EXISTS scene_analysis (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   episode_id INTEGER NOT NULL,
@@ -321,6 +334,25 @@ CREATE TABLE IF NOT EXISTS scene_anchors (
   FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_scene_anchors_ep ON scene_anchors(episode_id, anchor_type);
+
+CREATE TABLE IF NOT EXISTS layout_anchor_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  episode_id INTEGER NOT NULL,
+  spatial_group TEXT NOT NULL,
+  image_url TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  source_fingerprint TEXT DEFAULT '',
+  FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_layout_anchor_history_ep ON layout_anchor_history(episode_id, spatial_group, id);
+
+CREATE TABLE IF NOT EXISTS episode_layout_route (
+  episode_id INTEGER PRIMARY KEY,
+  route TEXT NOT NULL DEFAULT 'on',
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS spatial_group_review (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

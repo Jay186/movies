@@ -27,30 +27,16 @@ export function runBootChecks() {
     ? line(OK, 'RunningHub', 'API Key 已配置（出片/生图可用）')
     : line(ERROR, 'RunningHub', 'API Key 未配置——出片与生图全部不可用'))
 
-  safe('观片闸 VLM', () => config.llm.vlmModel
-    ? line(OK, '观片闸 VLM', `${config.llm.vlmModel}（出片后自动评审）`)
-    : line(WARN, '观片闸 VLM', 'LLM_VLM_MODEL 为空 = 观片闸关闭，出片后无第一观众结论（只剩人工看片）'))
-
-  safe('MC 续镜', () => {
-    const on = config.runninghub.motionContext?.enabled === true
-    const id = String(config.runninghub.workflows?.h3V4mc || '').trim()
-    if (!on) return line(WARN, 'MC 续镜', 'RH_MOTION_CONTEXT_ENABLED 非 true = 全片走普通出片，接缝无 MC 锚定（画面/环境音不连贯）')
-    if (!id) return line(ERROR, 'MC 续镜', '开关开了但 h3V4mc 工作流 ID 为空 = 全部静默降级普通版！')
-    return line(OK, 'MC 续镜', `开启（工作流 ${id}）`)
-  })
-
   safe('出片工作流', () => {
     const wf = config.runninghub.workflows || {}
     const engines = [
-      ['h3V4', '全能V4'],
-      ['videoMultiRef', '标准'],
-      ['h3StoryboardV2', '增强'],
+      ['h3V4vc', '全能V5·SelfLift'],
       ['h3Combat', '打斗'],
     ]
     const missing = engines.filter(([k]) => !String(wf[k] || '').trim()).map(([, name]) => name)
     return missing.length
       ? line(ERROR, '出片工作流', `以下引擎工作流 ID 为空，整条不可用：${missing.join('、')}`)
-      : line(OK, '出片工作流', `4 套引擎齐备（${engines.map(([, n]) => n).join('/')}）`)
+      : line(OK, '出片工作流', `2 套引擎齐备（${engines.map(([, n]) => n).join('/')}）`)
   })
 
   safe('告警通道', () => {

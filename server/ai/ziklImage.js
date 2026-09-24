@@ -22,7 +22,7 @@ function getZiklDispatcher() {
   return ziklDispatcher
 }
 
-async function fetchWithRetry(url, init, { timeoutMs = 300000, attempts = 3, backoff = [1500, 4000] } = {}) {
+async function fetchWithRetry(url, init, { timeoutMs = config.timeouts.http.generate, attempts = 3, backoff = [1500, 4000] } = {}) {
   let res = null
   let lastErr = null
   for (let attempt = 0; attempt < attempts; attempt++) {

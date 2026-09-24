@@ -23,47 +23,29 @@ execute(`CREATE TABLE IF NOT EXISTS salvage_queue (
   status TEXT DEFAULT 'pending'
 )`)
 
-{
-  const cols = query('PRAGMA table_info(salvage_queue)').map((c) => c.name)
-  if (!cols.includes('target_kind')) {
-    execute("ALTER TABLE salvage_queue ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'shot'")
-    console.log('[salvage] 迁移：salvage_queue 添加 target_kind 字段')
-  }
-  if (!cols.includes('segment_id')) {
-    execute('ALTER TABLE salvage_queue ADD COLUMN segment_id INTEGER')
-    console.log('[salvage] 迁移：salvage_queue 添加 segment_id 字段')
-  }
-}
-
-export function enqueueSalvage({ shotId, shotNumber, segmentId, segmentLabel, episodeId, taskId, url }) {
-  const isSegment = segmentId != null
-  const targetKind = isSegment ? 'segment' : 'shot'
+export function enqueueSalvage({ shotId, shotNumber, episodeId, taskId, url }) {
   try {
-    const existing = isSegment
-      ? query("SELECT id FROM salvage_queue WHERE segment_id = ? AND target_kind = 'segment' AND status = 'pending'", [Number(segmentId)])[0]
-      : query("SELECT id FROM salvage_queue WHERE shot_id = ? AND target_kind = 'shot' AND status = 'pending'", [Number(shotId)])[0]
-    const label = isSegment ? (segmentLabel || `段 ${segmentId}`) : (shotNumber || shotId)
+    const existing = query("SELECT id FROM salvage_queue WHERE shot_id = ? AND status = 'pending'", [Number(shotId)])[0]
+    const label = shotNumber || shotId
     if (existing) {
       execute(`UPDATE salvage_queue SET task_id = COALESCE(?, task_id), url = COALESCE(?, url), episode_id = COALESCE(?, episode_id), shot_number = COALESCE(?, shot_number), enqueued_at = ?, attempts = 0, last_error = NULL WHERE id = ?`,
         [taskId || null, url || null, episodeId || null, label || null, new Date().toISOString(), existing.id])
     } else {
       execute(
-        `INSERT INTO salvage_queue (shot_id, shot_number, episode_id, task_id, url, enqueued_at, target_kind, segment_id)
-         VALUES (?,?,?,?,?,?,?,?)`,
-        [isSegment ? 0 : (Number(shotId) || 0), label || null, episodeId || null, taskId || null, url || null,
-          new Date().toISOString(), targetKind, isSegment ? Number(segmentId) : null]
+        `INSERT INTO salvage_queue (shot_id, shot_number, episode_id, task_id, url, enqueued_at)
+         VALUES (?,?,?,?,?,?)`,
+        [Number(shotId) || 0, label || null, episodeId || null, taskId || null, url || null,
+          new Date().toISOString()]
       )
     }
-    console.log(`[salvage] ${isSegment ? `段 ${label}` : `镜 ${label}`} 已登记打捞队列（taskId=${taskId || '无'}）`)
+    console.log(`[salvage] 镜 ${label} 已登记打捞队列（taskId=${taskId || '无'}）`)
   } catch (e) {
     console.warn('[salvage] 登记打捞失败（不影响主流程）:', e.message)
   }
 }
 
 function describeTarget(row) {
-  return row.target_kind === 'segment'
-    ? `段 ${row.shot_number || row.segment_id}`
-    : `镜 ${row.shot_number || row.shot_id}`
+  return `镜 ${row.shot_number || row.shot_id}`
 }
 
 async function collectCandidates(row) {
@@ -113,11 +95,7 @@ async function salvageOnce() {
         console.warn(`[salvage] ${describeTarget(row)} 第 ${row.attempts + 1} 次打捞失败（${candidates.size} 个候选），5 分钟后再试`)
         continue
       }
-      if (row.target_kind === 'segment') {
-        await salvageSegmentRow(row, buf)
-      } else {
-        salvageShotRow(row, buf)
-      }
+      salvageShotRow(row, buf)
     } catch (e) {
       execute(`UPDATE salvage_queue SET attempts = attempts + 1, last_attempt_at = ?, last_error = ? WHERE id = ?`,
         [new Date().toISOString(), String(e.message || e).slice(0, 200), row.id])
@@ -144,64 +122,12 @@ function salvageShotRow(row, buf) {
   }
 }
 
-async function sliceAfterSegSalvage(segmentId, row) {
-  try {
-    const { sliceSegment } = await import('./ai/segmentSlicer.js')
-    const r = await sliceSegment(Number(segmentId), { force: true })
-    if (r?.success) {
-      console.log(`[salvage] 段 ${segmentId} 捞回后补切片成功：${r.slices?.length || 0} 份`)
-      return r
-    }
-    const msg = r?.stale
-      ? '段方案已过期（指纹失配）'
-      : (r?.warning || '未知原因')
-    console.warn(`[salvage] 段 ${segmentId} 捞回后补切片未成功：${msg}`)
-    recordAlert({
-      episodeId: row.episode_id, shotId: null, shotNumber: String(row.shot_number || ''),
-      source: 'salvage', level: 'error',
-      message: `段 ${row.shot_number || segmentId} 成片已捞回本地，但补切片未成功（${msg}）。段内镜头仍无画面——请在分镜页重算段方案后手动切片。`,
-    })
-    return r
-  } catch (e) {
-    console.warn(`[salvage] 段 ${segmentId} 补切片异常：`, e.message)
-    recordAlert({
-      episodeId: row.episode_id, shotId: null, shotNumber: String(row.shot_number || ''),
-      source: 'salvage', level: 'error',
-      message: `段 ${row.shot_number || segmentId} 成片已捞回本地，但补切片抛错：${String(e.message || e).slice(0, 200)}。段内镜头仍无画面。`,
-    })
-    return null
-  }
-}
-
-async function salvageSegmentRow(row, buf) {
-  const segmentId = Number(row.segment_id)
-  const filename = `segment_${segmentId}_salvage_${Date.now()}.mp4`
-  fs.mkdirSync(uploadsDir, { recursive: true })
-  fs.writeFileSync(path.join(uploadsDir, filename), buf)
-  const res = execute(
-    `UPDATE video_segments SET video_url = ?, status = 'done', error = ''
-      WHERE id = ? AND (video_url IS NULL OR video_url = '' OR video_url NOT LIKE '/uploads/%')`,
-    [`/uploads/${filename}`, segmentId]
-  )
-  if (res.changes > 0) {
-    console.log(`[salvage] ✓ 段 ${segmentId} 打捞成功 → /uploads/${filename}（${(buf.length / 1048576).toFixed(1)}MB），开始补切片`)
-    execute(`UPDATE salvage_queue SET status = 'done', last_attempt_at = ? WHERE id = ?`, [new Date().toISOString(), row.id])
-    recordAlert({ episodeId: row.episode_id, shotId: null, shotNumber: String(row.shot_number || ''), source: 'salvage', level: 'info',
-      message: `段 ${row.shot_number || segmentId} 成片打捞成功（第 ${row.attempts + 1} 次尝试）：已回写本地并自动补切片，段内镜头画面恢复` })
-    await sliceAfterSegSalvage(segmentId, row)
-  } else {
-    try { fs.unlinkSync(path.join(uploadsDir, filename)) } catch {  }
-    execute(`UPDATE salvage_queue SET status = 'done', last_attempt_at = ?, last_error = '库里段成片已是本地片，打捞旧片弃用' WHERE id = ?`, [new Date().toISOString(), row.id])
-    console.log(`[salvage] 段 ${segmentId} 库里已是本地成片，打捞到的旧片弃用`)
-  }
-}
-
 let timer = null
 export function startSalvageWorker() {
   if (timer) return 
   setTimeout(() => { salvageOnce().catch((e) => console.warn('[salvage] 扫描异常:', e.message)) }, 60000)
   timer = setInterval(() => { salvageOnce().catch((e) => console.warn('[salvage] 扫描异常:', e.message)) }, INTERVAL_MS)
   timer.unref?.() 
-  console.log('[salvage] 成片打捞守护已启动（每 5 分钟扫描，50 分钟窗口；覆盖镜头与段）')
+  console.log('[salvage] 成片打捞守护已启动（每 5 分钟扫描，50 分钟窗口）')
 }
 

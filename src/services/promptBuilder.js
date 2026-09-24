@@ -21,42 +21,13 @@ const CAMERA_EN = {
   升降: 'crane movement',
 }
 
-
-export const ASSET_NEGATIVE_PHRASE =
+const ASSET_NEGATIVE_PHRASE =
   'no people, no characters, no animals, no hands, no creatures, empty scene, 无人物, 无角色, 无动物'
 
 export const ELEMENT_WEIGHT = 1.35
 
 export const ELEMENT_NOTE_TAG = '【本场必须可见的要素】'
 export const SHARED_ENV_NOTE_TAG = '【同空间共有环境】'
-
-export function normalizeElementPhrase(x) {
-  return String(x ?? '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[。．.；;，,、;:！!？?~～\-—－]+$/, '')
-    .trim()
-    .slice(0, 24)
-}
-
-export function parseElementList(raw) {
-  let arr = []
-  try {
-    const v = JSON.parse(raw || '[]')
-    arr = Array.isArray(v) ? v : []
-  } catch {
-    return []
-  }
-  const seen = new Set()
-  const out = []
-  for (const item of arr) {
-    const s = normalizeElementPhrase(item)
-    if (!s || seen.has(s)) continue
-    seen.add(s)
-    out.push(s)
-  }
-  return out
-}
 
 export function buildElementNote(elements) {
   const list = Array.isArray(elements) ? elements.filter(Boolean) : []
@@ -124,7 +95,7 @@ function extractAssetStyle(stylePrompt) {
   return filterAssetStyleClauses(stylePrompt)
 }
 
-export function resolveAssetStyleText(stylePrompt, styleLabel) {
+function resolveAssetStyleText(stylePrompt, styleLabel) {
   const full = String(stylePrompt || '').trim()
   const label = String(styleLabel || '').trim()
   if (full && full !== label) return full

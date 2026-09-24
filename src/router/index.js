@@ -31,7 +31,7 @@ const routes = [
   {
     path: '/settings',
     name: 'settings',
-    component: () => import('../views/SettingsView.vue'),
+    component: () => import('../views/AssetsView.vue'),
     meta: { tab: 'settings', title: '设定' },
   },
   {

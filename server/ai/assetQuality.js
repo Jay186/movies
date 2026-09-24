@@ -1,23 +1,23 @@
 
 import crypto from 'node:crypto'
+import { parseJsonLoose } from './shared.js'
 
-export const LIGHTING_VERDICTS = ['consistent', 'conflict', 'insufficient']
+const LIGHTING_VERDICTS = ['consistent', 'conflict', 'insufficient']
 
 export const LIGHTING_TASK = 'lighting-check'
 
-export function lightingFingerprint(summary, lightingEn) {
+function lightingFingerprint(summary, lightingEn) {
   const s = String(summary == null ? '' : summary).trim()
   const l = String(lightingEn == null ? '' : lightingEn).trim()
   if (!s || !l) return ''
   return crypto.createHash('md5').update(s + '\u0001' + l).digest('hex')
 }
 
-export function parseLightingVerdict(raw) {
+function parseLightingVerdict(raw) {
   const fallback = { verdict: 'unknown', reason: '' }
   try {
-    const m = String(raw || '').match(/\{[\s\S]*\}/)
-    if (!m) return fallback
-    const parsed = JSON.parse(m[0])
+    const parsed = parseJsonLoose(raw, null)
+    if (!parsed) return fallback
     const v = String(parsed.verdict || '').trim().toLowerCase()
     if (!LIGHTING_VERDICTS.includes(v)) return fallback
     return { verdict: v, reason: String(parsed.reason || '').slice(0, 300) }
@@ -26,7 +26,7 @@ export function parseLightingVerdict(raw) {
   }
 }
 
-export function buildLightingPrompt(summary, lightingEn) {
+function buildLightingPrompt(summary, lightingEn) {
   return `你是影视美术指导，负责检查一条**场景设定**的内部自洽性。
 
 一条场景设定由两部分组成：
@@ -43,7 +43,7 @@ ${lightingEn}
 
 判断时请注意：
 - 要看**整体主调**，不要因为描述里提到一个远处的、次要的、或作为背景一笔带过的元素就改变结论。
-  例如"暖阳下远处山脊有一线积雪"的整体主调是**暖**，不是冷。
+  例如"暖阳下远处山脊有一片薄雾"的整体主调是**暖**，不是冷。
 - 光影常量里也可能出现环境名词（如 snow / mist）却仍是暖调（如 sunlit），
   要以**色温与光质**为准，不要被单个名词带走。
 - 若两段描述谈的根本不是同一个场景、或信息不足以判断色调，判 insufficient。

@@ -1,14 +1,4 @@
 
-export function countLocksByGroup(locks) {
-  const map = {}
-  for (const l of Array.isArray(locks) ? locks : []) {
-    const g = String(l?.group || '').trim()
-    if (!g) continue
-    map[g] = (map[g] || 0) + 1
-  }
-  return map
-}
-
 export function isSceneLocked(sceneId, locks) {
   const id = String(sceneId)
   return (Array.isArray(locks) ? locks : []).some((l) => String(l?.sceneId) === id)

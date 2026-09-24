@@ -181,7 +181,7 @@ onMounted(loadProjects)
     <div v-if="showCreateDialog" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showCreateDialog = false">
       <form class="w-full max-w-md border border-[#3c3c3c] bg-[#202020] p-6 shadow-2xl" @submit.prevent="createProject">
         <div class="mb-5 flex items-center justify-between"><h2 class="text-lg font-semibold">新建项目</h2><button type="button" class="text-white/40 hover:text-white" @click="showCreateDialog = false">×</button></div>
-        <label class="mb-4 block text-xs text-white/60">项目名称<input v-model="newProjectTitle" autofocus class="mt-2 w-full border border-[#404040] bg-[#151515] px-3 py-2.5 text-sm outline-none focus:border-[#c7ff00]" placeholder="例如：布布与一二的野餐日记" /></label>
+        <label class="mb-4 block text-xs text-white/60">项目名称<input v-model="newProjectTitle" autofocus class="mt-2 w-full border border-[#404040] bg-[#151515] px-3 py-2.5 text-sm outline-none focus:border-[#c7ff00]" placeholder="例如：雪山冒险·第一季" /></label>
         <label class="mb-6 block text-xs text-white/60">项目简介（可选）<textarea v-model="newProjectTheme" rows="3" class="mt-2 w-full resize-none border border-[#404040] bg-[#151515] px-3 py-2.5 text-sm outline-none focus:border-[#c7ff00]" placeholder="一句话描述故事主题" /></label>
         <div class="flex justify-end gap-3"><button type="button" class="border border-[#444] px-4 py-2 text-xs text-white/60" @click="showCreateDialog = false">取消</button><button type="submit" class="bg-[#c7ff00] px-5 py-2 text-xs font-semibold text-black disabled:opacity-50" :disabled="creating || !newProjectTitle.trim()">{{ creating ? '创建中...' : '创建并开始' }}</button></div>
       </form>

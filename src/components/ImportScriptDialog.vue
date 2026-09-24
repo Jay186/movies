@@ -266,7 +266,7 @@ async function confirmImport() {
             <textarea
               v-model="pasteText"
               class="h-56 w-full resize-none rounded-lg border border-border bg-bg-secondary p-3 text-sm leading-7 text-white placeholder-text-muted outline-none focus:border-accent/50"
-              placeholder="将剧本内容粘贴到这里，例如：&#10;&#10;场次1：雨夜森林&#10;场景：外景·森林·夜晚·暴雨&#10;布布（焦急）：&quot;一二，快跟上来！&quot;"
+              placeholder="将剧本内容粘贴到这里，例如：&#10;&#10;场次1：雨夜森林&#10;场景：外景·森林·夜晚·暴雨&#10;角色甲（焦急）：&quot;角色乙，快跟上来！&quot;"
               spellcheck="false"
             />
           </div>

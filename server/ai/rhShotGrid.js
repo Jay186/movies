@@ -41,7 +41,7 @@ export async function generateShotGridApp({ prompt, refs = [], usageContext = {}
   console.log('[generateShotGridApp] run ai-app', workflowId, '| slots:', Object.keys(values).join(','), '| refs:', refs.filter((r) => r.slot && !r.dup).map((r) => `${r.slot}:${r.type}(${r.name})`).join(' '))
   const result = await runWorkflow('shotGridApp', values, {
     usageContext: { task: 'shot-grid', ...usageContext },
-    timeout: 600000, 
+    timeout: config.timeouts.workflow.poll, 
   })
 
   if (result.success && Array.isArray(result.allResults) && result.allResults.length > 1) {

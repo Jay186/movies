@@ -3,6 +3,7 @@ import { clean as cleanShared } from './shared.js'
 import path from 'node:path'
 import fs from 'node:fs'
 import { uploadsDir } from '../paths.js'
+import { runFfmpeg } from './ffmpeg.js'
 
 
 
@@ -141,7 +142,7 @@ export function buildShotGridPrompt(shot, stylePrompt = '', charRows = [], scene
     : ''
 
   const costumePart = charRows.length
-    ? `【服装配饰锁定】四格中每个角色的服装与配饰必须与对应参考图完全一致；参考图中不存在的服装、围巾、帽子、背包、披风等配饰一律禁止添加——即使场景是雪地/冬天，也不得自行为角色添衣加帽。四格之间服装必须逐格完全相同。`
+    ? `【服装配饰锁定】四格中每个角色的服装与配饰必须与对应参考图完全一致；参考图中不存在的服装、围巾、帽子、背包、披风等配饰一律禁止添加——即使场景是户外/冬天，也不得自行为角色添衣加帽。四格之间服装必须逐格完全相同。`
     : ''
 
   const blockingText = extractBlockingText(shot.blocking_plan)

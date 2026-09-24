@@ -50,14 +50,6 @@ import { startSalvageWorker } from './salvageWorker.js'
 import { serverDir } from './paths.js'
 startSalvageWorker()
 
-try {
-  const { resetZombieSegments } = await import('./routes/generate-video.js')
-  const n = resetZombieSegments()
-  if (n > 0) console.log(`[Server] 已复位 ${n} 个中断的出片段（running → failed）`)
-} catch (e) {
-  console.warn('[Server] 僵尸段复位失败（不影响服务）：', e?.message || e)
-}
-
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() })
 })

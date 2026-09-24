@@ -1,17 +1,10 @@
 
 import crypto from 'crypto'
-import { query, queryOne, execute } from '../db.js'
+import { query, queryOne, execute, transaction } from '../db.js'
 import { chatCompletion } from './doubao.js'
-import { config } from '../config.js'
-import { recordAlert } from './alerts.js'
-import { TYPE_PROP } from './assetTypes.js'
-import { SCENE_ANCHOR_TYPE, PROP_ANCHOR_TYPE, SPATIAL_ANCHOR_TYPE, LAYOUT_ANCHOR_TYPE, LAYOUT_ANCHOR_HINT, parseElementList } from './anchorTypes.js'
+import { SPATIAL_ANCHOR_TYPE, LAYOUT_ANCHOR_TYPE, LAYOUT_ANCHOR_HINT, parseElementList } from './anchorTypes.js'
 import { loadGroupLocks, applyGroupLocks, getGroupLockOverview } from './sceneGroupLock.js'
-import {
-  buildAnchorKey, stripStateSuffix, scanOrphanStates, resolveState, displayLabel,
-} from './assetState.js'
-import { resolvePropName, buildPropLexiconHint } from './propNameMatch.js'
-import { bareUrl } from './shared.js'
+import { bareUrl, parseJsonLoose } from './shared.js'
 
 
 
@@ -26,55 +19,58 @@ const GROUP_ANCHOR_HINT =
   '时段、天气、色温同样以本场景文字描述为准'
 
 
-function loadPropStateRows(propName) {
-  if (!config.assetState?.enabled) return []
-  const name = String(propName || '').trim()
-  if (!name) return []
-  try {
-    return query(
-      `SELECT id, state_key, label_zh, description, description_en, image_url, is_default
-       FROM asset_states WHERE asset_type = ? AND asset_key = ?`,
-      [TYPE_PROP, name]
-    )
-  } catch (e) {
-    console.warn(`[sceneAnchors] 读资产状态失败（降级为默认态）: ${e.message}`)
-    return []
-  }
-}
-
-function defaultPropStateKey(propName) {
-  const rows = loadPropStateRows(propName)
-  if (!rows.length) return ''
-  const def = rows.find((r) => Number(r.is_default) === 1) || rows[0]
-  return String(def?.state_key || '')
-}
-
-function stateHintFor(propName) {
-  const rows = loadPropStateRows(propName)
-  if (!rows.length) return ''
-  const def = rows.find((r) => Number(r.is_default) === 1) || rows[0]
-  const st = resolveState(def?.state_key, rows)
-  if (!st.resolved) return ''
-  const label = displayLabel(st.stateKey, st.labelZh)
-  return `道具「${propName}」本场应处于「${label}」状态` +
-    (st.descriptionEn ? `（${st.descriptionEn}）` : '') +
-    `，其形态、颜色、材质与破损程度必须与该状态一致`
-}
-
 export function fingerprintOf(scenes) {
   const h = crypto.createHash('md5')
   for (const s of scenes) h.update(`${s.id}${s.scene_number}${s.title}${s.summary}#`)
   return h.digest('hex')
 }
 
+// 场景页是按「空间组」渲染的：没归组的场景会掉进平铺小卡区，形态和组卡对不上。
+// 手动新增或历史遗留的场景可能没有归组（scene_analysis 无行，或 spatial_group 为空）。
+// 这里把这类场景兜底补成「一场一组」——组名取场景标题，同名场景自然并成同一组。
+// 只补分组、不动指纹（要不要对齐指纹由调用方决定，见 episodes 保存逻辑）。
+export function normalizeSceneGrouping(episodeId) {
+  const scenes = query(
+    'SELECT id, scene_number, title, summary, image_url FROM scenes WHERE episode_id = ? ORDER BY scene_number',
+    [episodeId]
+  )
+  if (!scenes.length) return { grouped: 0 }
+
+  const analyzed = query(
+    'SELECT id, scene_id, spatial_group FROM scene_analysis WHERE episode_id = ?',
+    [episodeId]
+  )
+  const bySceneId = new Map(analyzed.map((r) => [r.scene_id, r]))
+  // 新增行沿用本剧集已有指纹，避免插出指纹不一致的行导致下次误判「场景变了」
+  const analyzedFp = analyzed.length
+    ? String(queryOne('SELECT fingerprint FROM scene_analysis WHERE episode_id = ? LIMIT 1', [episodeId])?.fingerprint || '')
+    : ''
+
+  let grouped = 0
+  for (const s of scenes) {
+    const row = bySceneId.get(s.id)
+    if (String(row?.spatial_group || '').trim()) continue
+    const groupName = String(s.title || '').trim() || `场景${s.scene_number}`
+    if (row) {
+      execute('UPDATE scene_analysis SET spatial_group = ?, scene_number = ? WHERE id = ?', [
+        groupName, s.scene_number, row.id,
+      ])
+    } else {
+      execute(
+        `INSERT INTO scene_analysis (episode_id, scene_id, scene_number, spatial_group, spatial_role, props_json, elements_json, shared_env_json, fingerprint)
+         VALUES (?, ?, ?, ?, '', '[]', '[]', '[]', ?)`,
+        [episodeId, s.id, s.scene_number, groupName, analyzedFp]
+      )
+    }
+    grouped++
+  }
+  return { grouped }
+}
+
 async function analyzeWithLlm(scenes, episodeId) {
   const sceneList = scenes
     .map((s) => `【场景${s.scene_number}】(scene_id=${s.id}) ${s.title}\n${s.summary || '（无描述）'}`)
     .join('\n\n')
-
-  const propLexiconHint = buildPropLexiconHint(
-    query('SELECT name FROM props WHERE episode_id = ?', [episodeId]).map((r) => r.name)
-  )
 
   const messages = [
     {
@@ -90,12 +86,14 @@ async function analyzeWithLlm(scenes, episodeId) {
         `   判断标准：站在一处能互相看见、或同一地点的不同视角/不同高度/内外关系，都算同组；剧情上完全无关的地点各自成组。\n` +
         `   每个场景都必须有组名（独立空间也要给唯一组名），不允许为空。\n` +
         `2. spatial_role：每个场景在其组内的具体位置或视角，用中文短语（如"崖顶俯视谷底""谷底浅滩仰视"）。\n` +
-        `3. shared_props：全集中**在 2 个及以上场景重复出现、外观必须保持一致**的具体有形物体（如桥、船、门、马车、古树）。\n` +
-        `   只列有形物体，不列天气/光照/水面等泛化环境；名字用简短中文（2~6 字）。\n` +
-        propLexiconHint +
-        `4. 每个场景的 props：该场景描述中实际出现的、属于 shared_props 的物体，名称必须与 shared_props 完全一致。\n` +
+        `3. shared_landmarks（场景固定大型物体）：全集中**在 2 个及以上场景重复出现、外观必须保持一致**的固定大型物体——\n` +
+        `   即构成空间本身的、不可移动的大型组成部分：建筑结构、地形、大型植物、固定设施（如桥、门、石碑、古树、井台）。\n` +
+        `   【判定标准】同时满足三条才列：① 不可移动；② 大型（不是能拿在手里的小物件）；③ 属于空间本身的组成部分。\n` +
+        `   不列天气/光照/水面等泛化环境；名字用简短中文（2~6 字）。\n` +
+        `   【范围边界】本任务只提取「场景的固定大型物体」；可交互、可手持的小型剧情物件不属于本任务范围（由道具资产单独管理），一律不列。\n` +
+        `4. 每个场景的 landmarks：该场景描述中实际出现的、属于 shared_landmarks 的固定大型物体，名称必须与 shared_landmarks 完全一致。\n` +
         `5. 每个场景的 elements：**该场景描述里明文写了、且必须在画面上看得见**的要素，用 2~6 字中文短语，\n` +
-        `   按重要性排序，最多 5 条（如"清晨浓雾""冰面浮冰""两截朽桥""石阶栈道"）。\n` +
+        `   按重要性排序，最多 5 条（如"清晨浓雾""老旧木桥""石阶栈道"）。\n` +
         `   只列**描述里真实写了的**，严禁推断或补充；描述没提的一律不得列入。\n` +
         `   判断标准：一条要素若在画面中缺失，这场景就画错了 —— 只有这样的才列。\n` +
         `   ⚠️ **天气与大气现象只要写了就必须列**（雾/云/雨/雪/风/水汽/天光/日晒/光线）：\n` +
@@ -104,15 +102,15 @@ async function analyzeWithLlm(scenes, episodeId) {
         `   "水流挤在乱石堆里翻着白花"→"乱石堆翻白花"）——只写"桥"等于把形态信息丢了。\n` +
         `6. 每组（spatial_group）的 shared_env：**同组所有场景共享**的环境特征，用 2~8 字中文短语，最多 6 条。\n` +
         `   从组内各场描述的交集与空间常识中提取属于该地点本身的稳定特征：植被、地质、水体、色调倾向、标志性地形。\n` +
-        `   只写"这个地方长什么样"，不写只在某一场出现的天气/时段，不写可移动道具（那些归 shared_props）。\n` +
+        `   只写"这个地方长什么样"，不写只在某一场出现的天气/时段，不写可移动器物（可移动器物不属于本任务范围）。\n` +
         `   ⚠️ 判断"是否共享"看的是**这个地点本身有没有**，不是"每场都写了没有"：\n` +
         `   某场若明确写了"这里没有雾"（如"谷底无雾"），说明雾是该地点的**局部现象**，不得进组卡；\n` +
         `   而植被/地质这类实存特征，哪怕某一场的描述只字未提，也照样进组卡——\n` +
         `   某场没提不代表那个地方没有，那一片山崖不会因为某一镜没写就没有松林。\n` +
-        `   举例：某组是冰河峡谷，则"灰白砾石滩""半山松林""冷蓝色调"都应列出——它们属于该地点，不随场次改变。\n\n` +
+        `   举例：某组是河谷场景，则"灰白砾石滩""半山松林""冷蓝色调"都应列出——它们属于该地点，不随场次改变。\n\n` +
         `输出 JSON（严格遵守此结构）：\n` +
-        `{"scenes":[{"scene_id":数字,"spatial_group":"...","spatial_role":"...","props":["..."],"elements":["..."]}],` +
-        ` "shared_props":["..."],"shared_env":{"组名":["..."]}}`,
+        `{"scenes":[{"scene_id":数字,"spatial_group":"...","spatial_role":"...","landmarks":["..."],"elements":["..."]}],` +
+        ` "shared_landmarks":["..."],"shared_env":{"组名":["..."]}}`,
     },
   ]
 
@@ -125,11 +123,9 @@ async function analyzeWithLlm(scenes, episodeId) {
 
   let parsed
   try {
-    parsed = JSON.parse(text)
+    parsed = parseJsonLoose(text)
   } catch {
-    const m = text.match(/\{[\s\S]*\}/)
-    if (!m) throw new Error('LLM 场景分析返回非 JSON')
-    parsed = JSON.parse(m[0])
+    throw new Error('LLM 场景分析返回非 JSON')
   }
   return validateAnalysis(parsed, scenes)
 }
@@ -138,19 +134,19 @@ function validateAnalysis(parsed, scenes) {
   const validIds = new Set(scenes.map((s) => s.id))
   const rows = []
 
-  const propSet = new Set()
-  if (Array.isArray(parsed?.shared_props)) {
-    for (const p of parsed.shared_props) {
+  const landmarkSet = new Set()
+  if (Array.isArray(parsed?.shared_landmarks)) {
+    for (const p of parsed.shared_landmarks) {
       const name = String(p || '').trim()
-      if (name) propSet.add(name)
+      if (name) landmarkSet.add(name)
     }
   }
   if (Array.isArray(parsed?.scenes)) {
     for (const r of parsed.scenes) {
-      if (!Array.isArray(r?.props)) continue
-      for (const p of r.props) {
+      if (!Array.isArray(r?.landmarks)) continue
+      for (const p of r.landmarks) {
         const name = String(p || '').trim()
-        if (name) propSet.add(name)
+        if (name) landmarkSet.add(name)
       }
     }
   }
@@ -162,15 +158,15 @@ function validateAnalysis(parsed, scenes) {
       scene_id: sceneId,
       spatial_group: String(r?.spatial_group || '').trim(),
       spatial_role: String(r?.spatial_role || '').trim(),
-      props: (Array.isArray(r?.props) ? r.props : [])
+      landmarks: (Array.isArray(r?.landmarks) ? r.landmarks : [])
         .map((p) => String(p || '').trim())
-        .filter((p) => p && propSet.has(p)),
+        .filter((p) => p && landmarkSet.has(p)),
       elements: parseElementList(JSON.stringify(Array.isArray(r?.elements) ? r.elements : [])).slice(0, MAX_ELEMENT_COUNT),
     })
   }
   for (const s of scenes) {
     if (!rows.some((r) => r.scene_id === s.id)) {
-      rows.push({ scene_id: s.id, spatial_group: '', spatial_role: '', props: [], elements: [] })
+      rows.push({ scene_id: s.id, spatial_group: '', spatial_role: '', landmarks: [], elements: [] })
     }
   }
 
@@ -184,7 +180,7 @@ function validateAnalysis(parsed, scenes) {
     if (cleaned.length) sharedEnv[name] = cleaned
   }
 
-  return { rows, sharedProps: [...propSet], sharedEnv }
+  return { rows, sharedEnv }
 }
 
 const analysisInFlight = new Map()
@@ -210,7 +206,7 @@ async function runEnsureSceneAnalysis(episodeId, { force = false } = {}) {
   const cur = queryOne('SELECT fingerprint FROM scene_analysis WHERE episode_id = ? LIMIT 1', [episodeId])
   if (!force && cur?.fingerprint === fp) return { ok: true, cached: true, sceneCount: scenes.length }
 
-  const { rows: llmRows, sharedProps, sharedEnv } = await analyzeWithLlm(scenes, episodeId)
+  const { rows: llmRows, sharedEnv } = await analyzeWithLlm(scenes, episodeId)
 
   const locks = loadGroupLocks(episodeId, { query, queryOne })
   const { rows, lockedCount, changedCount } = applyGroupLocks(llmRows, locks)
@@ -225,43 +221,28 @@ async function runEnsureSceneAnalysis(episodeId, { force = false } = {}) {
     execute(
       `INSERT INTO scene_analysis (episode_id, scene_id, scene_number, spatial_group, spatial_role, props_json, elements_json, shared_env_json, fingerprint)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [episodeId, r.scene_id, sn, r.spatial_group, r.spatial_role, JSON.stringify(r.props),
+      [episodeId, r.scene_id, sn, r.spatial_group, r.spatial_role, JSON.stringify(r.landmarks),
         JSON.stringify(r.elements || []), JSON.stringify(env), fp]
     )
   }
 
+  // 场景图不再登记 scene 锚（登记了没人读，已按用户决策移除）。
+  // 此 DELETE 保留：每次重析顺带清掉历史遗留的 auto 锚（scene/prop 类），
+  // 跑几轮后旧垃圾自然清空；layout/spatial 锚是 manual 来源，不受影响。
   execute(`DELETE FROM scene_anchors WHERE episode_id = ? AND source = 'auto'`, [episodeId])
-  for (const s of scenes) {
-    const img = bareUrl(s.image_url)
-    if (img) registerSceneAnchors(episodeId, s.id, img)
-  }
 
-  try {
-    if (config.assetState?.enabled) {
-      const stateRows = query(
-        `SELECT id, asset_key, state_key FROM asset_states WHERE asset_type = ?`,
-        [TYPE_PROP]
-      )
-      const liveAnchorKeys = query(
-        `SELECT anchor_key FROM scene_anchors WHERE episode_id = ? AND anchor_type = '${PROP_ANCHOR_TYPE}'`,
-        [episodeId]
-      ).map((a) => a.anchor_key)
-      const orphanReport = scanOrphanStates(stateRows, liveAnchorKeys)
-      if (orphanReport.orphans.length) {
-        recordAlert({
-          level: 'warn',
-          source: 'assetState',
-          episodeId,
-          message: `资产状态漂移：${orphanReport.orphans.length} 条状态行找不到对应锚点（重提资产后 id 变更所致），需人工重建`,
-          detail: JSON.stringify(orphanReport.orphans).slice(0, 2000),
-        })
-      }
-    }
-  } catch (e) {
-    console.warn('[sceneAnchors] 状态孤儿扫描失败（已忽略，不阻断）:', e.message)
-  }
+  // 重析后组名可能变了，清理失效的 layout 锚及其历史（组名在当前分组里已不存在）。
+  execute(
+    `DELETE FROM scene_anchors WHERE episode_id = ? AND anchor_type = '${LAYOUT_ANCHOR_TYPE}'
+     AND anchor_key NOT IN (SELECT DISTINCT spatial_group FROM scene_analysis WHERE episode_id = ? AND TRIM(spatial_group) != '')`,
+    [episodeId, episodeId]
+  )
+  execute(
+    `DELETE FROM layout_anchor_history WHERE episode_id = ? AND spatial_group NOT IN (SELECT DISTINCT spatial_group FROM scene_analysis WHERE episode_id = ? AND TRIM(spatial_group) != '')`,
+    [episodeId, episodeId]
+  )
 
-  return { ok: true, cached: false, sceneCount: scenes.length, sharedProps }
+  return { ok: true, cached: false, sceneCount: scenes.length }
 }
 
 export async function resolveSceneSpatialGroup(episodeId, sceneId) {
@@ -292,9 +273,11 @@ export async function listSceneSpatialGroups(episodeId) {
     return []
   }
   const rows = query(
-    `SELECT sa.scene_id, sa.scene_number, sa.spatial_group, sa.spatial_role, COALESCE(s.image_url, '') AS image_url
+    `SELECT sa.scene_id, sa.scene_number, sa.spatial_group, sa.spatial_role, COALESCE(s.image_url, '') AS image_url,
+            COALESCE(sgr.status, '') AS review_status
      FROM scene_analysis sa
      LEFT JOIN scenes s ON s.id = sa.scene_id
+     LEFT JOIN spatial_group_review sgr ON sgr.episode_id = sa.episode_id AND sgr.spatial_group = sa.spatial_group
      WHERE sa.episode_id = ?
      ORDER BY sa.scene_number ASC`,
     [episodeId]
@@ -305,6 +288,7 @@ export async function listSceneSpatialGroups(episodeId) {
     spatialGroup: String(r.spatial_group || '').trim(),
     spatialRole: String(r.spatial_role || '').trim(),
     hasImage: String(r.image_url || '').trim() !== '',
+    reviewStatus: String(r.review_status || ''),
   }))
 }
 
@@ -328,9 +312,12 @@ export async function buildAnchorRefsForScene(episodeId, sceneId) {
   const anchors = []
 
   if (row.spatial_group) {
+    // confirmed = 0 表示用户已停用该组的布局图参考：整段跳过，
+    // refs / hint / anchors 都不带它，下游提示词与质检上下文随之自动一致。
     const la = queryOne(
       `SELECT anchor_key, image_url FROM scene_anchors
-       WHERE episode_id = ? AND anchor_type = '${LAYOUT_ANCHOR_TYPE}' AND anchor_key = ?`,
+       WHERE episode_id = ? AND anchor_type = '${LAYOUT_ANCHOR_TYPE}' AND anchor_key = ?
+         AND confirmed = 1`,
       [episodeId, row.spatial_group]
     )
     const laImg = bareUrl(la?.image_url)
@@ -356,62 +343,9 @@ export async function buildAnchorRefsForScene(episodeId, sceneId) {
     }
   }
 
-  if (row.spatial_group) {
-    const cur = queryOne('SELECT scene_number FROM scenes WHERE id = ?', [sceneId])
-    const mates = query(
-      `SELECT s.id, s.title, s.image_url, s.scene_number, sa.spatial_role
-       FROM scene_analysis sa
-       JOIN scenes s ON s.id = sa.scene_id
-       WHERE sa.episode_id = ? AND sa.spatial_group = ? AND sa.scene_id != ? AND TRIM(s.image_url) != ''
-       ORDER BY ABS(s.scene_number - ?) ASC`,
-      [episodeId, row.spatial_group, sceneId, cur?.scene_number || 0]
-    ).slice(0, config.asset.maxSpatialRefs)
-
-    for (const m of mates) {
-      const img = bareUrl(m.image_url)
-      if (!img || refs.includes(img)) continue
-      refs.push(img)
-      promptHints.push(
-        `参考图是本空间的「${m.spatial_role || m.title}」视角：本场景与它是同一物理空间，` +
-        `空间结构、地标物体的形态与相对位置、光照方向必须与参考图连续；` +
-        `但视角、机位高度、景别与画面主体占比一律以本场景文字描述为准，严禁照搬参考图的构图；` +
-        `时段、天气、色温同样以本场景文字描述为准`
-      )
-      anchors.push({ type: SCENE_ANCHOR_TYPE, key: m.title, image: img, role: m.spatial_role })
-    }
-  }
-
-  let props = []
-  try { props = JSON.parse(row.props_json || '[]') } catch { props = [] }
-  let propCount = 0
-  for (const name of props) {
-    if (propCount >= config.asset.maxPropRefs) break
-    const stateKey = defaultPropStateKey(name)
-    const keyWithState = buildAnchorKey(name, stateKey)
-    let a = keyWithState === name
-      ? null
-      : queryOne(
-        `SELECT * FROM scene_anchors WHERE episode_id = ? AND anchor_type = '${PROP_ANCHOR_TYPE}' AND anchor_key = ?`,
-        [episodeId, keyWithState]
-      )
-    if (!a) {
-      a = queryOne(
-        `SELECT * FROM scene_anchors WHERE episode_id = ? AND anchor_type = '${PROP_ANCHOR_TYPE}' AND anchor_key = ?`,
-        [episodeId, name]
-      )
-    }
-    if (!a) continue
-    const img = bareUrl(a.image_url)
-    if (!img) continue
-    if (!refs.includes(img)) refs.push(img)
-    const stateHint = stateKey ? stateHintFor(name) : ''
-    promptHints.push(
-      stateHint
-      || `道具「${name}」必须与参考图中的同一物体保持形态、颜色、材质与破损状态一致`
-    )
-    anchors.push({ type: PROP_ANCHOR_TYPE, key: stripStateSuffix(a.anchor_key || name), image: img })
-    propCount++
-  }
+  // 参考图只保留「布局图（开关控制）+ 人审基准图（手动确认的那一张）」。
+  // 不再自动拼装同组邻场图与道具图——那套「自动滚雪球」会造成种子不可控、
+  // 参考图上限随入口漂移、以及把固定地标误当道具匹配等问题，已按用户决策移除。
 
   return {
     refs, promptHints, anchors,
@@ -420,62 +354,91 @@ export async function buildAnchorRefsForScene(episodeId, sceneId) {
   }
 }
 
-export function registerSceneAnchors(episodeId, sceneId, imageUrl) {
-  const img = bareUrl(imageUrl)
-  if (!img) return { registered: false }
-
-  const scene = queryOne('SELECT title, scene_number FROM scenes WHERE id = ?', [sceneId])
-  if (!scene) return { registered: false }
-
-  execute(
-    `INSERT INTO scene_anchors (episode_id, anchor_type, anchor_key, scene_id, scene_number, image_url, description, source)
-     VALUES (?, '${SCENE_ANCHOR_TYPE}', ?, ?, ?, ?, ?, 'auto')
-     ON CONFLICT(episode_id, anchor_type, anchor_key)
-     DO UPDATE SET image_url = excluded.image_url, scene_id = excluded.scene_id, scene_number = excluded.scene_number`,
-    [episodeId, scene.title, sceneId, scene.scene_number || 0, img, `场景「${scene.title}」定稿图`]
-  )
-
-  const row = queryOne('SELECT props_json FROM scene_analysis WHERE episode_id = ? AND scene_id = ?', [episodeId, sceneId])
-  let props = []
-  try { props = row ? JSON.parse(row.props_json || '[]') : [] } catch { props = [] }
-
-  const propTableNames = query('SELECT name FROM props WHERE episode_id = ?', [episodeId]).map((r) => r.name)
-
-  for (const rawName of props) {
-    const matchedPropName = resolvePropName(rawName, propTableNames)
-    if (!matchedPropName) {
-      try {
-        recordAlert({
-          level: 'warn',
-          source: 'propName',
-          episodeId,
-          message: `场景分析道具名「${rawName}」在道具表中无对应项（多趟 LLM 命名不一致），其锚点按原名登记，下游出片可能匹配不到该道具参考图，建议在设定页核对道具名`,
-          detail: JSON.stringify({ raw: rawName, candidates: propTableNames }).slice(0, 2000),
-        })
-      } catch {  }
-    }
-    const name = matchedPropName || rawName
-    const anchorKey = buildAnchorKey(name, defaultPropStateKey(name))
-    execute(
-      `INSERT INTO scene_anchors (episode_id, anchor_type, anchor_key, scene_id, scene_number, image_url, description, source)
-       VALUES (?, '${PROP_ANCHOR_TYPE}', ?, ?, ?, ?, ?, 'auto')
-       ON CONFLICT(episode_id, anchor_type, anchor_key) DO UPDATE SET
-         image_url = excluded.image_url,
-         scene_id = excluded.scene_id,
-         scene_number = excluded.scene_number
-       WHERE scene_anchors.scene_id = excluded.scene_id`,
-      [episodeId, anchorKey, sceneId, scene.scene_number || 0, img, `出自场景「${scene.title}」（首次定稿）`]
-    )
+export async function buildShotAnchorInjection({ episodeId, sceneNames = [] } = {}) {
+  // 分镜出图的空间锚注入：按镜头场景名（shot.scene_assets 解析结果，前者优先）
+  // 命中 scenes 表首个场景，取其已确认人审基准图 + 启用中的布局图。
+  // 快照不含 budget/degraded，由调用方按实际注入结果补记。
+  const names = (Array.isArray(sceneNames) ? sceneNames : []).map((n) => String(n || '').trim()).filter(Boolean)
+  const empty = {
+    sceneId: 0, sceneTitle: '', group: '',
+    baselineUrl: '', layoutUrl: '',
+    promptHints: [], elements: [], sharedEnv: [], snapshot: null,
   }
-  return { registered: true, props }
+  if (!episodeId || !names.length) return empty
+
+  const rows = query(
+    `SELECT id, title FROM scenes WHERE episode_id = ? AND title IN (${names.map(() => '?').join(',')})`,
+    [episodeId, ...names]
+  )
+  let scene = null
+  for (const n of names) {
+    scene = rows.find((r) => r.title === n)
+    if (scene) break
+  }
+  if (!scene) return empty
+
+  const built = await buildAnchorRefsForScene(episodeId, Number(scene.id))
+  const anchors = built.anchors || []
+  const baseline = anchors.find((a) => a.type === SPATIAL_ANCHOR_TYPE)
+  const layout = anchors.find((a) => a.type === LAYOUT_ANCHOR_TYPE)
+  const baselineUrl = baseline?.image || ''
+  const layoutUrl = layout?.image || ''
+
+  return {
+    sceneId: Number(scene.id),
+    sceneTitle: scene.title,
+    group: baseline?.key || '',
+    baselineUrl,
+    layoutUrl,
+    promptHints: built.promptHints || [],
+    elements: built.elements || [],
+    sharedEnv: built.sharedEnv || [],
+    snapshot: {
+      version: 1,
+      generated_at: new Date().toISOString(),
+      scene: {
+        scene_id: Number(scene.id),
+        title: scene.title,
+        group: baseline?.key || '',
+        baseline_url: baselineUrl,
+        layout_url: layoutUrl,
+      },
+      elements: built.elements || [],
+      shared_env: built.sharedEnv || [],
+    },
+  }
 }
 
+// 当前组已确认人审基准图（bare URL）：供列表接口与出图快照比对「依据是否已变」。
+// 与 buildShotAnchorInjection 取基准的口径完全一致（manual + confirmed 的组基准）。
+export function currentBaselineUrlForGroup(episodeId, group) {
+  if (!episodeId || !group) return ''
+  const row = queryOne(
+    `SELECT image_url FROM scene_anchors
+      WHERE episode_id = ? AND anchor_type = '${SPATIAL_ANCHOR_TYPE}' AND anchor_key = ?
+        AND source = 'manual' AND confirmed = 1`,
+    [Number(episodeId), String(group)]
+  )
+  return bareUrl(row?.image_url)
+}
 
 export function lockCurrentGrouping(episodeId, opts = {}) {
-  const rows = query(
-    "SELECT scene_id, spatial_group FROM scene_analysis WHERE episode_id = ? AND TRIM(spatial_group) != ''",
-    [episodeId]
-  )
+  // 传 sceneIds 时只锁这些场景（组卡上的「锁定这组」，与 unlockGrouping 对称）；
+  // 不传时锁该剧集当前的全部分组（「重新锁定分组」这类全量修复入口）。
+  const ids = Array.isArray(opts.sceneIds)
+    ? opts.sceneIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    : []
+  const rows = ids.length
+    ? query(
+      `SELECT scene_id, spatial_group FROM scene_analysis
+       WHERE episode_id = ? AND TRIM(spatial_group) != ''
+         AND scene_id IN (${ids.map(() => '?').join(',')})`,
+      [episodeId, ...ids]
+    )
+    : query(
+      "SELECT scene_id, spatial_group FROM scene_analysis WHERE episode_id = ? AND TRIM(spatial_group) != ''",
+      [episodeId]
+    )
   if (!rows.length) return { locked: 0, reason: '无可锁的分组（分析未跑或组名为空）' }
   const note = String(opts.note || '人审确认').slice(0, 200)
   let locked = 0
@@ -513,20 +476,6 @@ export function unlockGrouping(episodeId, opts = {}) {
 
 export function describeGroupLocks(episodeId) {
   return getGroupLockOverview(episodeId, { query, queryOne })
-}
-
-export async function initAnchorSetFromExisting(episodeId) {
-  const r = await ensureSceneAnalysis(episodeId, { force: true })
-  if (!r.ok) return r
-  const anchors = query(
-    'SELECT anchor_type, anchor_key, scene_id, scene_number, image_url FROM scene_anchors WHERE episode_id = ? ORDER BY anchor_type, scene_number',
-    [episodeId]
-  )
-  const analysis = query(
-    'SELECT scene_id, scene_number, spatial_group, spatial_role, props_json, elements_json, shared_env_json FROM scene_analysis WHERE episode_id = ? ORDER BY scene_number',
-    [episodeId]
-  )
-  return { ...r, anchorCount: anchors.length, anchors, analysis }
 }
 
 
@@ -584,14 +533,71 @@ export function layoutMaterialsFingerprint(materials) {
   return crypto.createHash('md5').update(payload).digest('hex')
 }
 
+// —— 集级布局路线开关：全开/全关是管线路由，不是一次性批量操作 ——
+// 'on'  = 布局路线激活：出图注入布局底图，未画的组引导先画
+// 'off' = 整集不走布局路线：出图一律不带布局、不再引导画、新画/换版本不自动启用
+export function ensureLayoutRouteTable() {
+  execute(`CREATE TABLE IF NOT EXISTS episode_layout_route (
+    episode_id INTEGER PRIMARY KEY,
+    route TEXT NOT NULL DEFAULT 'on',
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`)
+}
+
+export function getLayoutRoute(episodeId) {
+  const ep = Number(episodeId)
+  if (!ep) return 'on'
+  ensureLayoutRouteTable()
+  const row = queryOne(`SELECT route FROM episode_layout_route WHERE episode_id = ?`, [ep])
+  if (row) return String(row.route) === 'off' ? 'off' : 'on'
+  // 无持久记录：从存量锚推导（旧数据兼容——曾批量全关过的集自动识别为 off）
+  const rows = query(
+    `SELECT confirmed FROM scene_anchors WHERE episode_id = ? AND anchor_type = '${LAYOUT_ANCHOR_TYPE}'`,
+    [ep]
+  )
+  if (rows.length && rows.every((r) => Number(r.confirmed) === 0)) return 'off'
+  return 'on'
+}
+
+export function setLayoutRoute(episodeId, route) {
+  const ep = Number(episodeId)
+  if (!ep) return
+  ensureLayoutRouteTable()
+  execute(
+    `INSERT INTO episode_layout_route (episode_id, route, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(episode_id) DO UPDATE SET route = excluded.route, updated_at = CURRENT_TIMESTAMP`,
+    [ep, route === 'off' ? 'off' : 'on']
+  )
+}
+
 export function registerLayoutAnchor(episodeId, group, imageUrl, opts = {}) {
   const g = String(group || '').trim()
   const img = bareUrl(imageUrl)
   if (!g || !img) return { registered: false }
   const fp = String(opts.sourceFingerprint || '')
+  // 覆盖前把当前版存进历史带：布局图的污染会被放大到组内每张成品图，
+  // 重画/换回都必须可逆。同图不重复入历史（A→B→A 反复切换不堆积）。
+  const prev = getLayoutAnchor(episodeId, g)
+  if (prev?.imageUrl && prev.imageUrl !== img) {
+    const dup = queryOne(
+      `SELECT id FROM layout_anchor_history WHERE episode_id = ? AND spatial_group = ? AND image_url = ?`,
+      [episodeId, g, prev.imageUrl]
+    )
+    if (!dup) {
+      execute(
+        `INSERT INTO layout_anchor_history (episode_id, spatial_group, image_url, description, source_fingerprint)
+         VALUES (?, ?, ?, ?, ?)`,
+        [episodeId, g, prev.imageUrl, prev.description || '', prev.sourceFingerprint || '']
+      )
+    }
+  }
+  // 开关语义：重画/上传/换版本不该悄悄改变参考启用状态——
+  // 已有锚保留原 confirmed；新锚只有在布局路线激活（集级 route=on）时才默认启用
+  const hasPrev = !!prev?.imageUrl
+  const nextConfirmed = hasPrev ? (prev.confirmed ? 1 : 0) : (getLayoutRoute(episodeId) === 'off' ? 0 : 1)
   execute(
-    `INSERT INTO scene_anchors (episode_id, anchor_type, anchor_key, scene_id, scene_number, image_url, description, source, source_fingerprint)
-     VALUES (?, '${LAYOUT_ANCHOR_TYPE}', ?, ?, ?, ?, ?, 'manual', ?)
+    `INSERT INTO scene_anchors (episode_id, anchor_type, anchor_key, scene_id, scene_number, image_url, description, source, source_fingerprint, confirmed)
+     VALUES (?, '${LAYOUT_ANCHOR_TYPE}', ?, ?, ?, ?, ?, 'manual', ?, ?)
      ON CONFLICT(episode_id, anchor_type, anchor_key) DO UPDATE SET
        image_url = excluded.image_url,
        description = excluded.description,
@@ -599,20 +605,75 @@ export function registerLayoutAnchor(episodeId, group, imageUrl, opts = {}) {
        scene_number = excluded.scene_number,
        source = 'manual',
        source_fingerprint = excluded.source_fingerprint,
-       confirmed = 1`,
+       confirmed = excluded.confirmed`,
     [
       episodeId, g, Number(opts.repSceneId) || 0, Number(opts.repSceneNumber) || 0, img,
-      String(opts.description || `空间组「${g}」布局示意图`), fp,
+      String(opts.description || `空间组「${g}」布局示意图`), fp, nextConfirmed,
     ]
   )
-  return { registered: true, group: g, image: img, sourceFingerprint: fp }
+  return { registered: true, group: g, image: img, sourceFingerprint: fp, confirmed: nextConfirmed === 1 }
+}
+
+export function getLayoutAnchorHistory(episodeId, group) {
+  const g = String(group || '').trim()
+  if (!g) return []
+  const cur = getLayoutAnchor(episodeId, g)
+  const rows = query(
+    `SELECT id, image_url, description, source_fingerprint, created_at FROM layout_anchor_history
+     WHERE episode_id = ? AND spatial_group = ?
+     ORDER BY id DESC LIMIT 20`,
+    [episodeId, g]
+  )
+  const out = rows
+    .map((r) => ({
+      id: Number(r.id),
+      imageUrl: bareUrl(r.image_url),
+      description: r.description || '',
+      sourceFingerprint: String(r.source_fingerprint || ''),
+      createdAt: String(r.created_at || ''),
+      isCurrent: false,
+    }))
+    .filter((r) => r.imageUrl)
+  if (cur?.imageUrl) {
+    out.unshift({
+      id: 0,
+      imageUrl: cur.imageUrl,
+      description: cur.description || '',
+      sourceFingerprint: cur.sourceFingerprint || '',
+      createdAt: '',
+      isCurrent: true,
+    })
+  }
+  return out
+}
+
+export function restoreLayoutAnchor(episodeId, group, historyId) {
+  const g = String(group || '').trim()
+  const hid = Number(historyId)
+  if (!g || !Number.isFinite(hid) || hid <= 0) return { restored: false }
+  const h = queryOne(
+    `SELECT image_url, description, source_fingerprint FROM layout_anchor_history
+     WHERE id = ? AND episode_id = ? AND spatial_group = ?`,
+    [hid, episodeId, g]
+  )
+  const img = bareUrl(h?.image_url)
+  if (!img) return { restored: false }
+  // registerLayoutAnchor 会先把当前版存入历史，实现版本对调；三步写包事务保证原子性
+  transaction(() => {
+    registerLayoutAnchor(episodeId, g, img, {
+      description: h.description || `空间组「${g}」布局示意图（换回的历史版本）`,
+      sourceFingerprint: String(h.source_fingerprint || ''),
+    })
+    execute('DELETE FROM layout_anchor_history WHERE id = ?', [hid])
+  })
+  return { restored: true, group: g, image: img }
 }
 
 export function getLayoutAnchor(episodeId, group) {
   const g = String(group || '').trim()
   if (!g) return null
   const row = queryOne(
-    `SELECT anchor_key, image_url, description, source_fingerprint FROM scene_anchors
+    `SELECT anchor_key, image_url, description, source_fingerprint, confirmed FROM scene_anchors
      WHERE episode_id = ? AND anchor_type = '${LAYOUT_ANCHOR_TYPE}' AND anchor_key = ?`,
     [episodeId, g]
   )
@@ -624,6 +685,7 @@ export function getLayoutAnchor(episodeId, group) {
         imageUrl: img,
         description: row.description || '',
         sourceFingerprint: String(row.source_fingerprint || ''),
+        confirmed: Number(row.confirmed ?? 1) === 1,
       }
     : null
 }

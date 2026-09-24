@@ -5,10 +5,9 @@ import { chatCompletion } from './doubao.js'
 import { mimeFromExt, uploadsUrlToAbs, parseDefectReview } from './shared.js'
 import { uploadsDir } from '../paths.js'
 
-
 export const MAX_LAYOUT_ATTEMPTS = 3
 
-export const LAYOUT_DEFECT_TYPES = [
+const LAYOUT_DEFECT_TYPES = [
   'text',        
   'leader_line', 
   'character',   
@@ -16,9 +15,9 @@ export const LAYOUT_DEFECT_TYPES = [
   'atmosphere',  
 ]
 
-export const resolveLocalLayoutImage = (storedUrl) => uploadsUrlToAbs(storedUrl, uploadsDir)
+const resolveLocalLayoutImage = (storedUrl) => uploadsUrlToAbs(storedUrl, uploadsDir)
 
-export const parseLayoutReview = (raw) => parseDefectReview(raw, LAYOUT_DEFECT_TYPES, 'text')
+const parseLayoutReview = (raw) => parseDefectReview(raw, LAYOUT_DEFECT_TYPES, 'text')
 
 export async function reviewLayoutImage(storedUrl, opts = {}) {
   const model = config.llm?.vlmModel

@@ -8,12 +8,12 @@ const DEFAULT_LANG = 'zh-CN'
 
 const OBJECT_FORM_PACKS = { zh: objectFormsZh }
 
-export function getLanguagePack(lang) {
+function getLanguagePack(lang) {
   if (lang && typeof lang === 'object') return lang
   return LANGUAGE_PACKS[lang || DEFAULT_LANG] || LANGUAGE_PACKS[DEFAULT_LANG]
 }
 
-export function getObjectFormPack(pack) {
+function getObjectFormPack(pack) {
   if (pack && typeof pack === 'object') return pack
   return OBJECT_FORM_PACKS[pack || 'zh'] || OBJECT_FORM_PACKS.zh
 }
@@ -54,7 +54,7 @@ function autoExtractPlaceNouns(scenes = [], opts = {}) {
   return [...counter.entries()].filter(([, n]) => n >= 3).map(([w]) => w)
 }
 
-export function buildLexicon(opts = {}) {
+function buildLexicon(opts = {}) {
   const L = opts.lexicon || {}
   const pack = getLanguagePack(opts.languagePack)
   const formPack = getObjectFormPack(opts.objectFormPack)
@@ -110,7 +110,7 @@ export function buildLexicon(opts = {}) {
 }
 
 
-export function extractEnvState(text = '', lexicon) {
+function extractEnvState(text = '', lexicon) {
   const t = String(text || '')
   const env = lexicon?.env || {}
   const hit = (words) => [...new Set((words || []).filter((w) => t.includes(w)))]
@@ -121,7 +121,7 @@ export function extractEnvState(text = '', lexicon) {
   }
 }
 
-export function checkEnvTransition(scenes = [], lexicon) {
+function checkEnvTransition(scenes = [], lexicon) {
   const out = []
   const transition = lexicon?.transition || []
   const placeNouns = lexicon?.placeNouns || []
@@ -163,7 +163,7 @@ export function checkEnvTransition(scenes = [], lexicon) {
   return out
 }
 
-export function checkHandoffAnchor(scenes = [], lexicon) {
+function checkHandoffAnchor(scenes = [], lexicon) {
   const vertical = lexicon?.verticalTerrain || []
   const moveVerbs = lexicon?.moveVerbs || []
   const placeNouns = lexicon?.placeNouns || []
@@ -249,7 +249,7 @@ function handoffWindow(text, structure = {}) {
   return (joined || String(text || '')).slice(0, WINDOW)
 }
 
-export function checkObjectFormConsistency(scenes = [], lexicon) {
+function checkObjectFormConsistency(scenes = [], lexicon) {
   const objects = lexicon?.objects || {}
   const out = []
 
@@ -295,7 +295,7 @@ export function checkObjectFormConsistency(scenes = [], lexicon) {
   return out
 }
 
-export function checkSummaryDrift(rows = [], lexicon) {
+function checkSummaryDrift(rows = [], lexicon) {
   const out = []
   for (const r of rows) {
     if (!r) continue

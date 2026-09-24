@@ -8,7 +8,7 @@ import { uploadsDir } from '../paths.js'
 
 const { apiKey, baseURL, workflows, nodeMap } = config.runninghub
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = config.timeouts.http.default) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -39,7 +39,7 @@ function cacheSet(key, value) {
   uploadCache.set(key, { value, at: Date.now() })
 }
 
-export async function insecureDownload(url, maxRedirects = 3, timeoutMs = 180000) {
+export async function insecureDownload(url, maxRedirects = 3, timeoutMs = config.timeouts.http.download) {
   await assertSafeDownloadTarget(url, allowHosts())
   return new Promise((resolve, reject) => {
     const req = https.get(url, { rejectUnauthorized: false }, (res) => {
@@ -108,25 +108,31 @@ export async function downloadWithRetry(url, opts = {}) {
   throw lastErr
 }
 
-export async function uploadImageV2(source) {
-  const cached = cacheGet('dl:' + source)
+const BASE64_RE = /^data:(image|audio)\/([\w+.-]+);base64,(.+)$/i
+const HTTP_URL_RE = /^https?:\/\//i
+const UPLOAD_TIMEOUT_MS = config.timeouts.http.upload
+
+async function uploadBinary(source, { cacheKey, pickValue, fallbackName }) {
+  const key = `${cacheKey}:${source}`
+  const cached = cacheGet(key)
   if (cached) return cached
 
   let buffer
-  let filename = 'image.png'
-  let mimeType = 'image/png'
-  const base64Match = source.match(/^data:(image|audio)\/([\w+.-]+);base64,(.+)$/i)
+  let filename = fallbackName
+  let mimeType = 'application/octet-stream'
+  const base64Match = source.match(BASE64_RE)
   if (base64Match) {
     buffer = Buffer.from(base64Match[3], 'base64')
     const kind = base64Match[1].toLowerCase()
-    let ext = base64Match[2].toLowerCase()
+    const rawExt = base64Match[2].toLowerCase()
+    let ext = rawExt
     if (ext === 'jpeg') ext = 'jpg'
     if (kind === 'audio' && ext === 'mpeg') ext = 'mp3'
     filename = `upload.${ext}`
-    mimeType = `${kind}/${base64Match[2].toLowerCase()}`
-  } else if (/^https?:\/\//i.test(source)) {
+    mimeType = `${kind}/${rawExt}`
+  } else if (HTTP_URL_RE.test(source)) {
     buffer = await insecureDownload(source)
-    filename = source.split('/').pop()?.split('?')[0] || 'image.png'
+    filename = source.split('/').pop()?.split('?')[0] || fallbackName
     mimeType = mimeFromExt(filename)
   } else if (source.startsWith('/uploads/')) {
     const abs = uploadsUrlToAbs(source, uploadsDir)
@@ -148,65 +154,32 @@ export async function uploadImageV2(source) {
 
   const formData = new FormData()
   formData.append('file', new Blob([buffer], { type: mimeType }), filename)
-
   const res = await fetchWithTimeout(`${baseURL}/openapi/v2/media/upload/binary`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
-  }, 60000)
+  }, UPLOAD_TIMEOUT_MS)
   const jr = await res.json()
-  if (jr.code !== 0 || !jr.data?.download_url) {
-    throw new Error(jr.message || jr.msg || '上传失败')
-  }
-  cacheSet('dl:' + source, jr.data.download_url)
-  return jr.data.download_url
+  const value = jr.data ? pickValue(jr.data) : ''
+  if (jr.code !== 0 || !value) throw new Error(jr.message || jr.msg || '上传失败')
+  cacheSet(key, value)
+  return value
+}
+
+export async function uploadImageV2(source) {
+  return uploadBinary(source, {
+    cacheKey: 'dl',
+    pickValue: (data) => data.download_url,
+    fallbackName: 'image.png',
+  })
 }
 
 export async function uploadMediaFileName(source, fallbackName = 'upload.bin') {
-  const cached = cacheGet('fn:' + source)
-  if (cached) return cached
-  let buffer, filename = fallbackName, mimeType = 'application/octet-stream'
-  const base64Match = source.match(/^data:(image|audio)\/([\w+.-]+);base64,(.+)$/i)
-  if (base64Match) {
-    buffer = Buffer.from(base64Match[3], 'base64')
-    const kind = base64Match[1].toLowerCase()
-    let ext = base64Match[2].toLowerCase()
-    if (ext === 'jpeg') ext = 'jpg'
-    if (kind === 'audio' && ext === 'mpeg') ext = 'mp3'
-    filename = 'upload.' + ext
-    mimeType = kind + '/' + base64Match[2].toLowerCase()
-  } else if (/^https?:\/\//i.test(source)) {
-    buffer = await insecureDownload(source)
-    filename = source.split('/').pop()?.split('?')[0] || 'audio.mp3'
-    mimeType = mimeFromExt(filename)
-  } else if (source.startsWith('/uploads/')) {
-    const abs = uploadsUrlToAbs(source, uploadsDir)
-    if (!abs) throw new Error(`本地素材路径非法或不存在（已拒绝穿越/不存在）: ${source}`)
-    buffer = fs.readFileSync(abs)
-    filename = path.basename(abs)
-    mimeType = mimeFromExt(filename)
-  } else {
-    const decodedPath = decodeURIComponent(source)
-    const abs = path.resolve(decodedPath)
-    const root = path.resolve(uploadsDir)
-    if (abs !== root && !abs.startsWith(root + path.sep)) {
-      throw new Error(`拒绝读取 uploads 目录之外的本地路径: ${decodedPath}`)
-    }
-    buffer = fs.readFileSync(abs)
-    filename = path.basename(abs)
-    mimeType = mimeFromExt(filename)
-  }
-  const formData = new FormData()
-  formData.append('file', new Blob([buffer], { type: mimeType }), filename)
-  const res = await fetchWithTimeout(baseURL + '/openapi/v2/media/upload/binary', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + apiKey },
-    body: formData,
-  }, 60000)
-  const jr = await res.json()
-  if (jr.code !== 0 || !jr.data?.fileName) throw new Error(jr.message || jr.msg || '上传失败')
-  cacheSet('fn:' + source, jr.data.fileName)
-  return jr.data.fileName
+  return uploadBinary(source, {
+    cacheKey: 'fn',
+    pickValue: (data) => data.fileName,
+    fallbackName,
+  })
 }
 
 export async function uploadAudioV2(source) {
@@ -309,7 +282,7 @@ async function runWorkflowImpl(workflowKey, values = {}, options = {}) {
   const isV2 = mapping.apiVersion === 'v2'
   const kind = mapping.kind || 'workflow'
   const instanceType = mapping.instanceType || 'default'
-  const { onProgress, timeout = 600000 } = options
+  const { onProgress, timeout = config.timeouts.workflow.poll } = options
   const pollInterval = isV2 ? 5000 : 3000
 
   const nodeInfoList = []
@@ -371,6 +344,12 @@ async function runWorkflowImpl(workflowKey, values = {}, options = {}) {
   }
   options.onTaskId?.(taskId)
   onProgress?.('queued', { taskId, message: '排队中...' })
+  // 提交留痕：把本次发给 RunningHub 的完整参数落盘（纯出片参数，不含任何密钥），便于核对传参
+  try {
+    const dumpDir = path.resolve(process.cwd(), 'generated')
+    fs.mkdirSync(dumpDir, { recursive: true })
+    fs.writeFileSync(path.join(dumpDir, 'last-submit-params.json'), JSON.stringify({ at: new Date().toISOString(), workflowKey, workflowId, taskId, nodeInfoList }, null, 2))
+  } catch {  }
 
   const startTime = Date.now()
   let consecutiveErrors = 0

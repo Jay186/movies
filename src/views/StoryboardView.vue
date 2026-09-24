@@ -187,7 +187,9 @@ function handleStoryboardAction(btn) {
 const clearing = ref(false)
 async function clearStoryboard() {
   if (!store.storyboardScenes.length) {
-    showImportDialog.value = true
+    toastInfo('分镜已为空，无需清空', {
+      detail: '如需生成分镜，可点击「重新提取分镜脚本」或「导入分镜脚本」。',
+    })
     return
   }
   const withMedia = store.storyboardScenes.reduce(
@@ -213,7 +215,9 @@ async function clearStoryboard() {
   clearing.value = true
   try {
     await store.clearStoryboard()
-    showImportDialog.value = true
+    toastInfo('分镜已清空', {
+      detail: '可重新提取分镜脚本，或导入已有的分镜文件。',
+    })
   } catch {
   } finally {
     clearing.value = false

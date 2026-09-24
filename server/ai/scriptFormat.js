@@ -3,8 +3,6 @@ import path from 'node:path'
 import { chatCompletion } from './doubao.js'
 import { tasksDir } from '../paths.js'
 
-
-
 const CANONICAL_SCENE_RE = /^场次[一二三四五六七八九十\d]+[：:]\s*(.+)/
 
 const VARIANT_SCENE_RES = [
@@ -105,7 +103,7 @@ function collectSpeakers(lines) {
   return speakers
 }
 
-export function normalizeScriptFormat(script) {
+function normalizeScriptFormat(script) {
   const text = String(script || '').replace(/\r\n/g, '\n')
   const lines = text.split('\n')
   const sceneLines = detectSceneLines(lines)

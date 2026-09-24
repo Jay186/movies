@@ -2,13 +2,15 @@
 const props = defineProps({
   scene: { type: Object, required: true },
   member: { type: Object, default: null },
-  locked: { type: Boolean, default: false },      
-  generating: { type: Boolean, default: false },  
-  multiSelect: { type: Boolean, default: false }, 
-  selected: { type: Boolean, default: false },    
+  locked: { type: Boolean, default: false },
+  generating: { type: Boolean, default: false },
+  multiSelect: { type: Boolean, default: false },
+  selected: { type: Boolean, default: false },
+  // { label, detail }：图过时角标（基准已换/布局已变/描述已改），null 不显示
+  stale: { type: Object, default: null },
 })
 
-const emit = defineEmits(['card-click', 'generate', 'edit', 'upload', 'delete', 'cancel-generate'])
+const emit = defineEmits(['card-click', 'generate', 'edit', 'upload', 'delete', 'delete-image', 'cancel-generate', 'set-baseline'])
 </script>
 
 <template>
@@ -27,6 +29,14 @@ const emit = defineEmits(['card-click', 'generate', 'edit', 'upload', 'delete', 
         <svg class="h-8 w-8 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
       </div>
       <span v-if="member?.sceneNumber" class="absolute left-2 top-2 flex h-5 items-center rounded-pill bg-black/75 px-2 text-micro text-white backdrop-blur">场 {{ member.sceneNumber }}</span>
+      <!-- 过时角标：放遮罩前的 DOM 位置，生成中/锁定遮罩能盖住它；
+           hover 时与右上角删除按钮同位，让位淡出（多选/锁定态无删除按钮，不淡出） -->
+      <span
+        v-if="stale"
+        class="pointer-events-none absolute right-2 top-2 flex h-5 items-center rounded-pill bg-amber-500/90 px-2 text-micro font-medium text-black backdrop-blur transition"
+        :class="multiSelect || locked ? '' : 'group-hover:opacity-0'"
+        :title="stale.detail"
+      >{{ stale.label }}</span>
       <div
         v-if="multiSelect"
         class="pointer-events-none absolute left-2 top-9 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition"
@@ -42,6 +52,9 @@ const emit = defineEmits(['card-click', 'generate', 'edit', 'upload', 'delete', 
       <div v-else-if="locked" class="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-bg-primary/35">
         <svg class="h-4 w-4 text-text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 018 0v4" /></svg>
         <span class="rounded-pill bg-black/70 px-2 py-0.5 text-micro text-text-secondary">先定参考图</span>
+        <button v-if="scene.imageUrl" class="mt-1 rounded bg-accent px-2.5 py-1 text-micro font-medium text-black transition hover:bg-accent-hover" title="把这张图直接设为这组的参考图，不用重画代表场景" @click.stop="emit('set-baseline')">
+          就用这张当参考图
+        </button>
       </div>
       <button
         v-if="!generating && !multiSelect && !locked"
@@ -64,11 +77,29 @@ const emit = defineEmits(['card-click', 'generate', 'edit', 'upload', 'delete', 
       </div>
     </div>
     <div class="flex-1 p-2.5">
-      <div class="truncate text-2xs font-medium text-text-primary">{{ scene.name }}</div>
+      <div class="flex items-center gap-1">
+        <div class="min-w-0 flex-1 truncate text-2xs font-medium text-text-primary">{{ scene.name }}</div>
+        <button
+          v-if="!multiSelect && !locked"
+          class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-muted transition hover:bg-bg-hover hover:text-white"
+          title="上传一张自己的图片（支持上传本地图片，也可从素材库选）"
+          @click.stop="emit('upload')"
+        >
+          <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+        </button>
+        <button
+          v-if="!multiSelect && !locked && scene.imageUrl"
+          class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-muted transition hover:bg-bg-hover hover:text-danger"
+          title="删除这张图片（场景卡片和描述都保留）"
+          @click.stop="emit('delete-image')"
+        >
+          <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+        </button>
+      </div>
       <div v-if="member?.spatialRole" class="mt-0.5 flex items-center gap-1 truncate text-micro text-text-muted" :title="`组内视角：${member.spatialRole}`">
         <svg class="h-3 w-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5l-5 7 5 7M16 5l5 7-5 7" /></svg>{{ member.spatialRole }}
       </div>
-      <p v-else-if="scene.description" class="mt-1 line-clamp-2 text-micro leading-relaxed text-text-secondary">{{ scene.description }}</p>
+      <p v-if="scene.description" class="mt-1 line-clamp-2 text-micro leading-relaxed text-text-secondary">{{ scene.description }}</p>
     </div>
   </div>
 </template>

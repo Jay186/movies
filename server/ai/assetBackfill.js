@@ -64,3 +64,39 @@ export function backfillStoryboardAssets(storyboard, assetNames) {
   }
   return storyboard
 }
+
+// 场次级场景兜底：镜头 sceneAssets 为空时，用场次标题与场景资产名做匹配
+// 依据：剧本分场标题与资产场景标题天然对应（含"日/夜/内外"后缀差异），比 @ 提及更结构化可靠
+export function backfillSceneByTitle(shot, sceneTitle, sceneNames) {
+  if (!shot) return shot
+  if (toNames(shot.sceneAssets).length) return shot
+  const title = String(sceneTitle || '').trim()
+  const names = toNames(sceneNames)
+  if (!title || !names.length) return shot
+
+  let hit = names.find((n) => n === title)
+  if (!hit) hit = names.find((n) => n.includes(title) || title.includes(n))
+  if (!hit) {
+    // 清洗后再试：去头部时间/氛围修饰（"黄昏的江边"→"江边"）、去尾部场次标记（"客厅-日"→"客厅"），再做包含匹配
+    const strip = (s) => s
+      .replace(/^((清晨|黄昏|深夜|夜晚|白天|傍晚|凌晨|午后|雨后)[的之]?)+/, '')
+      .replace(/([-—·\s]*[（(]?(日|夜|内|外|晨|黄昏|清晨|深夜|傍[晚夜])[）)]?)+$/, '')
+      .trim()
+    const a = strip(title)
+    if (a && a !== title) {
+      hit = names.find((n) => {
+        const b = strip(n)
+        if (!b) return false
+        return b === a || (a.length >= 2 && b.length >= 2 && (a.includes(b) || b.includes(a)))
+      })
+    }
+  }
+  if (hit) {
+    shot.sceneAssets = [hit]
+    console.warn(
+      `[assetBackfill] 镜头 ${shot.shotNumber || shot.shot_number || shot.id || ''} sceneAssets 为空，` +
+        `按场次标题「${title}」兜底匹配场景「${hit}」`
+    )
+  }
+  return shot
+}

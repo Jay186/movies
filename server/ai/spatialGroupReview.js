@@ -97,16 +97,27 @@ const REVIEW_SKIP_SQL = `
   UPDATE spatial_group_review SET status = '${REVIEW_STATUS.SKIPPED}', updated_at = CURRENT_TIMESTAMP
   WHERE episode_id = ? AND spatial_group = ?`
 
+const REVIEW_CLEAR_SQL = `
+  UPDATE spatial_group_review SET status = '${REVIEW_STATUS.PENDING}', baseline_image_url = '', updated_at = CURRENT_TIMESTAMP
+  WHERE episode_id = ? AND spatial_group = ?`
+
 export function createSpatialGroupReview(deps) {
   const {
     query,
     queryOne,
     execute,
+    transaction = null,
     ensureSceneAnalysis,
+    normalizeSceneGrouping = null,
     getLayoutAnchor = null,
     layoutMaterialsForGroup = null,
     fingerprintOfMaterials = null,
   } = deps || {}
+
+  // 锚点表（出图读）与 review 状态（界面读）是同一份基准的两处落点，必须同生共死。
+  // 只写成功一半会造成「界面说没定基准、出图却已经在用」这类不报错的不一致。
+  // 未注入 transaction 时退化为顺序执行，保持向后兼容。
+  const atomically = typeof transaction === 'function' ? (fn) => transaction(fn) : (fn) => fn()
 
   async function syncSpatialGroupReview(episodeId, { reset } = {}) {
     const groups = query(GROUPS_SQL, [episodeId])
@@ -164,6 +175,18 @@ export function createSpatialGroupReview(deps) {
 
   async function getSpatialGroupReviewStatus(episodeId) {
     if (ensureSceneAnalysis) await ensureSceneAnalysis(episodeId)
+    // 手动新增 / 历史遗留的未归组场景兜底补成「一场一组」，
+    // 否则它们会掉进场景页的平铺小卡区，和组卡形态对不上
+    if (normalizeSceneGrouping) {
+      try {
+        const { grouped } = normalizeSceneGrouping(episodeId)
+        if (grouped) {
+          console.log(`[spatialGroupReview] 兜底归组 ${grouped} 个未归组场景（episode=${episodeId}）`)
+        }
+      } catch (e) {
+        console.warn('[spatialGroupReview] 兜底归组失败（降级为原样渲染）:', e.message)
+      }
+    }
     const { total, pending } = await syncSpatialGroupReview(episodeId)
     const groups = query(GROUPS_SQL, [episodeId])
     const reviewRows = query(
@@ -201,13 +224,13 @@ export function createSpatialGroupReview(deps) {
       }
       if (status === REVIEW_STATUS.CONFIRMED || status === REVIEW_STATUS.SKIPPED) done++
 
-      const propSet = new Set()
+      const landmarkSet = new Set()
       const members = query(MEMBERS_SQL, [episodeId, g.spatial_group]).map((m) => {
-        let props = []
-        try { props = JSON.parse(m.props_json || '[]') } catch { props = [] }
-        for (const p of props) {
+        let landmarks = []
+        try { landmarks = JSON.parse(m.props_json || '[]') } catch { landmarks = [] }
+        for (const p of landmarks) {
           const name = String(p || '').trim()
-          if (name) propSet.add(name)
+          if (name) landmarkSet.add(name)
         }
         return {
           id: m.id,
@@ -247,12 +270,13 @@ export function createSpatialGroupReview(deps) {
       outGroups.push({
         group: g.spatial_group,
         status,
+        confirmedAt: review?.updated_at ? String(review.updated_at) : '',
         repSceneId: repId,
         repSceneNumber: repNo,
         repSceneTitle: repTitle,
         baselineImageUrl,
         baselineReused,
-        sharedProps: [...propSet],
+        sharedLandmarks: [...landmarkSet],
         memberScenes: members,
         layoutAnchor,
         layoutStale,
@@ -262,12 +286,12 @@ export function createSpatialGroupReview(deps) {
     return { success: true, episodeId, total, pending, done, groups: outGroups }
   }
 
-  async function decideSpatialGroup({ episodeId, group, action } = {}) {
+  async function decideSpatialGroup({ episodeId, group, action, sceneId } = {}) {
     if (!episodeId || !group || !action) {
       throw HttpError(400, 'episodeId/group/action 必填')
     }
-    if (action !== REVIEW_ACTION.CONFIRM && action !== REVIEW_ACTION.SKIP) {
-      throw HttpError(400, 'action 必须是 confirm 或 skip')
+    if (action !== REVIEW_ACTION.CONFIRM && action !== REVIEW_ACTION.SKIP && action !== REVIEW_ACTION.CLEAR) {
+      throw HttpError(400, 'action 必须是 confirm、skip 或 clear')
     }
     const grpRow = queryOne(
       'SELECT 1 FROM scene_analysis WHERE episode_id = ? AND spatial_group = ? LIMIT 1',
@@ -277,22 +301,38 @@ export function createSpatialGroupReview(deps) {
     await syncSpatialGroupReview(episodeId)
 
     if (action === REVIEW_ACTION.CONFIRM) {
-      const rep = queryOne(REP_SQL, [episodeId, group])
-      const repImg = bareUrl(rep?.image_url)
-      if (!repImg) throw HttpError(409, 'no_baseline_image')
-      const repId = rep?.scene_id || 0
-      const repNo = rep?.scene_number || 0
-      const repTitle = rep?.title || ''
-      execute(ANCHOR_UPSERT_SQL, [
-        episodeId, group, repId, repNo, repImg,
-        `空间组「${group}」人审基准图（出自场景「${repTitle}」）`,
-      ])
-      execute(REVIEW_CONFIRM_SQL, [repImg, episodeId, group])
-      return { group, status: REVIEW_STATUS.CONFIRMED, anchorImageUrl: repImg }
+      // 支持从任意成员场景的图设为基准（传 sceneId）；不传则用代表场景
+      const sceneIdNum = Number(sceneId) || 0
+      const src = sceneIdNum
+        ? queryOne('SELECT id, scene_number, title, image_url FROM scenes WHERE id = ? AND episode_id = ?', [sceneIdNum, episodeId])
+        : queryOne(REP_SQL, [episodeId, group])
+      const img = bareUrl(src?.image_url)
+      if (!img) throw HttpError(409, 'no_baseline_image')
+      const anchorSceneId = src?.scene_id || src?.id || 0
+      const anchorSceneNo = src?.scene_number || 0
+      const anchorTitle = src?.title || ''
+      atomically(() => {
+        execute(ANCHOR_UPSERT_SQL, [
+          episodeId, group, anchorSceneId, anchorSceneNo, img,
+          `空间组「${group}」人审基准图（出自场景「${anchorTitle}」）`,
+        ])
+        execute(REVIEW_CONFIRM_SQL, [img, episodeId, group])
+      })
+      return { group, status: REVIEW_STATUS.CONFIRMED, anchorImageUrl: img }
     }
 
-    execute(ANCHOR_DELETE_SQL, [episodeId, group])
-    execute(REVIEW_SKIP_SQL, [episodeId, group])
+    if (action === REVIEW_ACTION.CLEAR) {
+      atomically(() => {
+        execute(ANCHOR_DELETE_SQL, [episodeId, group])
+        execute(REVIEW_CLEAR_SQL, [episodeId, group])
+      })
+      return { group, status: REVIEW_STATUS.PENDING, anchorImageUrl: null }
+    }
+
+    atomically(() => {
+      execute(ANCHOR_DELETE_SQL, [episodeId, group])
+      execute(REVIEW_SKIP_SQL, [episodeId, group])
+    })
     return { group, status: REVIEW_STATUS.SKIPPED, anchorImageUrl: null }
   }
 

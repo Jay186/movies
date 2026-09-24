@@ -2,7 +2,8 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { queryOne, execute } from '../db.js'
 import { resolveLocalMedia } from './runninghub.js'
-import { uploadsDir } from '../paths.js'
+import { continuityDir } from '../paths.js'
+import { runFfmpeg } from './ffmpeg.js'
 
 
 const SEAM_ALERT = {
@@ -66,7 +67,7 @@ function computeMetrics(grid ) {
 
 
 async function extractFirstFrame(absVideo, shotId) {
-  const contDir = path.join(uploadsDir, 'continuity')
+  const contDir = continuityDir
   fs.mkdirSync(contDir, { recursive: true })
   const outPath = path.join(contDir, `shot_${shotId}_first.jpg`)
   await runFfmpeg(['-y', '-i', absVideo, '-update', '1', '-frames:v', '1', outPath])

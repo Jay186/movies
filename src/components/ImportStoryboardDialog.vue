@@ -233,7 +233,12 @@ async function runAiParse(fileText) {
     result.value = rawParsed.value
     if (scenes.length) activeTab.value = 'result'
   } catch (e) {
-    errorMsg.value = 'AI 智能解析失败，已回退到本地解析结果：' + (e.message || '未知错误')
+    // 409 = 资产守卫拦截（assertAssetsExist），不是 AI 解析失败——透出真实原因，避免误导用户重试
+    if (e.status === 409) {
+      errorMsg.value = `${e.message} 已回退到本地解析。建议先去「设定」页补齐资产后再解析。`
+    } else {
+      errorMsg.value = 'AI 智能解析失败，已回退到本地解析结果：' + (e.message || '未知错误')
+    }
   }
 }
 
@@ -323,6 +328,25 @@ function resetMapping() {
 
 async function handleImport() {
   if (!scenes.value.length || !props.episodeId) return
+  // 资产锚守卫：资产库任一类为空且未勾选「导入时一并创建为资产」时，导入前弹确认框。
+  // 口径与后端 assertAssetsExist 一致（任一为空即拦）；导入是用户显式行为，故用确认框而非硬拦。
+  // 若勾选了创建资产，导入后 createAssets() 会补齐锚，无需确认。
+  if (!createUnknownAssets.value) {
+    const emptyClasses = []
+    if (!episodeAssets.value.characters.length) emptyClasses.push('角色')
+    if (!episodeAssets.value.scenes.length) emptyClasses.push('场景')
+    if (!episodeAssets.value.props.length) emptyClasses.push('道具')
+    if (emptyClasses.length) {
+      const ok = await confirmDialog({
+        title: '导入的分镜将没有资产锚',
+        description: `本集缺少${emptyClasses.join('、')}资产，导入的镜头将没有参考图，出片时环境与画风会漂移。建议先去「设定」页提取资产后再导入。仍要导入吗？`,
+        confirmText: '仍要导入',
+        cancelText: '取消',
+        tone: 'warn',
+      })
+      if (!ok) return
+    }
+  }
   if (existingMediaShots.value > 0) {
     const ok = await confirmDialog({
       title: '导入会整本替换当前分镜',

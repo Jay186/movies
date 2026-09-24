@@ -8,12 +8,30 @@ import {
   extractScreenSides,
   hasExplicitReposition,
   buildAliasMap,
+  AIRLOCK_SEC,
+  DIALOGUE_OVERFLOW_EPS,
+  SPEECH_RATE_MAX,
+  SPEECH_RATE_MIN_CHARS,
+  countSpokenChars,
+  findMusicMoodWords,
+  findStylePoison,
+  stylePoisonText,
+  estimateShotVideoPromptChars,
 } from '../ai/storyboardValidator.js'
 import {
   repairShotAirlock,
   repairShotAxis,
+  rewriteShotMusic,
   enrichShotIntegrated,
   extractFinalFrameFromIntegrated,
+  stripStylePoison,
+  unifyCameraMove,
+  fixActionCameraMismatch,
+  translateMusicLanguage,
+  condensePrompt,
+  expandThinPrompt,
+  alignLighting,
+  dedupeActionOverlap,
 } from '../ai/doubao.js'
 import { summarizeQc, qcMeta, isRegisteredQcCode, QC_ACTION } from '../ai/qcCodes.js'
 import { checkContinuity } from '../ai/continuityGuard.js'
@@ -29,11 +47,21 @@ function loadEpisodeShots(episodeId) {
   )
   const scenes = []
   const shotIndex = new Map() 
+  const sceneIdList = sceneRows.map((s) => s.id)
+  const shotsByScene = new Map()
+  if (sceneIdList.length) {
+    const placeholders = sceneIdList.map(() => '?').join(', ')
+    for (const r of query(
+      `SELECT * FROM shots WHERE storyboard_scene_id IN (${placeholders}) ORDER BY start_time, id`,
+      sceneIdList
+    )) {
+      const list = shotsByScene.get(r.storyboard_scene_id)
+      if (list) list.push(r)
+      else shotsByScene.set(r.storyboard_scene_id, [r])
+    }
+  }
   for (let i = 0; i < sceneRows.length; i++) {
-    const rows = query(
-      'SELECT * FROM shots WHERE storyboard_scene_id = ? ORDER BY start_time, id',
-      [sceneRows[i].id]
-    )
+    const rows = shotsByScene.get(sceneRows[i].id) || []
     const shots = rows.map((r, idx) => {
       const s = rowToShotForQc(r)
       if (!s.shotNumber) s.shotNumber = `${sceneRows[i].scene_number}-${idx + 1}`
@@ -48,16 +76,17 @@ function loadEpisodeShots(episodeId) {
 function loadAssetNames(episodeId) {
   const episode = queryOne('SELECT project_id FROM episodes WHERE id = ?', [episodeId])
   const characters = mergeMasterIntoEpisodeCharacters(
-    query('SELECT name, description, image_url, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
+    query('SELECT name, description, description_en, image_url, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
   )
+  const pStyle = episode
+    ? queryOne('SELECT p.art_style, sp.category_key FROM projects p LEFT JOIN style_presets sp ON sp.label = p.art_style WHERE p.id = ?', [episode.project_id])
+    : null
   return {
     characters,
-    scenes: query('SELECT title AS name, title, summary AS description, image_url FROM scenes WHERE episode_id = ?', [episodeId]),
-    props: query('SELECT name, description, image_url FROM props WHERE episode_id = ?', [episodeId]),
-    projectStyleText: (() => {
-      const p = episode ? queryOne('SELECT art_style FROM projects WHERE id = ?', [episode.project_id]) : null
-      return p?.art_style || ''
-    })(),
+    scenes: query('SELECT title AS name, title, scene_number, summary AS description, summary_en AS description_en, lighting_en, image_url FROM scenes WHERE episode_id = ?', [episodeId]),
+    props: query('SELECT name, description, description_en, image_url FROM props WHERE episode_id = ?', [episodeId]),
+    projectStyleText: pStyle?.art_style || '',
+    projectStyleCategory: pStyle?.category_key || '',
     projectId: episode?.project_id ?? null,
   }
 }
@@ -148,13 +177,13 @@ export function clearQcIgnores(episodeId) {
   }
 }
 
-export function buildQcReport(episodeId, opts = {}) {
+function buildQcReport(episodeId, opts = {}) {
   const { scenes, sceneRows, shotIndex } = loadEpisodeShots(episodeId)
   const assetNames = loadAssetNames(episodeId)
   const qc = validateStoryboard(
     { scenes },
     { characters: assetNames.characters, scenes: assetNames.scenes, props: assetNames.props },
-    { projectStyleText: assetNames.projectStyleText, sceneRows }
+    { projectStyleText: assetNames.projectStyleText, projectStyleCategory: assetNames.projectStyleCategory, sceneRows }
   )
   const continuity = collectContinuityWarnings(episodeId)
   qc.warnings.push(...continuity.warnings)
@@ -192,8 +221,54 @@ export function buildQcReport(episodeId, opts = {}) {
     scriptSceneCount: continuity.scriptSceneCount,
     fixedCount: qc.summary?.fixedCount || 0,
     trimmed,
+    panelLimit: limit,
     groups: summary.groups,
     actions: QC_ACTION,
+  }
+}
+
+const SHOT_LABEL_SCOPED = /^[^-]+-\d+$/
+
+// 把当前 QC 结果（含豁免过滤）拆到单镜，落库到 shots.qc_status / shots.qc_report
+// 镜头级问题按镜号归档；'*'（集级）与'场次N'（场次级）不挂单镜，仍走 /qc-report 现算
+export function persistQcToShots(episodeId) {
+  try {
+    const report = buildQcReport(episodeId, { includeIgnored: false })
+    const byShot = new Map()
+    for (const g of report.groups || []) {
+      for (const it of g.items || []) {
+        const label = String(it.shot || '').trim()
+        if (!label || !SHOT_LABEL_SCOPED.test(label)) continue
+        const entry = byShot.get(label) || { items: [], status: 'pass' }
+        entry.items.push({ code: g.code, level: g.level, title: g.title, message: it.message })
+        if (g.level === 'error') entry.status = 'fail'
+        else if (entry.status === 'pass') entry.status = 'warn'
+        byShot.set(label, entry)
+      }
+    }
+    const { shotIndex } = loadEpisodeShots(episodeId)
+    const now = new Date().toISOString()
+    let n = 0
+    let fail = 0
+    let warn = 0
+    for (const [rawId, entry] of shotIndex) {
+      const label = String(entry.shot.shotNumber || '')
+      const q = byShot.get(label)
+      const status = q ? q.status : 'pass'
+      if (status === 'fail') fail++
+      else if (status === 'warn') warn++
+      execute('UPDATE shots SET qc_status = ?, qc_report = ? WHERE id = ?', [
+        status,
+        JSON.stringify({ checkedAt: now, items: q ? q.items : [] }),
+        rawId,
+      ])
+      n++
+    }
+    console.log(`[qc] 状态落库：${n} 镜（fail ${fail} / warn ${warn} / pass ${n - fail - warn}）`)
+    return { persisted: n, fail, warn }
+  } catch (e) {
+    console.warn('[qc] 状态落库失败（不影响主流程）:', e.message)
+    return null
   }
 }
 
@@ -231,8 +306,12 @@ const FIX_HANDLERS = {
       if (!prev) { failed++; details.push({ shot: it.shot, ok: false, reason: '没有上一镜（本镜是全集首镜）' }); continue }
       const prevFinal = prev.shot.finalFrame || ''
       if (!prevFinal) { failed++; details.push({ shot: it.shot, ok: false, reason: '上一镜没有最终画面描述（final_frame 为空），无法复刻' }); continue }
+      // 与 checkAirlockInheritance 同一口径：上一镜末帧里的登记角色必须全部出现在改写后 IMD，
+      // 否则只验 "Airlock:" 开头会让丢角色的改写蒙混过关、复检照样告警。
+      const airlockCharSet = new Set((ctx.assetNames.characters || []).map((c) => c.name).filter(Boolean))
+      const requiredChars = extractMentions(prevFinal).filter((m) => airlockCharSet.has(m))
       try {
-        const rewritten = await repairShotAirlock(shot, prevFinal, ctx.style)
+        const rewritten = await repairShotAirlock(shot, prevFinal, ctx.style, requiredChars)
         if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出有效的 Airlock 改写' }); continue }
         execute('UPDATE shots SET integrated_multimodal_description = ? WHERE id = ?', [rewritten, raw.id])
         shot.integratedMultimodalDescription = rewritten
@@ -250,7 +329,23 @@ const FIX_HANDLERS = {
     const details = []
     let fixed = 0
     let failed = 0
+    // 场级标签（场次N）展开为该场除首镜外的全部镜头，逐镜检测侧位翻转后补走位
+    const expanded = []
     for (const it of items) {
+      const sceneMatch = /^场次(\d+)$/.exec(String(it.shot || '').trim())
+      const scene = sceneMatch
+        ? ctx.scenes.find((s) => Number(s.sceneNumber) === Number(sceneMatch[1]))
+        : null
+      if (sceneMatch && !scene) { failed++; details.push({ shot: it.shot, ok: false, reason: '场次不存在' }); continue }
+      if (scene) {
+        const shots = scene.shots || []
+        if (shots.length < 2) { fixed++; details.push({ shot: it.shot, ok: true, note: '本场不足两镜，无轴线问题' }); continue }
+        for (let i = 1; i < shots.length; i++) expanded.push({ shot: shots[i].shotNumber })
+        continue
+      }
+      expanded.push(it)
+    }
+    for (const it of expanded) {
       const entry = findShotEntry(episodeId, ctx, it.shot)
       if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
       const { sceneIdx, shot, raw } = entry
@@ -269,11 +364,12 @@ const FIX_HANDLERS = {
         try {
           const rewritten = await repairShotAxis(shot, name, pSide, cSide, ctx.style)
           if (!rewritten) { lastReason = `@${name} 的走位改写未产出有效结果`; continue }
-          execute('UPDATE shots SET integrated_multimodal_description = ? WHERE id = ?', [rewritten, raw.id])
-          shot.integratedMultimodalDescription = rewritten
+          execute('UPDATE shots SET integrated_multimodal_description = ?, action_note = ? WHERE id = ?', [rewritten.integratedMultimodalDescription, rewritten.actionNote || shot.actionNote || '', raw.id])
+          shot.integratedMultimodalDescription = rewritten.integratedMultimodalDescription
+          if (rewritten.actionNote) shot.actionNote = rewritten.actionNote
           done = true
           fixed++
-          details.push({ shot: it.shot, ok: true, note: `已补 @${name} 走位（frame ${pSide} → frame ${cSide}）` })
+          details.push({ shot: it.shot, ok: true, note: `已补 @${name} 走位双落点（frame ${pSide} → frame ${cSide}）` })
           break
         } catch (e) {
           lastReason = e.message
@@ -310,6 +406,434 @@ const FIX_HANDLERS = {
     }
     return { fixed, failed, details }
   },
+
+  [QC_ACTION.MUSIC_REWRITE]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      const music = String(shot.nonDiegeticMusic || '').trim()
+      if (!music) { fixed++; details.push({ shot: it.shot, ok: true, note: '配乐字段已为空，问题已不存在' }); continue }
+      const hits = findMusicMoodWords(music)
+      if (!hits.length) { fixed++; details.push({ shot: it.shot, ok: true, note: '配乐已无情绪词，问题已不存在' }); continue }
+      try {
+        const rewritten = await rewriteShotMusic(shot)
+        if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出无情绪词的配乐改写' }); continue }
+        execute('UPDATE shots SET non_diegetic_music = ? WHERE id = ?', [rewritten, raw.id])
+        shot.nonDiegeticMusic = rewritten
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: `已改写配乐（原命中情绪词：${hits.join('、')}）` })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.DIALOGUE_SHIFT]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    const round1 = (v) => Math.round(v * 10) / 10
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      const shotStart = Number(shot.startTime)
+      const shotEnd = Number(shot.endTime)
+      if (!Number.isFinite(shotStart) || !Number.isFinite(shotEnd) || shotEnd <= shotStart) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: '镜头起止时间缺失或无效，无法计算禁语期' })
+        continue
+      }
+      const wasArray = Array.isArray(shot.dialogue)
+      const list = wasArray
+        ? shot.dialogue
+        : (shot.dialogue && typeof shot.dialogue === 'object' ? [shot.dialogue] : [])
+      if (!list.length || !hasDialogueContentLocal(list)) {
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: '本镜已无有效台词，问题已不存在' })
+        continue
+      }
+      const airlockEnd = round1(shotStart + AIRLOCK_SEC)
+      const ordered = list
+        .map((d, i) => ({ d, i, start: Number(d?.startTime) }))
+        .filter((x) => Number.isFinite(x.start))
+        .sort((a, b) => a.start - b.start || a.i - b.i)
+      const out = list.slice()
+      let changed = false
+      let prevEnd = airlockEnd
+      let overflowEnd = null
+      for (const r of ordered) {
+        let newStart = r.start
+        if (newStart < prevEnd) newStart = round1(prevEnd)
+        const chars = countSpokenChars(r.d?.text)
+        const lineDur = Math.max(chars, SPEECH_RATE_MIN_CHARS) / SPEECH_RATE_MAX
+        const lineEnd = newStart + lineDur
+        if (newStart > r.start && lineEnd > shotEnd + DIALOGUE_OVERFLOW_EPS) {
+          overflowEnd = lineEnd
+          break
+        }
+        if (newStart > r.start) {
+          changed = true
+          const shifted = { ...r.d, startTime: newStart }
+          const oldEnd = Number(r.d?.endTime)
+          if (Number.isFinite(oldEnd)) shifted.endTime = round1(newStart + Math.max(0, oldEnd - r.start))
+          out[r.i] = shifted
+        }
+        prevEnd = newStart + lineDur
+      }
+      if (overflowEnd !== null) {
+        failed++
+        details.push({
+          shot: it.shot,
+          ok: false,
+          reason: `台词移出禁语期后预计结束 ${overflowEnd.toFixed(1)}s，超过镜尾 ${shotEnd}s——镜头空间不足，请加长镜头或精简台词`,
+        })
+        continue
+      }
+      if (!changed) {
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: '台词已不在禁语期，问题已不存在' })
+        continue
+      }
+      const payload = (!wasArray && out.length === 1) ? out[0] : out
+      execute('UPDATE shots SET dialogue = ? WHERE id = ?', [JSON.stringify(payload), raw.id])
+      shot.dialogue = payload
+      fixed++
+      details.push({ shot: it.shot, ok: true, note: `台词已移出 ${shotStart}s–${airlockEnd}s 禁语期` })
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.STYLE_POISON_STRIP]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    // 预检字段集与 validator stylePoisonScanTexts 完全一致（含 blocking_plan/video_prompt_override）——
+    // 漏字段会让"毒词只藏在调度方案里"的镜被判成"问题已不存在"，报告却照样告警（假修复）。
+    const CAMEL = {
+      integrated_multimodal_description: 'integratedMultimodalDescription',
+      description: 'description',
+      final_frame: 'finalFrame',
+      action_note: 'actionNote',
+      blocking_plan: 'blockingPlan',
+      video_prompt_override: 'videoPromptOverride',
+    }
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      if (!findStylePoison(stylePoisonScanTexts(shot), ctx.style, ctx.styleCategory).length) { fixed++; details.push({ shot: it.shot, ok: true, note: '文本已无画风毒词，问题已不存在' }); continue }
+      try {
+        const result = await stripStylePoison(shot, stylePoisonText(ctx.style, ctx.styleCategory), ctx.style)
+        if (!result) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出无毒词的改写' }); continue }
+        const sets = Object.entries(result).filter(([, v]) => v)
+        if (!sets.length) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 改写未返回任何字段' }); continue }
+        const cols = sets.map(([c]) => `${c} = ?`).join(', ')
+        execute(`UPDATE shots SET ${cols} WHERE id = ?`, [...sets.map(([, v]) => v), raw.id])
+        for (const [k, v] of sets) {
+          const camel = CAMEL[k] || k
+          if (k === 'blocking_plan') {
+            try { shot[camel] = JSON.parse(v) } catch { shot[camel] = v }
+          } else {
+            shot[camel] = v
+          }
+        }
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: '已删去全部字段（含调度方案/出片覆盖文本）的画风毒词并改写演出意图' })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.CAMERA_MOVE_UNIFY]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      try {
+        const rewritten = await unifyCameraMove(shot, ctx.style)
+        if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出归一后的运镜改写' }); continue }
+        if (rewritten === shot.integratedMultimodalDescription) { fixed++; details.push({ shot: it.shot, ok: true, note: '本镜已不再多运镜，问题已不存在' }); continue }
+        execute('UPDATE shots SET integrated_multimodal_description = ? WHERE id = ?', [rewritten, raw.id])
+        shot.integratedMultimodalDescription = rewritten
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: '模块1 已归一为单一主运镜' })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.ACTION_CAMERA_FIX]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      if (String(shot.cameraMovement || '') !== '固定') { fixed++; details.push({ shot: it.shot, ok: true, note: '本镜运镜已非固定，问题已不存在' }); continue }
+      try {
+        const result = await fixActionCameraMismatch(shot, ctx.style)
+        if (!result) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出与动作匹配的动态运镜' }); continue }
+        execute('UPDATE shots SET integrated_multimodal_description = ?, camera_movement = ? WHERE id = ?', [result.integratedMultimodalDescription, result.cameraMovement, raw.id])
+        shot.integratedMultimodalDescription = result.integratedMultimodalDescription
+        shot.cameraMovement = result.cameraMovement
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: `运镜已改为${result.cameraMovement}配合主体动作` })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.MUSIC_TRANSLATE]: async (episodeId, items, ctx) => {
+    const lang = detectMainMusicLang(ctx.scenes)
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      const music = String(shot.nonDiegeticMusic || '').trim()
+      if (!music) { fixed++; details.push({ shot: it.shot, ok: true, note: '配乐字段已为空，问题已不存在' }); continue }
+      try {
+        const rewritten = await translateMusicLanguage(shot, lang, ctx.style)
+        if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出统一语言后的配乐改写' }); continue }
+        execute('UPDATE shots SET non_diegetic_music = ? WHERE id = ?', [rewritten, raw.id])
+        shot.nonDiegeticMusic = rewritten
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: `配乐已统一为${lang === 'zh' ? '中文' : '英文'}` })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.PROMPT_CONDENSE]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      // sceneNumber 与 validateShot 同口径传入：估算按出片口径排除跨场场景 ref
+      //（generate-video.js collectShot 出片时会拦截跨场图，QC 估算须一致，否则误报超限）
+      const shotSceneNumber = ctx.scenes?.[entry.sceneIdx]?.sceneNumber
+      const est = estimateShotVideoPromptChars(shot, { assetNames: loadAssetNames(episodeId), sceneNumber: shotSceneNumber })
+      if (est.estimated <= 6900) { fixed++; details.push({ shot: it.shot, ok: true, note: '出片提示词已在上限以内，问题已不存在' }); continue }
+      try {
+        const rewritten = await condensePrompt(shot, ctx.style)
+        if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出精简后的提示词' }); continue }
+        if (rewritten.description === shot.description && rewritten.actionNote === (shot.actionNote || '') && rewritten.finalFrame === (shot.finalFrame || '')) { fixed++; details.push({ shot: it.shot, ok: true, note: '本镜已无需精简，问题已不存在' }); continue }
+        execute('UPDATE shots SET description = ?, action_note = ?, final_frame = ? WHERE id = ?', [rewritten.description, rewritten.actionNote || shot.actionNote || '', rewritten.finalFrame, raw.id])
+        shot.description = rewritten.description
+        if (rewritten.actionNote) shot.actionNote = rewritten.actionNote
+        shot.finalFrame = rewritten.finalFrame
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: `出片提示词已精简 ${est.fieldTotal} → ${rewritten.description.length + (rewritten.actionNote || '').length + rewritten.finalFrame.length} 字符` })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.PROMPT_EXPAND]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      const imd = String(shot.integratedMultimodalDescription || '')
+      const origNote = String(shot.actionNote || '')
+      // action_note 空时即使 IMD 够长也要修——出片时间轴来源是 action_note，空则出片死气。
+      if (imd.length >= 180 && origNote) { fixed++; details.push({ shot: it.shot, ok: true, note: '提示词已达长度要求，问题已不存在' }); continue }
+      try {
+        const rewritten = await expandThinPrompt(shot, ctx.style)
+        if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出扩写后的过程描写' }); continue }
+        if (rewritten.integratedMultimodalDescription === imd && rewritten.actionNote === origNote) { fixed++; details.push({ shot: it.shot, ok: true, note: '本镜已无需扩写，问题已不存在' }); continue }
+        execute('UPDATE shots SET integrated_multimodal_description = ?, action_note = ? WHERE id = ?', [rewritten.integratedMultimodalDescription, rewritten.actionNote || origNote, raw.id])
+        shot.integratedMultimodalDescription = rewritten.integratedMultimodalDescription
+        if (rewritten.actionNote) shot.actionNote = rewritten.actionNote
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: `长镜提示词已扩写双落点 ${imd.length} → ${rewritten.integratedMultimodalDescription.length} 字符` })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.LIGHTING_ALIGN]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { sceneIdx, shot, raw } = entry
+      const prev = prevShotOf(episodeId, ctx, sceneIdx, shot)
+      if (!prev) { failed++; details.push({ shot: it.shot, ok: false, reason: '没有上一镜，无法取光线基准' }); continue }
+      const prevFinal = prev.shot.finalFrame || ''
+      if (!prevFinal) { failed++; details.push({ shot: it.shot, ok: false, reason: '上一镜没有最终画面，无法对齐光线' }); continue }
+      try {
+        const rewritten = await alignLighting(shot, prev.shot, ctx.style)
+        if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出对齐光线后的改写' }); continue }
+        // 双落点回写：模块2 与 final_frame 一起改（检出端读 curr(finalFrame + IMD 首行)，只改 IMD 复检照样告警）
+        const newFf = rewritten.finalFrame || shot.finalFrame || ''
+        execute('UPDATE shots SET integrated_multimodal_description = ?, final_frame = ? WHERE id = ?', [rewritten.integratedMultimodalDescription, newFf, raw.id])
+        shot.integratedMultimodalDescription = rewritten.integratedMultimodalDescription
+        shot.finalFrame = newFf
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: '本镜模块2 与最终画面光线已对齐同场上一镜' })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.ACTION_DEDUPE]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { sceneIdx, shot, raw } = entry
+      const prev = prevShotOf(episodeId, ctx, sceneIdx, shot)
+      if (!prev) { failed++; details.push({ shot: it.shot, ok: false, reason: '没有上一镜，无法判定动作重复' }); continue }
+      const prevFinal = prev.shot.finalFrame || ''
+      if (!prevFinal) { failed++; details.push({ shot: it.shot, ok: false, reason: '上一镜没有最终画面，无法对齐动作末态' }); continue }
+      // 预检与 validator checkCutActionOverlap 同一检出器：已收敛的镜直接判"问题已不存在"——
+      // 否则重跑修复时 AI 无改动可改（verify 要求文本变化），会把成功收敛误报成"AI 未产出去重后的改写"假失败。
+      if (!detectCutActionOverlapHits(prevFinal, shot.description || '').length) {
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: '本镜开头已不再重述上镜末帧动作，问题已不存在' })
+        continue
+      }
+      try {
+        const result = await dedupeActionOverlap(shot, prev.shot, ctx.style)
+        if (!result) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出去重后的改写' }); continue }
+        execute('UPDATE shots SET description = ?, integrated_multimodal_description = ? WHERE id = ?', [result.description, result.integratedMultimodalDescription, raw.id])
+        shot.description = result.description
+        shot.integratedMultimodalDescription = result.integratedMultimodalDescription
+        fixed++
+        details.push({ shot: it.shot, ok: true, note: '已删去与本镜开头重复的动作' })
+      } catch (e) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: e.message })
+      }
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.EMOTION_REFRAME]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    const WIDE_TYPES = ['全景', '远景', '大远景']
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot } = entry
+      const cur = String(shot.shotType || '').trim()
+      if (!WIDE_TYPES.includes(cur)) { fixed++; details.push({ shot: it.shot, ok: true, note: '本镜景别已非远景/全景，问题已不存在' }); continue }
+      const ok = await regenerateWithFrame(entry, shot, { shotType: '近景' }, ctx, it.shot, details)
+      if (ok) fixed++
+      else failed++
+    }
+    return { fixed, failed, details }
+  },
+
+  [QC_ACTION.DIALOGUE_CLAMP]: async (episodeId, items, ctx) => {
+    const details = []
+    let fixed = 0
+    let failed = 0
+    const round1 = (v) => Math.round(v * 10) / 10
+    for (const it of items) {
+      const entry = findShotEntry(episodeId, ctx, it.shot)
+      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
+      const { shot, raw } = entry
+      const shotStart = Number(shot.startTime)
+      const shotEnd = Number(shot.endTime)
+      if (!Number.isFinite(shotStart) || !Number.isFinite(shotEnd) || shotEnd <= shotStart) {
+        failed++
+        details.push({ shot: it.shot, ok: false, reason: '镜头起止时间缺失或无效，无法 clamp 台词' })
+        continue
+      }
+      const wasArray = Array.isArray(shot.dialogue)
+      const list = wasArray ? shot.dialogue : (shot.dialogue && typeof shot.dialogue === 'object' ? [shot.dialogue] : [])
+      if (!list.length || !hasDialogueContentLocal(list)) { fixed++; details.push({ shot: it.shot, ok: true, note: '本镜已无有效台词，问题已不存在' }); continue }
+      const out = list.slice()
+      let changed = false
+      for (let i = 0; i < out.length; i++) {
+        const d = out[i]
+        if (!d || typeof d !== 'object') continue
+        const ns0 = Number(d.startTime)
+        const ne0 = Number(d.endTime)
+        let ns = Number.isFinite(ns0) ? ns0 : null
+        let ne = Number.isFinite(ne0) ? ne0 : null
+        if (ns !== null && ns < shotStart) { ns = round1(shotStart); changed = true }
+        if (ne !== null && ne > shotEnd) { ne = round1(shotEnd); changed = true }
+        if (ns !== null && ne !== null && ne <= ns) { ne = round1(Math.min(shotEnd, ns + 1)); changed = true }
+        if ((ns !== null && ns !== ns0) || (ne !== null && ne !== ne0)) {
+          const shifted = { ...d }
+          if (ns !== null) shifted.startTime = ns
+          if (ne !== null) shifted.endTime = ne
+          out[i] = shifted
+        }
+      }
+      if (!changed) { fixed++; details.push({ shot: it.shot, ok: true, note: '台词时间戳已在镜内，问题已不存在' }); continue }
+      const payload = (!wasArray && out.length === 1) ? out[0] : out
+      execute('UPDATE shots SET dialogue = ? WHERE id = ?', [JSON.stringify(payload), raw.id])
+      shot.dialogue = payload
+      fixed++
+      details.push({ shot: it.shot, ok: true, note: `台词时间戳已 clamp 到本镜 ${shotStart}s–${shotEnd}s` })
+    }
+    return { fixed, failed, details }
+  },
+}
+
+function detectMainMusicLang(scenes) {
+  let zh = 0
+  let en = 0
+  for (const sc of scenes || []) {
+    for (const s of sc.shots || []) {
+      const m = String(s.nonDiegeticMusic || '')
+      for (const ch of m) {
+        if (/[\u4e00-\u9fff]/.test(ch)) zh++
+        else if (/[a-zA-Z]/.test(ch)) en++
+      }
+    }
+  }
+  return zh >= en ? 'zh' : 'en'
 }
 
 function findShotEntry(episodeId, ctx, shotNumber) {
@@ -420,7 +944,7 @@ async function regenerateWithFrame(entry, shot, frame, ctx, label, details) {
     actionNote: note + (shot.actionNote ? `\n原动作说明：${shot.actionNote}` : ''),
   }
   try {
-    const integrated = await enrichShotIntegrated(shotForAI, ctx.assetNames, ctx.style)
+    const integrated = await enrichShotIntegrated(shotForAI, ctx.assetNames, ctx.style, { styleCategory: ctx.styleCategory || '' })
     if (!integrated) { details.push({ shot: label, ok: false, reason: 'AI 未产出有效的提示词改写' }); return false }
     const finalFrame = extractFinalFrameFromIntegrated(integrated) || ''
     execute(
@@ -477,9 +1001,10 @@ router.post('/qc-fix', async (req, res) => {
     const truncated = targets.length > batchLimit
     const work = truncated ? targets.slice(0, batchLimit) : targets
 
-    const ctx = { scenes, shotIndex, assetNames, style: assetNames.projectStyleText || config.defaultArtStyle }
+    const ctx = { scenes, shotIndex, assetNames, style: assetNames.projectStyleText || config.defaultArtStyle, styleCategory: assetNames.projectStyleCategory || '' }
     const result = await handler(epId, work.map((s) => ({ shot: s })), ctx)
     console.log(`[qc-fix] code=${code} 目标 ${work.length} 镜 → 修好 ${result.fixed}，失败 ${result.failed}`)
+    persistQcToShots(epId)
     res.json({
       success: true,
       code,

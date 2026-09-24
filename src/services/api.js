@@ -4,6 +4,10 @@ const DEFAULT_TIMEOUT_MS = 60000
 const LLM_TIMEOUT_MS = 480000
 const LLM_LONG_TIMEOUT_MS = 1500000
 const POLL_TIMEOUT_MS = 5000
+const QUERY_TIMEOUT_MS = 120000
+const MEDIA_TIMEOUT_MS = 600000
+const COMBAT_VIDEO_TIMEOUT_MS = 900000
+const VIDEO_TIMEOUT_MS = 1200000
 
 async function request(path, options = {}) {
   const timeoutMs = Number(options.timeout) > 0 ? Number(options.timeout) : DEFAULT_TIMEOUT_MS
@@ -50,7 +54,9 @@ async function request(path, options = {}) {
     if (res.status === 401 && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('wb:unauthorized'))
     }
-    throw new Error(data.error || `请求失败 (${res.status})`)
+    const err = new Error(data.error || `请求失败 (${res.status})`)
+    err.status = res.status
+    throw err
   }
   return data
 }
@@ -85,6 +91,12 @@ export const api = {
     request('/generate/enrich-storyboard', { method: 'POST', body: { episodeId, ...options }, timeout: LLM_LONG_TIMEOUT_MS }),
   updateShot: (episodeId, shotId, data) =>
     request(`/episodes/${episodeId}/shots/${shotId}`, { method: 'PUT', body: data }),
+  regenerateShot: (episodeId, shotId, data = {}) =>
+    request(`/episodes/${episodeId}/shots/${shotId}/regenerate`, { method: 'POST', body: data, timeout: LLM_TIMEOUT_MS }),
+  getShotVersions: (episodeId, shotId) =>
+    request(`/episodes/${episodeId}/shots/${shotId}/versions`),
+  restoreShotVersion: (episodeId, shotId, versionId) =>
+    request(`/episodes/${episodeId}/shots/${shotId}/versions/${versionId}/restore`, { method: 'POST', body: {} }),
 
   generateFull: (data) => request('/generate/full', { method: 'POST', body: data }),
   generateScript: (data) => request('/generate/script', { method: 'POST', body: data, timeout: LLM_TIMEOUT_MS }),
@@ -95,16 +107,16 @@ export const api = {
   getStoryboardProgress: (episodeId) =>
     request(`/generate/storyboard-progress?episodeId=${encodeURIComponent(episodeId)}`, { timeout: POLL_TIMEOUT_MS }),
   extractStoryboardFromFile: (data) => request('/generate/storyboard-from-file', { method: 'POST', body: data, timeout: LLM_LONG_TIMEOUT_MS }),
-  generateSceneGrid: (data) => request('/generate/scene-grid', { method: 'POST', body: data, timeout: 600000 }),
-  generateShotGrid: (data) => request('/generate/shot-grid', { method: 'POST', body: data, timeout: 600000 }),
+  generateSceneGrid: (data) => request('/generate/scene-grid', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS }),
+  generateShotGrid: (data) => request('/generate/shot-grid', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS }),
   getShotGridJobs: () => request('/generate/shot-grid/status'),
-  generateImage: (data) => request('/generate/image', { method: 'POST', body: data, timeout: 600000 }),
+  generateImage: (data) => request('/generate/image', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS }),
   getImageJobsInflight: () => request('/generate/image/inflight'),
-  generateVideoCombat: (data) => request('/generate/video-v3', { method: 'POST', body: data, timeout: 900000 }),
-  generateVideoV4: (data) => request('/generate/video-v4', { method: 'POST', body: data, timeout: 1200000 }),
+  generateVideoCombat: (data) => request('/generate/video-v3', { method: 'POST', body: data, timeout: COMBAT_VIDEO_TIMEOUT_MS }),
+  generateVideoV4: (data) => request('/generate/video-v4', { method: 'POST', body: data, timeout: VIDEO_TIMEOUT_MS }),
   getVideoV3JobsInflight: () => request('/generate/video-v3/inflight'),
   getVideoV4JobsInflight: () => request('/generate/video-v4/inflight'),
-  composeVideo: (data) => request('/generate/video/compose', { method: 'POST', body: data, timeout: 600000 }),
+  composeVideo: (data) => request('/generate/video/compose', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS }),
   getBgmList: () => request('/generate/bgm-list'),
   getAlerts: (params = {}) => {
     const qs = []
@@ -113,23 +125,15 @@ export const api = {
     return request(`/generate/alerts${qs.length ? '?' + qs.join('&') : ''}`)
   },
   resolveAlert: (data) => request('/generate/alerts/resolve', { method: 'POST', body: data }),
-  generateVideoSegment: (segmentId) =>
-    request(`/generate/video-segment/${segmentId}`, { method: 'POST', body: {}, timeout: 1200000 }),
-  saveEpisodeSegments: (episodeId, data = {}) =>
-    request(`/episodes/${episodeId}/segments`, { method: 'POST', body: data }),
-  getSegmentsStaleness: (episodeId) =>
-    request(`/episodes/${episodeId}/segments/staleness`),
-  sliceEpisodeSegments: (episodeId, data = {}) =>
-    request(`/episodes/${episodeId}/segments/slice`, { method: 'POST', body: data }),
   deleteShotVideo: (episodeId, shotId) =>
     request(`/episodes/${episodeId}/shots/${shotId}/video`, { method: 'DELETE' }),
   deleteShotsVideo: (episodeId, shotIds) =>
     request(`/episodes/${episodeId}/shots/video-delete`, { method: 'POST', body: { shotIds } }),
-  generateAssetImage: (data, options = {}) => request('/generate/asset-image', { method: 'POST', body: data, timeout: 600000, signal: options.signal }),
+  generateAssetImage: (data, options = {}) => request('/generate/asset-image', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS, signal: options.signal }),
   getSceneSpatialGroups: (episodeId) =>
-    request(`/generate/scene-spatial-groups?episodeId=${encodeURIComponent(episodeId)}`, { timeout: 120000 }),
+    request(`/generate/scene-spatial-groups?episodeId=${encodeURIComponent(episodeId)}`, { timeout: QUERY_TIMEOUT_MS }),
   getSpatialGroupReviewStatus: (episodeId) =>
-    request(`/generate/spatial-group-review/status?episodeId=${encodeURIComponent(episodeId)}`, { timeout: 120000 }),
+    request(`/generate/spatial-group-review/status?episodeId=${encodeURIComponent(episodeId)}`, { timeout: QUERY_TIMEOUT_MS }),
   initSpatialGroupReview: (data) => request('/generate/spatial-group-review/init', { method: 'POST', body: data }),
   decideSpatialGroupReview: (data) => request('/generate/spatial-group-review/decide', { method: 'POST', body: data }),
   getGroupLocks: (episodeId) =>
@@ -138,9 +142,25 @@ export const api = {
   unlockGrouping: (data) =>
     request('/generate/scene-groups/locks', { method: 'DELETE', body: data || {} }),
   getLayoutAnchor: (episodeId, group) =>
-    request(`/generate/layout-anchor?episodeId=${encodeURIComponent(episodeId)}&group=${encodeURIComponent(group)}`, { timeout: 120000 }),
+    request(`/generate/layout-anchor?episodeId=${encodeURIComponent(episodeId)}&group=${encodeURIComponent(group)}`, { timeout: QUERY_TIMEOUT_MS }),
   generateLayoutAnchor: (data) =>
     request('/generate/layout-anchor', { method: 'POST', body: data, timeout: LLM_LONG_TIMEOUT_MS }),
+  setLayoutAnchorEnabled: (data) =>
+    request('/generate/layout-anchor/toggle', { method: 'POST', body: data }),
+  setAllLayoutAnchorEnabled: (data) =>
+    request('/generate/layout-anchor/toggle-all', { method: 'POST', body: data }),
+  getLayoutRoute: (episodeId) =>
+    request(`/generate/layout-route?episodeId=${encodeURIComponent(episodeId)}`, { timeout: QUERY_TIMEOUT_MS }),
+  getSceneOutPlan: (episodeId) =>
+    request(`/generate/scene-out-plan?episodeId=${encodeURIComponent(episodeId)}`, { timeout: QUERY_TIMEOUT_MS }),
+  deleteLayoutAnchor: (data) =>
+    request(`/generate/layout-anchor?episodeId=${encodeURIComponent(data.episodeId)}&group=${encodeURIComponent(data.group)}`, { method: 'DELETE' }),
+  uploadLayoutAnchor: (data) =>
+    request('/generate/layout-anchor/upload', { method: 'POST', body: data }),
+  getLayoutAnchorHistory: (episodeId, group) =>
+    request(`/generate/layout-anchor/history?episodeId=${encodeURIComponent(episodeId)}&group=${encodeURIComponent(group)}`),
+  restoreLayoutAnchor: (data) =>
+    request('/generate/layout-anchor/restore', { method: 'POST', body: data }),
   getAssetImageHistory: (params) => request(`/generate/asset-image/history?type=${params.type}&id=${params.id}`),
   restoreAssetImage: (data) => request('/generate/asset-image/restore', { method: 'POST', body: data }),
   saveExtractInfo: (episodeId, assetsScriptFp) =>

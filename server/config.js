@@ -11,7 +11,9 @@ export const config = {
 
   host: process.env.SERVER_HOST || '127.0.0.1',
 
-  defaultArtStyle: process.env.DEFAULT_ART_STYLE || '吉卜力风格',
+  // 默认画风不写死具体画风：由 DEFAULT_ART_STYLE 环境变量或项目自身 art_style 决定。
+  // 留空时全链路退回中性画风表述，不静默套用某个画风。
+  defaultArtStyle: process.env.DEFAULT_ART_STYLE || '',
 
   llm: {
     apiKey: process.env.ZHIPU_API_KEY || process.env.DASHSCOPE_API_KEY || '',
@@ -22,13 +24,39 @@ export const config = {
     maxConcurrent: Math.max(1, Number(process.env.LLM_MAX_CONCURRENT) || 6),
   },
 
+  timeouts: {
+    llm: {
+      short: Math.max(1000, Number(process.env.LLM_TIMEOUT_SHORT_MS) || 30000),
+      translate: Math.max(1000, Number(process.env.LLM_TIMEOUT_TRANSLATE_MS) || 60000),
+      repair: Math.max(1000, Number(process.env.LLM_TIMEOUT_REPAIR_MS) || 90000),
+      standard: Math.max(1000, Number(process.env.LLM_TIMEOUT_STANDARD_MS) || 180000),
+      extended: Math.max(1000, Number(process.env.LLM_TIMEOUT_EXTENDED_MS) || 240000),
+      longScript: Math.max(1000, Number(process.env.LLM_TIMEOUT_LONG_SCRIPT_MS) || 300000),
+    },
+    http: {
+      default: Math.max(1000, Number(process.env.HTTP_TIMEOUT_DEFAULT_MS) || 30000),
+      upload: Math.max(1000, Number(process.env.HTTP_TIMEOUT_UPLOAD_MS) || 60000),
+      download: Math.max(1000, Number(process.env.HTTP_TIMEOUT_DOWNLOAD_MS) || 180000),
+      generate: Math.max(1000, Number(process.env.HTTP_TIMEOUT_GENERATE_MS) || 300000),
+    },
+    workflow: {
+      poll: Math.max(1000, Number(process.env.WORKFLOW_POLL_TIMEOUT_MS) || 600000),
+      video: Math.max(1000, Number(process.env.VIDEO_JOB_TIMEOUT_MS) || 1200000),
+    },
+  },
+
   storyboard: {
     parallel: process.env.STORYBOARD_PARALLEL !== '0',
     fixAxis: process.env.STORYBOARD_FIX_AXIS !== '0',
+    // 镜头合并引擎：生成后自动合并「无收益切镜」的相邻碎镜（0 关闭）
+    shotMerge: process.env.STORYBOARD_SHOT_MERGE !== '0',
+    // QC 定点修补：场次 QC 报错时只回炉出错的镜头（复用单镜重写器），替代整场重跑（0 关闭即整场重跑）
+    shotRepair: process.env.STORYBOARD_SHOT_REPAIR !== '0',
+    repairConcurrency: Math.max(1, Number(process.env.STORYBOARD_REPAIR_CONCURRENCY) || 4),
     enrichConcurrency: Math.max(1, Number(process.env.ENRICH_CONCURRENCY) || 4),
     frameReview: process.env.FRAME_REVIEW !== '0',
     frameReviewRetry: Math.max(0, Number(process.env.FRAME_REVIEW_RETRY ?? 1)),
-    sceneReview: process.env.SCENE_REVIEW === '1',
+    sceneReview: process.env.SCENE_REVIEW !== '0',
     sceneReviewRetry: Math.max(0, Number(process.env.SCENE_REVIEW_RETRY ?? 1)),
     lightTasks: (process.env.LLM_LIGHT_TASKS ?? 'h3-prompt-translate,style-prompt-en,lighting-check,storyboard-airlock,storyboard-axis,storyboard-geography')
       .split(',').map((s) => s.trim()).filter(Boolean),
@@ -67,6 +95,22 @@ export const config = {
     attrMonotoneAngleMax: Number(process.env.ATTR_MONOTONE_ANGLE_MAX) || 0.45,
     attrMonotoneShotTypeMax: Number(process.env.ATTR_MONOTONE_SHOTTYPE_MAX) || 0.4,
     attrMonotoneMoveMax: Number(process.env.ATTR_MONOTONE_MOVE_MAX) || 0.3,
+
+    speciesDriftCheckEnabled: process.env.SPECIES_DRIFT_CHECK !== '0',
+    dialogueWindowCheckEnabled: process.env.DIALOGUE_WINDOW_CHECK !== '0',
+    airlockSec: Math.max(0, Number(process.env.AIRLOCK_SEC) || 2),
+    dialogueOverflowEpsSec: Math.max(0, Number(process.env.DIALOGUE_OVERFLOW_EPS_SEC) || 0.5),
+    dialogueTightMinSec: Math.max(0, Number(process.env.DIALOGUE_TIGHT_MIN_SEC) || 2.5),
+    sceneTemplateCheckEnabled: process.env.SCENE_TEMPLATE_CHECK !== '0',
+    sceneTemplateToleranceSec: Math.max(0, Number(process.env.SCENE_TEMPLATE_TOLERANCE_SEC) || 1),
+    sceneTemplateMinScenes: Math.max(2, Number(process.env.SCENE_TEMPLATE_MIN_SCENES) || 3),
+    fastCutCheckEnabled: process.env.FAST_CUT_CHECK !== '0',
+    fastCutMaxSec: Math.max(1, Number(process.env.FAST_CUT_MAX_SEC) || 5),
+    fastCutMinShots: Math.max(1, Number(process.env.FAST_CUT_MIN_SHOTS) || 20),
+    propRegisterCheckEnabled: process.env.PROP_REGISTER_CHECK !== '0',
+    propCandidateMinMentions: Math.max(1, Number(process.env.PROP_CANDIDATE_MIN_MENTIONS) || 3),
+    emotionSceneStaticCheckEnabled: process.env.EMOTION_SCENE_STATIC_CHECK !== '0',
+    emotionSceneStaticRatio: Number(process.env.EMOTION_SCENE_STATIC_RATIO) || 0.5,
   },
 
   assetState: {
@@ -81,18 +125,17 @@ export const config = {
 
   runninghub: {
     apiKey: process.env.RUNNINGHUB_API_KEY || '',
-    baseURL: 'https://www.runninghub.cn',
+    baseURL: (process.env.RUNNINGHUB_BASE_URL || 'https://www.runninghub.cn').replace(/\/+$/, ''),
     workflows: {
-      imageGenerator: '2092078813630001153', 
-      storyboardGenerator: '2092895275319910402', 
+      imageGenerator: process.env.RH_IMAGE_GENERATOR_WORKFLOW_ID || '2092078813630001153', 
+      storyboardGenerator: process.env.RH_STORYBOARD_GENERATOR_WORKFLOW_ID || '2092895275319910402', 
       frameGridGenerator: process.env.RH_FRAME_GRID_WORKFLOW_ID || '',
       shotGridApp: process.env.RH_SHOT_GRID_APP_ID || '2048139846660657154',
       h3Combat: process.env.RH_H3_COMBAT_WORKFLOW_ID || '2094872667374571522',
-      h3V4: process.env.RH_H3_V4_WORKFLOW_ID || '2097709786870673409',
-      h3V4mc: process.env.RH_H3_V4_MC_WORKFLOW_ID || '',
-    },
-    motionContext: {
-      enabled: process.env.RH_MOTION_CONTEXT_ENABLED === 'true',
+      // 唯一出片工作流（2026-09-24 起：V5-SelfLift 融合改造版替换原 V5 2102257672056827905）：
+      // 普通镜走占位视频（switch=false 的 1393 无视频路径），续接镜走真 video continuation
+      // （switch=true 的 2103 参考视频路径）。ID 缺省即本账号工作流，可用 env 覆盖。
+      h3V4vc: process.env.RH_H3_V4_VC_WORKFLOW_ID || '2102948824707854338',
     },
     h3CombatTimeoutMs: Number(process.env.RH_H3_COMBAT_TIMEOUT_MS) || 60 * 60 * 1000,
     shotGrid: {
@@ -150,7 +193,17 @@ export const config = {
         aspectRatio: { nodeId: '456', fieldName: 'aspect_ratio' },
         megapixels: { nodeId: '456', fieldName: 'megapixels' },
       },
-      h3V4: {
+      // Ref2VA video continuation 单图 Switch 版（V5-SelfLift 融合改造版，唯一出片工作流）：
+      // 1393 无视频链 / 1393B(2103) 带 LoadVideo(2101)→GetVideoComponents(2102)→ref_video_0，
+      // 两个 ComfySwitchNode(2104/2105) 切 positive/LATENT。普通镜传占位视频不传 switch
+      // （默认 false 走 A 路径），续接镜传 video + switch="true" 走 B。
+      // bool("false")==True，所以只传 true、绝不传 false。
+      // SelfLift 单管线（2026-09-24 改造）：原一采(124)+二采(1329)双管线已删，换
+      // SelfLiftH3Sampler(2106)——8 步调度内完成 低分前缀(6步@0.5)→lift→高分收尾(2步)，
+      // 步数/分辨率由工作流内置调参，路由层不再覆盖（覆盖值会让高分收尾被挤掉）。
+      // seed 落在 2106 的 seed widget；原 129 noise_seed、1329、1407(悬空) 节点均已不可用。
+      // 新增 2111 ref_image_size 开关（match=快/max=身份准），默认 match，暂未接线。
+      h3V4vc: {
         apiVersion: 'v2',
         kind: 'workflow',
         instanceType: 'default',
@@ -173,15 +226,10 @@ export const config = {
         combatLora: { nodeId: '1414', fieldName: 'lora_name' },
         combatLoraStrength: { nodeId: '1414', fieldName: 'strength_model' },
         unetName: { nodeId: '1380', fieldName: 'unet_name' },
-        firstPassSteps: { nodeId: '124', fieldName: 'steps' },
-        firstPassDenoise: { nodeId: '124', fieldName: 'denoise' },
-        secondPassSteps: { nodeId: '1329', fieldName: 'steps' },
-        secondPassDenoise: { nodeId: '1329', fieldName: 'denoise' },
-        upscaleMegapixels: { nodeId: '1407', fieldName: 'value' },
-        seed: { nodeId: '129', fieldName: 'noise_seed' },
-      },
-      get h3V4mc() {
-        return { ...this.h3V4, video: { nodeId: '2001', fieldName: 'file' } }
+        seed: { nodeId: '2106', fieldName: 'seed' },
+        video: { nodeId: '2101', fieldName: 'file' },
+        vcSwitchC: { nodeId: '2104', fieldName: 'switch' },
+        vcSwitchL: { nodeId: '2105', fieldName: 'switch' },
       },
     },
   },
@@ -218,6 +266,10 @@ export const config = {
     path: process.env.DB_PATH || path.join(serverDir, 'data.db'),
   },
 
+  retention: {
+    aiCallsDays: Math.max(0, Number(process.env.AI_CALL_RETENTION_DAYS) || 180),
+  },
+
   video: {
     defaultAspectRatio: process.env.DEFAULT_ASPECT_RATIO || '9:16 (Portrait Widescreen)',
     aspectRatios: [
@@ -246,12 +298,12 @@ export const config = {
     shotDurationMin: Math.max(1, Number(process.env.VIDEO_SHOT_MIN_SEC) || 3),
     shotDurationMax: Math.max(1, Number(process.env.VIDEO_SHOT_MAX_SEC) || 15),
     shotDefaultDuration: Math.max(1, Number(process.env.VIDEO_SHOT_DEFAULT_SEC) || 5),
+    h3SingleTakeBlock: process.env.H3_SINGLE_TAKE_BLOCK !== '0',
+    h3EmotionToneVisual: process.env.H3_EMOTION_TONE_VISUAL !== '0',
   },
 
   asset: {
     maxRefs: Math.max(1, Number(process.env.ASSET_MAX_REFS) || 4),
-    maxSpatialRefs: Math.max(1, Number(process.env.ASSET_MAX_SPATIAL_REFS) || 2),
-    maxPropRefs: Math.max(1, Number(process.env.ASSET_MAX_PROP_REFS) || 2),
   },
 
   ipRouter: {

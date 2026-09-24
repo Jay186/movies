@@ -12,7 +12,7 @@ export function getProjectCharacters(projectId) {
   return query('SELECT * FROM project_characters WHERE project_id = ? ORDER BY id', [projectId])
 }
 
-export function findProjectCharacter(projectId, { id, name }) {
+function findProjectCharacter(projectId, { id, name }) {
   if (!projectId) return null
   if (id) {
     const row = queryOne('SELECT * FROM project_characters WHERE id = ? AND project_id = ?', [id, projectId])
@@ -45,7 +45,6 @@ export function createProjectCharacter(projectId, data = {}) {
   )
   return queryOne('SELECT * FROM project_characters WHERE id = ?', [r.lastInsertRowid])
 }
-
 
 export function updateProjectCharacter(masterId, data = {}, { allowClear = false } = {}) {
   const current = queryOne('SELECT * FROM project_characters WHERE id = ?', [masterId])

@@ -125,3 +125,21 @@ export function resolveAlertsByScene(sceneId, by = 'regen', source = '') {
   }
 }
 
+const ALERT_REF_COLUMNS = { shot: 'shot_id', scene: 'scene_id', episode: 'episode_id' }
+
+export function clearAlertsByRef(refType, refIds) {
+  const column = ALERT_REF_COLUMNS[refType]
+  const ids = (Array.isArray(refIds) ? refIds : [refIds])
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v))
+  if (!column || !ids.length) return 0
+  try {
+    const placeholders = ids.map(() => '?').join(',')
+    const r = execute(`DELETE FROM system_alerts WHERE ${column} IN (${placeholders})`, ids)
+    return r.changes || 0
+  } catch (e) {
+    console.warn(`[alerts] 清理${refType}告警失败:`, e.message)
+    return 0
+  }
+}
+

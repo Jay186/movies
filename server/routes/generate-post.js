@@ -6,12 +6,11 @@ import { query, queryOne, execute } from '../db.js'
 import { extractBlockingForScene, assembleBlockingPlan } from '../ai/doubao.js'
 import { assertScriptConfirmed } from '../ai/guards.js'
 import { uploadsUrlToAbs } from '../ai/shared.js'
-import { relayLastFrameToNextShot } from '../ai/postHooks.js'
 import { checkSeam, checkOpenerTone } from '../ai/seamCheck.js'
-import { reviewShotByShotId } from '../ai/shotReview.js'
 import { listAlerts, countUnresolved, resolveAlert, resolveAlertsByShot, resolveAlertsByScene } from '../ai/alerts.js'
 import { mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
 import { measureLoudness, loudnormFilter, normalizeFinalLoudness, PER_SHOT_TARGET, FINAL_TARGET } from '../audioLoudnorm.js'
+import { runFfmpeg } from '../ai/ffmpeg.js'
 import { uploadsDir } from '../paths.js'
 
 const router = Router()
@@ -282,20 +281,13 @@ router.post('/video/compose', async (req, res) => {
 })
 
 router.post('/continuity-frame', async (req, res) => {
-  const { shotId } = req.body
-  if (!shotId) return res.status(400).json({ error: 'shotId 必填' })
-  const shot = queryOne('SELECT * FROM shots WHERE id = ?', [Number(shotId)])
-  if (!shot) return res.status(404).json({ error: `镜头不存在 (shotId=${shotId})` })
-  try {
-    const r = await relayLastFrameToNextShot(shot)
-    console.log(`[/generate/continuity-frame] shot ${shotId} 末帧 → shot ${r.nextShotId} (${r.nextShotNumber}) 作 continuity 锚`)
-    res.json({ success: true, ...r })
-  } catch (e) {
-    const msg = String(e.message || e)
-    const status = /没有成片|最后一镜|无法识别|不存在/.test(msg) ? 400 : 500
-    console.warn(`[/generate/continuity-frame] shot ${shotId} 接力失败:`, msg)
-    res.status(status).json({ error: msg })
-  }
+  // 静态四锚方案（2026-09-21）已停用接力锚：出片参考只喂角色/场景/道具/分镜图，
+  // 不再消费 continuity_url，本写入接口一并停用。单镜动态接续由尾帧软接续 + V5 视频续写承担。
+  return res.status(410).json({
+    error: '接力锚（continuity-frame）已按静态四锚方案停用：出片不再消费 continuity_url，写入无意义。'
+      + '同场景上一镜已出片时，下一镜出片会自动携带其尾帧锚；已配置 V5 工作流时自动升级为视频续写（video continuation）。',
+    deprecated: true,
+  })
 })
 
 router.post('/seam-check', async (req, res) => {
@@ -313,20 +305,6 @@ router.post('/seam-check', async (req, res) => {
     const status = /没有成片|没有 continuity|不存在|无法识别/.test(msg) ? 400 : 500
     console.warn(`[/generate/seam-check] shot ${shotId} 检测失败:`, msg)
     res.status(status).json({ error: msg })
-  }
-})
-
-router.post('/shot-review', async (req, res) => {
-  const { shotId } = req.body
-  if (!shotId) return res.status(400).json({ error: 'shotId 必填' })
-  try {
-    const r = await reviewShotByShotId(Number(shotId))
-    console.log(`[/generate/shot-review] shot ${shotId} 观片评审: 均分${r.avgScore} ${r.verdict === 'fail' ? '⚠️ fail' : r.verdict === 'warn' ? '⚠️ warn' : 'OK'} — ${r.summary}`)
-    res.json({ success: true, ...r })
-  } catch (e) {
-    const msg = String(e.message || e)
-    console.warn(`[/generate/shot-review] shot ${shotId} 评审失败:`, msg)
-    res.status(/不存在|没有成片|未配置/.test(msg) ? 400 : 500).json({ error: msg })
   }
 })
 

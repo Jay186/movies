@@ -1,38 +1,7 @@
 
-import { buildLexicon } from './continuityGuard.js'
-
 const DEFAULT_STATE_KEY = 'intact'   
 const DEFAULT_STATE_MARKER = '__default__' 
 const KEY_SEP = '#'                  
-
-
-export function getStateAliases(opts = {}) {
-  try {
-    const L = buildLexicon(opts)
-    const raw = L.stateAliases && typeof L.stateAliases === 'object' ? L.stateAliases : {}
-    const out = {}
-    for (const [key, aliases] of Object.entries(raw)) {
-      const k = String(key || '').trim()
-      if (!k) continue
-      out[k.toLowerCase()] = (Array.isArray(aliases) ? aliases : [aliases])
-        .map((a) => String(a || '').trim())
-        .filter(Boolean)
-    }
-    return out
-  } catch {
-    return {}
-  }
-}
-
-function slugifyAscii(s) {
-  return String(s || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-}
-
-
 
 export function resolveState(shotStateEntry, assetStatesList) {
   const empty = {
@@ -70,12 +39,10 @@ function rowToState(row, isDefault) {
   }
 }
 
-
-export function isDefaultStateRequest(entry) {
+function isDefaultStateRequest(entry) {
   const s = typeof entry === 'string' ? entry : (entry && typeof entry === 'object' ? entry.state : '')
   return String(s || '').trim().toLowerCase() === DEFAULT_STATE_MARKER
 }
-
 
 export function buildAnchorKey(assetName, stateKey) {
   const name = String(assetName || '').trim()
@@ -90,7 +57,6 @@ export function stripStateSuffix(anchorKey) {
   const i = s.indexOf(KEY_SEP)
   return (i >= 0 ? s.slice(0, i) : s).trim()
 }
-
 
 export function scanOrphanStates(stateRows, liveAnchorKeys) {
   const rows = Array.isArray(stateRows) ? stateRows : []
@@ -109,7 +75,6 @@ export function scanOrphanStates(stateRows, liveAnchorKeys) {
   }
   return { orphans, checked: rows.length }
 }
-
 
 export function displayLabel(stateKey, labelZh) {
   const zh = String(labelZh || '').trim()

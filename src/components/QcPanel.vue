@@ -11,6 +11,19 @@ const confirming = ref('')
 
 const report = computed(() => store.qcReport)
 const groups = computed(() => report.value?.groups || [])
+
+const showHeuristic = ref(false)
+const groupSections = computed(() => {
+  const defs = [
+    { key: 'official', label: '官方规范', basis: 'official', note: 'H3 官方提示词指南明确规定，违反会直接影响生成结果' },
+    { key: 'industry', label: '行业共识', basis: 'industry', note: '影视/配音行业共识与工程必然（缺参考图、时间轴断裂等）' },
+    { key: 'heuristic', label: '经验值', basis: 'heuristic', collapsible: true, note: '经验值阈值，误报相对常见——按需展开，不认的直接忽略整类' },
+  ]
+  return defs.map((d) => {
+    const list = groups.value.filter((g) => (g.basis || 'industry') === d.basis)
+    return { ...d, list, count: list.reduce((n, g) => n + g.items.length, 0) }
+  })
+})
 const counts = computed(() => ({
   error: report.value?.errorCount || 0,
   warning: report.value?.warningCount || 0,
@@ -40,6 +53,14 @@ const status = computed(() => {
 const lastResultTone = computed(() => {
   const t = store.qcLastResult || ''
   return /失败|未成功|未登记|需要人工|无法/.test(t) ? 'bad' : 'good'
+})
+
+const fixDetails = computed(() => store.qcFixDetails || [])
+const fixingTitle = computed(() => {
+  const code = store.qcFixing[0]
+  if (!code) return ''
+  const g = groups.value.find((x) => x.code === code)
+  return g?.title || code
 })
 
 function removable(g) {
@@ -81,7 +102,7 @@ async function runFix(g) {
     return
   }
   confirming.value = ''
-  await store.qcFix(g.code)
+  await store.qcFix(g.code, null, g.title || g.code)
 }
 
 async function confirmErrorIgnore(g) {
@@ -152,7 +173,7 @@ watch(
           <span v-if="counts.error" class="text-danger"><b class="font-mono font-medium">{{ counts.error }}</b> 必须修</span>
           <span v-if="counts.warning" class="text-warn"><b class="font-mono font-medium">{{ counts.warning }}</b> 建议修</span>
           <span v-if="counts.ignored" class="text-text-muted"><b class="font-mono font-medium">{{ counts.ignored }}</b> 已忽略</span>
-          <span v-if="report.trimmed" class="text-info" :title="`单类问题条数较多，已截断展示（上限 ${report.actions ? 2000 : ''}）`">已截断</span>
+          <span v-if="report.trimmed" class="text-info" :title="`单类问题条数较多，已截断展示（单类上限 ${report.panelLimit ?? 2000} 条，可在服务端配置 QC_PANEL_LIMIT 调整）`">已截断</span>
         </span>
       </div>
 
@@ -191,90 +212,134 @@ watch(
       <span class="leading-relaxed">{{ store.qcLastResult }}</span>
     </div>
 
-    <div v-if="groups.length" class="divide-y divide-border/60">
-      <div v-for="g in groups" :key="g.code">
-        <div class="flex items-center gap-2 px-4 py-2 transition hover:bg-bg-hover/40">
-          <button class="group flex min-w-0 flex-1 items-center gap-2.5 text-left" @click="toggle(g.code)">
-            <svg
-              class="h-3 w-3 shrink-0 text-text-muted transition-transform duration-200"
-              :class="expandedCode === g.code ? 'rotate-90' : ''"
-              fill="none" stroke="currentColor" viewBox="0 0 24 24"
-            ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
-            <span
-              class="inline-flex shrink-0 items-center rounded-control border px-1.5 py-0.5 text-micro font-medium"
-              :class="levelClass(g.level)"
-            >{{ g.level === 'error' ? '必须修' : '建议修' }}</span>
-            <span class="truncate text-[12px] font-medium text-text-primary">{{ g.title || g.code }}</span>
-            <span class="shrink-0 rounded-full border border-border bg-bg-primary/50 px-1.5 py-0.5 font-mono text-micro text-text-secondary">{{ g.items.length }}</span>
-            <span v-if="g.hint" class="hidden min-w-0 flex-1 truncate text-micro text-text-muted lg:block" :title="g.hint">{{ g.hint }}</span>
-          </button>
+    <div
+      v-if="store.qcFixing.length"
+      class="flex items-center gap-2 border-b border-border/70 bg-info/8 px-4 py-2 text-micro text-info animate-fade-up"
+    >
+      <svg class="h-3 w-3 shrink-0 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+      <span class="leading-relaxed">正在修复「{{ fixingTitle }}」——每镜需调用 AI 改写（约 10–30 秒/镜），请勿离开本页</span>
+    </div>
 
-          <div class="flex shrink-0 items-center gap-1.5">
-            <button
-              v-if="g.action !== 'manual' && removable(g)"
-              class="flex items-center gap-1 rounded-btn px-2 py-1 text-micro font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
-              :class="confirming === g.code
-                ? 'bg-accent text-black hover:bg-accent-hover'
-                : 'bg-accent/15 text-accent hover:bg-accent/25'"
-              :disabled="isFixing(g.code)"
-              :title="confirming === g.code
-                ? `确认修复 ${g.items.length} 处（AI 改写，会消耗额度）`
-                : (g.fixLabel || '一键修复')"
-              @click="runFix(g)"
-            >
-              <svg v-if="isFixing(g.code)" class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
-              <svg v-else-if="confirming === g.code" class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" /></svg>
-              {{
-                isFixing(g.code)
-                  ? '修复中…'
-                  : confirming === g.code
-                    ? `确认修 ${g.items.length} 处`
-                    : (g.fixLabel || '一键修复')
-              }}
+    <div v-if="fixDetails.length && !store.qcFixing.length" class="border-b border-border/70 bg-bg-primary/40 px-4 py-2">
+      <p class="mb-1.5 text-micro font-medium text-text-secondary">修复明细（{{ fixDetails.length }} 处）</p>
+      <ul class="space-y-1">
+        <li v-for="(d, i) in fixDetails.slice(0, 30)" :key="`${d.shot}-${i}`" class="flex items-start gap-2 text-micro leading-relaxed">
+          <span class="mt-px shrink-0 rounded-control border border-border bg-bg-secondary/60 px-1.5 py-0.5 font-mono text-text-secondary">{{ d.shot }}</span>
+          <span class="min-w-0 flex-1 break-words" :class="d.ok ? 'text-ok' : 'text-danger'">{{ d.ok ? (d.note || '已修复') : (d.reason || '未成功') }}</span>
+        </li>
+      </ul>
+      <p v-if="fixDetails.length > 30" class="mt-1.5 text-micro text-text-muted">（明细较多，仅显示前 30 条）</p>
+    </div>
+
+    <div v-if="groups.length" class="max-h-[60vh] overflow-y-auto">
+      <template v-for="sec in groupSections" :key="sec.key">
+        <div v-if="sec.list.length" class="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-border bg-bg-primary/95 px-4 py-1.5 backdrop-blur">
+          <template v-if="sec.collapsible">
+            <button class="group flex items-center gap-1.5 text-micro font-medium text-text-secondary transition hover:text-text-primary" @click="showHeuristic = !showHeuristic">
+              <svg
+                class="h-2.5 w-2.5 shrink-0 text-text-muted transition-transform duration-200"
+                :class="showHeuristic ? 'rotate-90' : ''"
+                fill="none" stroke="currentColor" viewBox="0 0 24 24"
+              ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+              {{ sec.label }}
+              <span class="rounded-full border border-border bg-bg-secondary/60 px-1.5 py-0.5 font-mono text-micro text-text-muted">{{ sec.count }}</span>
             </button>
-            <span
-              v-else-if="g.action === 'manual'"
-              class="rounded-control px-1.5 py-0.5 text-micro text-text-muted"
-              :title="g.hint || '这类问题涉及剧情/资产设定，自动改会改坏内容，需人工处理'"
-            >需人工</span>
-            <button
-              class="rounded-btn px-1.5 py-1 text-micro text-text-muted transition hover:bg-bg-hover hover:text-text-secondary"
-              :title="g.level === 'error'
-                ? '忽略该类型下的全部问题（必须修类会阻断出片，忽略只隐藏面板提示、不解除拦截）'
-                : '忽略该类型下的全部问题（标记为已知且接受，可撤销）'"
-              @click="ignoreGroup(g)"
-            >忽略整类</button>
-          </div>
+          </template>
+          <template v-else>
+            <span class="flex items-center gap-1.5 text-micro font-medium text-text-secondary">
+              {{ sec.label }}
+              <span class="rounded-full border border-border bg-bg-secondary/60 px-1.5 py-0.5 font-mono text-micro text-text-muted">{{ sec.count }}</span>
+            </span>
+          </template>
+          <span class="truncate text-micro text-text-muted" :title="sec.note">{{ sec.note }}</span>
         </div>
 
-        <div v-if="expandedCode === g.code" class="border-t border-border/50 bg-bg-primary/40 px-4 py-2">
-          <p v-if="g.hint" class="mb-2 text-micro leading-relaxed text-text-muted">{{ g.hint }}</p>
-          <ul class="space-y-1">
-            <li
-              v-for="(it, i) in g.items"
-              :key="`${it.shot}-${i}`"
-              class="group/item flex items-start gap-2 rounded-btn px-2 py-1.5 transition hover:bg-bg-hover/50"
-            >
-              <button
-                class="mt-px shrink-0 rounded-control border px-1.5 py-0.5 font-mono text-micro transition"
-                :class="isLocatable(it.shot)
-                  ? 'border-border bg-bg-primary/60 text-text-secondary hover:border-accent/50 hover:text-accent'
-                  : 'cursor-default border-border bg-bg-primary/60 text-text-muted'"
-                :disabled="!isLocatable(it.shot)"
-                :title="shotTitle(it)"
-                @click="locate(it.shot)"
-              >{{ shotLabel(it.shot) }}</button>
-              <span class="min-w-0 flex-1 break-words text-micro leading-relaxed text-text-secondary">{{ it.message }}</span>
-              <button
-                class="shrink-0 rounded-tag px-1.5 py-0.5 text-micro text-text-muted opacity-0 transition group-hover/item:opacity-100 hover:text-text-secondary"
-                title="忽略这一条"
-                @click="ignoreOne(g, it)"
-              >忽略</button>
-            </li>
-          </ul>
-          <p v-if="g.items.length >= 200" class="mt-1.5 text-micro text-text-muted">（列表已截断，仅显示前 200 条）</p>
-        </div>
-      </div>
+        <template v-if="!sec.collapsible || showHeuristic">
+          <div v-for="g in sec.list" :key="g.code">
+            <div class="flex items-center gap-2 px-4 py-2 transition hover:bg-bg-hover/40">
+              <button class="group flex min-w-0 flex-1 items-center gap-2.5 text-left" @click="toggle(g.code)">
+                <svg
+                  class="h-3 w-3 shrink-0 text-text-muted transition-transform duration-200"
+                  :class="expandedCode === g.code ? 'rotate-90' : ''"
+                  fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
+                <span
+                  class="inline-flex shrink-0 items-center rounded-control border px-1.5 py-0.5 text-micro font-medium"
+                  :class="levelClass(g.level)"
+                >{{ g.level === 'error' ? '必须修' : '建议修' }}</span>
+                <span class="truncate text-[12px] font-medium text-text-primary">{{ g.title || g.code }}</span>
+                <span class="shrink-0 rounded-full border border-border bg-bg-primary/50 px-1.5 py-0.5 font-mono text-micro text-text-secondary">{{ g.items.length }}</span>
+                <span v-if="g.hint" class="hidden min-w-0 flex-1 truncate text-micro text-text-muted lg:block" :title="g.hint">{{ g.hint }}</span>
+              </button>
+
+              <div class="flex shrink-0 items-center gap-1.5">
+                <button
+                  v-if="g.action !== 'manual' && removable(g)"
+                  class="flex items-center gap-1 rounded-btn px-2 py-1 text-micro font-medium transition disabled:cursor-not-allowed disabled:opacity-50"
+                  :class="confirming === g.code
+                    ? 'bg-accent text-black hover:bg-accent-hover'
+                    : 'bg-accent/15 text-accent hover:bg-accent/25'"
+                  :disabled="isFixing(g.code)"
+                  :title="confirming === g.code
+                    ? `确认修复 ${g.items.length} 处（AI 改写，会消耗额度）`
+                    : (g.fixLabel || '一键修复')"
+                  @click="runFix(g)"
+                >
+                  <svg v-if="isFixing(g.code)" class="h-3 w-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                  <svg v-else-if="confirming === g.code" class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" /></svg>
+                  {{
+                    isFixing(g.code)
+                      ? '修复中…'
+                      : confirming === g.code
+                        ? `确认修 ${g.items.length} 处`
+                        : (g.fixLabel || '一键修复')
+                  }}
+                </button>
+                <span
+                  v-else-if="g.action === 'manual'"
+                  class="rounded-control px-1.5 py-0.5 text-micro text-text-muted"
+                  :title="g.hint || '这类问题涉及剧情/资产设定，自动改会改坏内容，需人工处理'"
+                >需人工</span>
+                <button
+                  class="rounded-btn px-1.5 py-1 text-micro text-text-muted transition hover:bg-bg-hover hover:text-text-secondary"
+                  :title="g.level === 'error'
+                    ? '忽略该类型下的全部问题（必须修类会阻断出片，忽略只隐藏面板提示、不解除拦截）'
+                    : '忽略该类型下的全部问题（标记为已知且接受，可撤销）'"
+                  @click="ignoreGroup(g)"
+                >忽略整类</button>
+              </div>
+            </div>
+
+            <div v-if="expandedCode === g.code" class="border-t border-border/50 bg-bg-primary/40 px-4 py-2">
+              <p v-if="g.hint" class="mb-2 text-micro leading-relaxed text-text-muted">{{ g.hint }}</p>
+              <ul class="space-y-1">
+                <li
+                  v-for="(it, i) in g.items"
+                  :key="`${it.shot}-${i}`"
+                  class="group/item flex items-start gap-2 rounded-btn px-2 py-1.5 transition hover:bg-bg-hover/50"
+                >
+                  <button
+                    class="mt-px shrink-0 rounded-control border px-1.5 py-0.5 font-mono text-micro transition"
+                    :class="isLocatable(it.shot)
+                      ? 'border-border bg-bg-primary/60 text-text-secondary hover:border-accent/50 hover:text-accent'
+                      : 'cursor-default border-border bg-bg-primary/60 text-text-muted'"
+                    :disabled="!isLocatable(it.shot)"
+                    :title="shotTitle(it)"
+                    @click="locate(it.shot)"
+                  >{{ shotLabel(it.shot) }}</button>
+                  <span class="min-w-0 flex-1 break-words text-micro leading-relaxed text-text-secondary">{{ it.message }}</span>
+                  <button
+                    class="shrink-0 rounded-tag px-1.5 py-0.5 text-micro text-text-muted opacity-0 transition group-hover/item:opacity-100 hover:text-text-secondary"
+                    title="忽略这一条"
+                    @click="ignoreOne(g, it)"
+                  >忽略</button>
+                </li>
+              </ul>
+              <p v-if="g.items.length >= 200" class="mt-1.5 text-micro text-text-muted">（列表已截断，仅显示前 200 条）</p>
+            </div>
+          </div>
+        </template>
+      </template>
     </div>
 
     <div v-else class="flex items-center gap-2 px-4 py-3 text-micro text-text-muted">

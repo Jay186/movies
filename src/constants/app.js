@@ -38,7 +38,7 @@ export const BATCH_GEN = {
 }
 
 export const DEFAULTS = {
-  PROJECT_TITLE: '布布与一二的野日记',
+  PROJECT_TITLE: '未命名项目',
   EPISODE_THEME: '做美食',
   ART_STYLE: '吉卜力风格',
   EMPTY_SUMMARY: '（暂无摘要）',

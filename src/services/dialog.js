@@ -74,13 +74,6 @@ export const toastError = (m, o) => toast(m, 'error', o)
 export const toastWarn = (m, o) => toast(m, 'warn', o)
 export const toastInfo = (m, o) => toast(m, 'info', o)
 
-export function splitMessage(raw) {
-  const lines = String(raw ?? '').split('\n').map((l) => l.trim()).filter(Boolean)
-  if (!lines.length) return { message: '', detail: '' }
-  if (lines.length === 1) return { message: lines[0], detail: '' }
-  return { message: lines[0], detail: lines.slice(1).join('\n') }
-}
-
 export function _settleConfirm(id, result) {
   const i = confirmQueue.value.findIndex((c) => c.id === id)
   if (i < 0) return

@@ -16,7 +16,7 @@ function currentModelKey() {
 let _instance = null
 let _instanceKey = ''
 
-export function getLightingCheck() {
+function getLightingCheck() {
   const key = currentModelKey()
   if (_instance && _instanceKey === key) return _instance
   _instanceKey = key

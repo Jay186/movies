@@ -1,6 +1,7 @@
 
 import { chatCompletion } from './doubao.js'
 import { CJK_DIRTY_RE } from './shared.js'
+import { config } from '../config.js'
 
 const MIN_WORDS = 8
 const MAX_WORDS = 90
@@ -22,7 +23,7 @@ function sanitize(raw) {
   return s
 }
 
-export function validateStyleEn(en) {
+function validateStyleEn(en) {
   const s = String(en || '').trim()
   if (!s) return { ok: false, reason: '空串' }
   if (CJK_DIRTY_RE.test(s)) return { ok: false, reason: '含中日韩字符' }
@@ -67,7 +68,7 @@ export async function translateStylePrompt({ label = '', labelEn = '', prompt = 
         ...(model ? { model } : {}),
         temperature: 0.3,
         maxTokens: 500,
-        timeoutMs: 60000,
+        timeoutMs: config.timeouts.llm.translate,
         disableThinking: true,
         usageContext: { task: 'style-prompt-en' },
       })

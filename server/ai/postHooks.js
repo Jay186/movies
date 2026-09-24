@@ -5,6 +5,7 @@ import { insecureDownload } from './runninghub.js'
 import { checkSeamByShotId } from './seamCheck.js'
 import { uploadsUrlToAbs } from './shared.js'
 import { uploadsDir } from '../paths.js'
+import { runFfmpeg } from './ffmpeg.js'
 
 
 export async function relayLastFrameToNextShot(shot) {

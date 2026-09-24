@@ -4,7 +4,7 @@ import { stripStateSuffix } from './assetState.js'
 const FULLWIDTH_SPACE = /\u3000/g
 const EDGE_NOISE = /^[\s\p{P}\p{S}]+|[\s\p{P}\p{S}]+$/gu
 
-export function normalizePropName(s) {
+function normalizePropName(s) {
   let t = String(s == null ? '' : s).replace(FULLWIDTH_SPACE, ' ')
   t = t.replace(EDGE_NOISE, '')
   return t.trim()
@@ -58,18 +58,5 @@ export function pickContainmentCandidate(raw, candidates, opts = {}) {
   for (const h of hits) minLen = Math.min(minLen, normalize(h).length)
   const shortest = hits.filter((h) => normalize(h).length === minLen)
   return shortest.length === 1 ? shortest[0] : null
-}
-
-export function buildPropLexiconHint(propNames) {
-  const names = []
-  for (const n of Array.isArray(propNames) ? propNames : []) {
-    const s = String(n == null ? '' : n).trim()
-    if (s && !names.includes(s)) names.push(s)
-  }
-  if (!names.length) return ''
-  return '   【本集已有道具清单】（已由剧本提取确认，用于跨环节统一命名）：\n' +
-    `   ${names.join('、')}\n` +
-    '   若某场景出现的有形物体与清单中某一项**是同一物体**，其 props 名称必须**逐字使用清单中的写法**，\n' +
-    '   不得另起别名；清单中没有的物体仍按你的判断命名，并正常参与 shared_props 判定。\n'
 }
 

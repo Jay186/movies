@@ -7,11 +7,96 @@ import {
 import { buildAssetImagePrompt } from '../services/promptBuilder'
 import { reconcilePendingAssetGens } from '../services/pendingAssetGens'
 import { buildSceneGroupChains } from '../utils/sceneGroupSchedule'
+import { hasId, sameId } from '../utils/assetId.js'
 import { characterColor } from '../constants/palette'
 import { getVideoEngine } from '../data/videoEngines'
 import { STORAGE_KEYS, STORAGE_KEY_PREFIX, POLL, TIMEOUTS, DELAYS, DEFAULTS, FALLBACK_STYLE, BATCH_GEN } from '../constants/app'
 
 const CURRENT_PROJECT_STORAGE_KEY = STORAGE_KEYS.CURRENT_PROJECT
+
+// 分镜行（后端蛇形）→ 组件驼峰结构的单一映射源，loadEpisode 与 refreshStoryboardShots 共用
+function mapStoryboardScenes(rawScenes) {
+  return (rawScenes || []).map((s, sceneIndex) => ({
+      id: s.id,
+      sceneNumber: s.scene_number || sceneIndex + 1,
+      title: s.title,
+      shots: (s.shots || []).map((shot, shotIndex) => ({
+        id: shot.id,
+        storyboardSceneId: shot.storyboard_scene_id ?? shot.storyboardSceneId ?? null,
+        shotNumber: shot.shot_number || `${s.scene_number || sceneIndex + 1}-${shotIndex + 1}`,
+        duration: shot.duration,
+        displayId: shot.shot_number || `${s.scene_number || sceneIndex + 1}-${shotIndex + 1}`,
+        characters: shot.characters || [],
+        sceneAssets: shot.sceneAssets || [],
+        propAssets: shot.propAssets || [],
+        description: shot.description || '',
+        shotType: shot.shotType || shot.shot_type || '',
+        startTime: shot.startTime ?? shot.start_time ?? 0,
+        endTime: shot.endTime ?? shot.end_time ?? 0,
+        actionNote: shot.actionNote || shot.action_note || '',
+        soundEffects: shot.soundEffects || shot.sound_effects || '',
+        cameraMovement: shot.cameraMovement || shot.camera_movement || '',
+        cameraAngle: shot.cameraAngle || shot.camera_angle || '',
+        overallSoundscape: shot.overallSoundscape || shot.overall_soundscape || '',
+        nonDiegeticMusic: shot.nonDiegeticMusic || shot.non_diegetic_music || '',
+        integratedMultimodalDescription: shot.integratedMultimodalDescription || shot.integrated_multimodal_description || '',
+        finalFrame: shot.finalFrame || shot.final_frame || '',
+        purpose: shot.purpose || '',
+        goal: shot.goal || '',
+        emotionTone: shot.emotionTone || shot.emotion_tone || '',
+        infoPoints: Array.isArray(shot.infoPoints)
+          ? shot.infoPoints
+          : (() => { try { const v = JSON.parse(shot.info_points || '[]'); return Array.isArray(v) ? v : [] } catch { return [] } })(),
+        worldStateIn: shot.worldStateIn || shot.world_state_in || '',
+        worldStateOut: shot.worldStateOut || shot.world_state_out || '',
+        videoPromptOverride: shot.video_prompt_override || '',
+        dialogue: shot.dialogue || null,
+        frameUrl: shot.frame_url || '',
+        frameUrl2: shot.frame_url2 || '',
+        continuityUrl: shot.continuityUrl || shot.continuity_url || '',
+        blockingUrl: shot.blocking_url || '',
+        blockingPlan: (() => {
+          try {
+            if (shot.blockingPlan) return typeof shot.blockingPlan === 'object' ? shot.blockingPlan : JSON.parse(shot.blockingPlan)
+            if (shot.blocking_plan) return JSON.parse(shot.blocking_plan)
+            return null
+          } catch { return null }
+        })(),
+        videoUrl: shot.video_url || '',
+        videoGenerated: shot.videoGenerated ?? (shot.video_generated === 1 || shot.video_generated === true || shot.video_generated === '1'),
+        seamCheck: shot.seamCheck ?? null,
+        isCombat: shot.is_combat === 1 ? 1 : (shot.is_combat === 0 ? 0 : null),
+        locked: shot.locked === 1 || shot.locked === true,
+        version: shot.version || 1,
+        qcStatus: shot.qc_status || '',
+        qcItems: (() => {
+          try {
+            const raw = typeof shot.qc_report === 'string' ? JSON.parse(shot.qc_report || '{}') : (shot.qc_report || null)
+            return Array.isArray(raw?.items) ? raw.items : []
+          } catch { return [] }
+        })(),
+        hasFrame: !!shot.frame_url,
+        hasBlocking: !!(shot.blocking_url || shot.blocking_plan),
+        // 回存标识：整场保存靠 (sceneNumber, shotNumber) 定位既有镜头，必须用服务端原值，
+        // 否则后端重排后的镜号与前端本地值不一致时会被误判为「新增+删除」，导致镜头被重建（版本链断裂）
+        __sceneNumber: s.scene_number ?? sceneIndex + 1,
+        __shotNumber: shot.shot_number ?? null,
+      })),
+    }))
+}
+
+// 前端分镜结构 → 回存载荷：本地视图字段不下发（后端不消费），镜号回填服务端原值
+// 保留对象引用未变字段的语义：只做浅拷贝 + 剔除，不深改业务字段
+function toStoryboardPayload(scenes) {
+  return (scenes || []).map((s, sceneIndex) => ({
+    ...s,
+    sceneNumber: s.__sceneNumber ?? s.sceneNumber ?? sceneIndex + 1,
+    shots: (s.shots || []).map((shot) => {
+      const { displayId, hasFrame, hasBlocking, seamCheck, __sceneNumber, __shotNumber, ...rest } = shot
+      return { ...rest, shotNumber: __shotNumber || shot.shotNumber }
+    }),
+  }))
+}
 
 function stripInstructionEcho(originalText, newText) {
   const patterns = [
@@ -40,6 +125,9 @@ function stripInstructionEcho(originalText, newText) {
 }
 
 const ASSET_TABLE_LABEL = { characters: '角色', props: '道具', scenes: '场景' }
+
+const PROPS_ID_OFFSET = 100000
+const SCENES_ID_OFFSET = 200000
 
 function buildOverwriteDetails(report) {
   const details = []
@@ -139,7 +227,6 @@ export const useProjectStore = defineStore('project', () => {
   const initialized = ref(false) 
   const currentEpisodeId = ref(null) 
   const episodes = ref([]) 
-  const segmentPlan = ref([])
   const aspectRatio = ref(DEFAULTS.ASPECT_RATIO)
   const generatingAssetIds = ref([]) 
   const assetGenControllers = new Map()
@@ -164,7 +251,6 @@ export const useProjectStore = defineStore('project', () => {
   const generatingVideoIds = ref([]) 
   const batchStoryboardGenerating = ref(false) 
   const batchBlockingGenerating = ref(false) 
-  const episodeTheme = ref(DEFAULTS.EPISODE_THEME)
   const artStyle = ref(DEFAULTS.ART_STYLE)
 
   const currentStyle = ref({ ...FALLBACK_STYLE })
@@ -209,8 +295,7 @@ export const useProjectStore = defineStore('project', () => {
   const storyboardConfirmed = ref(false)
   const scenes = ref([])
   const activeSceneId = ref(null)
-  const scriptContent = ref('')
-  const autoExtractAssets = ref(false) 
+  const scriptContent = ref('') 
   const scriptVersions = ref([]) 
   const pendingRewrite = ref(null) 
 
@@ -247,7 +332,8 @@ export const useProjectStore = defineStore('project', () => {
   const qcLoading = ref(false)
   const qcFixing = ref([]) 
   const qcShowIgnored = ref(false) 
-  const qcLastResult = ref('') 
+  const qcLastResult = ref('')
+  const qcFixDetails = ref([]) 
 
   const wordCount = computed(() => scriptContent.value.replace(/\s/g, '').length)
   const totalShots = computed(() => storyboardScenes.value.reduce((sum, s) => sum + s.shots.length, 0))
@@ -307,6 +393,7 @@ export const useProjectStore = defineStore('project', () => {
       }))
       assetScenes.value = (ep.scenes || []).map((s) => ({
         id: s.id,
+        sceneNumber: s.scene_number || 0,
         name: s.name || s.scene_name || s.title || `场景${s.scene_number || ''}`,
         description: s.description || s.summary || '',
         propNames: Array.isArray(s.propNames) ? s.propNames : [],
@@ -322,58 +409,7 @@ export const useProjectStore = defineStore('project', () => {
       }))
       resumePendingAssetGens().catch(() => {})
 
-      segmentPlan.value = ep.segmentPlan || []
-
-      storyboardScenes.value = (ep.storyboardScenes || []).map((s, sceneIndex) => ({
-          id: s.id,
-          sceneNumber: s.scene_number || sceneIndex + 1,
-          title: s.title,
-          shots: (s.shots || []).map((shot, shotIndex) => ({
-            id: shot.id,
-            storyboardSceneId: shot.storyboard_scene_id ?? shot.storyboardSceneId ?? null,
-            shotNumber: shot.shot_number || `${s.scene_number || sceneIndex + 1}-${shotIndex + 1}`,
-            duration: shot.duration,
-            displayId: shot.shot_number || `${s.scene_number || sceneIndex + 1}-${shotIndex + 1}`,
-            characters: shot.characters || [],
-            sceneAssets: shot.sceneAssets || [],
-            propAssets: shot.propAssets || [],
-            description: shot.description || '',
-            shotType: shot.shotType || shot.shot_type || '',
-            startTime: shot.startTime ?? shot.start_time ?? 0,
-            endTime: shot.endTime ?? shot.end_time ?? 0,
-            actionNote: shot.actionNote || shot.action_note || '',
-            soundEffects: shot.soundEffects || shot.sound_effects || '',
-            cameraMovement: shot.cameraMovement || shot.camera_movement || '',
-            cameraAngle: shot.cameraAngle || shot.camera_angle || '',
-            overallSoundscape: shot.overallSoundscape || shot.overall_soundscape || '',
-            nonDiegeticMusic: shot.nonDiegeticMusic || shot.non_diegetic_music || '',
-            integratedMultimodalDescription: shot.integratedMultimodalDescription || shot.integrated_multimodal_description || '',
-            finalFrame: shot.finalFrame || shot.final_frame || '',
-            videoPromptOverride: shot.video_prompt_override || '',
-            dialogue: shot.dialogue || null,
-            frameUrl: shot.frame_url || '',
-            frameUrl2: shot.frame_url2 || '',
-            continuityUrl: shot.continuityUrl || shot.continuity_url || '',
-            blockingUrl: shot.blocking_url || '',
-            blockingPlan: (() => {
-              try {
-                if (shot.blockingPlan) return typeof shot.blockingPlan === 'object' ? shot.blockingPlan : JSON.parse(shot.blockingPlan)
-                if (shot.blocking_plan) return JSON.parse(shot.blocking_plan)
-                return null
-              } catch { return null }
-            })(),
-            videoUrl: shot.video_url || '',
-            segmentVideoUrl: shot.segmentVideoUrl || shot.segment_video_url || '',
-            segmentOffset: Number(shot.segmentOffset ?? shot.segment_offset ?? 0) || 0,
-            segmentLabel: shot.segmentLabel || shot.segment_label || '',
-            videoGenerated: shot.videoGenerated,
-            seamCheck: shot.seamCheck ?? null,
-            shotReview: shot.shotReview ?? null,
-            isCombat: shot.is_combat === 1 ? 1 : (shot.is_combat === 0 ? 0 : null),
-            hasFrame: !!shot.frame_url,
-            hasBlocking: !!(shot.blocking_url || shot.blocking_plan),
-          })),
-        }))
+      storyboardScenes.value = mapStoryboardScenes(ep.storyboardScenes)
 
       if (scriptContent.value.trim()) {
         scenes.value = parseScenesFromScript(scriptContent.value)
@@ -421,6 +457,52 @@ export const useProjectStore = defineStore('project', () => {
         }
       }
     } catch {  }
+  }
+
+  // —— 单镜 AI 重写 / 版本链刷新（重生成、回退、时长顺延后统一走这里）——
+  const regeneratingShotIds = ref([])
+
+  // 拉取服务端最新分镜行，按 id 就地覆盖本地镜像（内容/时轴/QC/锁定全量刷新）；
+  // 场次或镜头数量与本地不一致（锁定镜跳过删除、清空重来等结构变化）时整体重建
+  async function refreshStoryboardShots() {
+    if (!currentEpisodeId.value) return
+    try {
+      const ep = await api.getEpisode(currentEpisodeId.value)
+      const mapped = mapStoryboardScenes(ep.storyboardScenes)
+      const local = storyboardScenes.value
+      const sameShape = mapped.length === local.length && mapped.every((s, i) =>
+        s.id === local[i].id
+        && s.shots.length === local[i].shots.length
+        && s.shots.every((sh, j) => sh.id === local[i].shots[j].id)
+      )
+      if (!sameShape) {
+        storyboardScenes.value = mapped
+        return
+      }
+      for (let i = 0; i < mapped.length; i++) {
+        for (let j = 0; j < mapped[i].shots.length; j++) {
+          Object.assign(local[i].shots[j], mapped[i].shots[j])
+        }
+      }
+    } catch (e) {
+      console.warn('[refreshStoryboardShots] 刷新分镜失败:', e.message)
+    }
+  }
+
+  // 单镜 AI 重写：上下文由后端组装（前镜 Airlock 继承/后镜出画约束/剧本片段/资产清单），完成后全量刷新
+  async function regenerateShot(shotId, instruction = '') {
+    if (!currentEpisodeId.value) return { success: false, error: '未加载剧集' }
+    if (regeneratingShotIds.value.includes(shotId)) return { success: false, error: '该镜头正在重写中' }
+    regeneratingShotIds.value.push(shotId)
+    try {
+      const r = await api.regenerateShot(currentEpisodeId.value, shotId, { instruction: String(instruction || '').trim() })
+      await refreshStoryboardShots()
+      return { success: true, shot: r.shot }
+    } catch (e) {
+      return { success: false, error: e.message }
+    } finally {
+      regeneratingShotIds.value = regeneratingShotIds.value.filter((id) => id !== shotId)
+    }
   }
 
   async function restoreGeneratingImages() {
@@ -611,7 +693,6 @@ export const useProjectStore = defineStore('project', () => {
     currentEpisodeId.value = null
     currentEpisode.value = 1
     episodes.value = []
-    segmentPlan.value = []
     scriptContent.value = ''
     scriptConfirmed.value = false
     storyboardConfirmed.value = false
@@ -703,10 +784,6 @@ export const useProjectStore = defineStore('project', () => {
     if (shotId == null || shotId === '') return []
     return systemAlerts.value.filter((a) => Number(a.shot_id) === Number(shotId))
   }
-  function alertsForScene(sceneId) {
-    if (sceneId == null || sceneId === '') return []
-    return systemAlerts.value.filter((a) => Number(a.scene_id) === Number(sceneId))
-  }
   function alertsUnattached() {
     return systemAlerts.value.filter((a) => a.shot_id == null && a.scene_id == null)
   }
@@ -764,21 +841,6 @@ export const useProjectStore = defineStore('project', () => {
       return { success: true, episode: ep }
     } catch (e) {
       toastError('新增剧集失败', { detail: String(e.message) })
-      return { success: false, error: e.message }
-    }
-  }
-
-  async function renameEpisode(episodeId, title) {
-    const t = String(title || '').trim()
-    if (!t) return { success: false, error: '标题不能为空' }
-    try {
-      const updated = await api.updateEpisodeTitle(episodeId, t)
-      episodes.value = episodes.value.map((e) =>
-        e.id === episodeId ? { ...e, title: updated.title || t } : e
-      )
-      return { success: true }
-    } catch (e) {
-      toastError('重命名失败', { detail: String(e.message) })
       return { success: false, error: e.message }
     }
   }
@@ -985,17 +1047,6 @@ export const useProjectStore = defineStore('project', () => {
           toastError('剧本确认失败', { detail: String(e?.message || e) })
         })
     }
-  }
-
-  function reconfirmScript() {
-    if (!scriptContent.value.trim()) {
-      toastWarn('剧本内容不能为空')
-      return
-    }
-    const parsed = parseScenesFromScript(scriptContent.value)
-    scenes.value = parsed
-    activeSceneId.value = scenes.value[0]?.id ?? null
-    toastSuccess('剧本已重新确认，分场大纲已更新')
   }
 
   function pushScriptVersion(note, content = scriptContent.value) {
@@ -1209,11 +1260,12 @@ export const useProjectStore = defineStore('project', () => {
         if (!result.assets) throw new Error('后端未返回资产')
         scriptFp = result.scriptFp || ''
 
+        const assetBatchBase = Date.now() * 1000
         mapped = {
           episodeId,
           scriptFp,
           characters: (result.assets.characters || []).map((c, i) => ({
-            id: Date.now() + i, 
+            id: assetBatchBase + i, 
             name: c.name || `角色${i + 1}`,
             role: c.role || '配角',
             description: c.description || '',
@@ -1224,7 +1276,7 @@ export const useProjectStore = defineStore('project', () => {
             descriptionEn: c.descriptionEn || c.description_en || '',
           })),
           props: (result.assets.props || []).map((p, i) => ({
-            id: Date.now() + i,
+            id: assetBatchBase + PROPS_ID_OFFSET + i,
             name: typeof p === 'string' ? p : (p.name || `道具${i + 1}`),
             description: typeof p === 'string' ? '' : (p.description || ''),
             owner: typeof p === 'string' ? '' : (p.owner || ''),
@@ -1233,7 +1285,7 @@ export const useProjectStore = defineStore('project', () => {
             descriptionEn: typeof p === 'string' ? '' : (p.descriptionEn || p.description_en || ''),
           })),
           scenes: (result.assets.scenes || []).map((s, i) => ({
-            id: Date.now() + i,
+            id: assetBatchBase + SCENES_ID_OFFSET + i,
             name: s.name || `场景${i + 1}`,
             description: s.description || '',
             propNames: Array.isArray(s.props) ? s.props.map(String) : (Array.isArray(s.propNames) ? s.propNames : []),
@@ -1319,6 +1371,18 @@ export const useProjectStore = defineStore('project', () => {
   async function extractStoryboard() {
     if (!scriptContent.value.trim()) {
       toastWarn('请先编写或确认剧本')
+      return { success: false }
+    }
+    // 前置校验：三类资产任一为空即拦住，避免 AI 空跑后才发现无资产锚（后端 assertAssetsExist 为权威防线）
+    // 注意用 assetScenes（已建场景资产），不是 scenes（从剧本解析的场次结构）
+    const missingAssets = []
+    if (!characters.value.length) missingAssets.push('角色')
+    if (!assetScenes.value.length) missingAssets.push('场景')
+    if (!props.value.length) missingAssets.push('道具')
+    if (missingAssets.length) {
+      toastWarn(`本集缺少${missingAssets.join('、')}资产`, {
+        detail: '请先在「设定」页提取/补齐资产，再生成分镜。分镜的资产锚（角色/场景/道具）依赖已建资产，缺了会导致镜头没有参考图、出片环境与画风漂移。',
+      })
       return { success: false }
     }
     if (aiLoading.value) return { success: false }
@@ -1447,7 +1511,7 @@ export const useProjectStore = defineStore('project', () => {
     if (!currentEpisodeId.value) return { success: false, error: '当前没有选中的集' }
     try {
       await api.saveStoryboard(currentEpisodeId.value, {
-        storyboardScenes: storyboardScenes.value,
+        storyboardScenes: toStoryboardPayload(storyboardScenes.value),
         storyboard_confirmed: true,
       })
       storyboardConfirmed.value = true
@@ -1643,6 +1707,11 @@ ${assetBrief}
           targetShot.frameDualKeyframe = !!result.dualKeyframe
           targetShot.hasFrame = true
         }
+        // 服务端注入管线的出图依据快照：单帧出图不重拉列表，本地同步给锚徽标/依据面板
+        if (result.anchorSnapshot !== undefined) {
+          targetShot.anchorSnapshot = result.anchorSnapshot || null
+          targetShot.anchorStale = false
+        }
         console.log('[generateShotImage] persisted url:', result.url)
         idList.value = idList.value.filter(x => x !== shotId)
         return { success: true, url: result.url }
@@ -1730,9 +1799,7 @@ ${assetBrief}
 
     const dlgText = String(targetShot.dialogue || '').trim()
     const hasDlg = !!dlgText && dlgText !== 'null' && dlgText !== '[]'
-    const hasFrameAnchor = !!(String(targetShot.frameUrl || '').trim() || String(targetShot.continuityUrl || '').trim())
     const allowSilent = !hasDlg
-    const allowNoFrame = !hasFrameAnchor
 
     const duration = Math.max(3, Math.min(15, Number(overrides.duration ?? targetShot.duration) || 5))
     const eng = getVideoEngine('h3v4')
@@ -1747,10 +1814,6 @@ ${assetBrief}
       if (!hasDlg) {
         details.push({ label: '台词', value: '空 —— 成片不会有角色语音', tone: 'warn' })
         risks.push('本镜没有台词，成片不会有角色语音')
-      }
-      if (!hasFrameAnchor) {
-        details.push({ label: '构图锚', value: '无分镜图也无接力锚 —— 构图靠模型自由发挥', tone: 'warn' })
-        risks.push('缺少构图锚，成片大概率与分镜对不上')
       }
       details.push({
         label: '计费',
@@ -1773,21 +1836,41 @@ ${assetBrief}
 
     generatingVideoIds.value.push(shotId)
     try {
-      const result = await api.generateVideoV4({
-        shotId: targetShot.id,
-        aspectRatio: overrides.aspectRatio ?? aspectRatio.value,
-        megapixels: overrides.megapixels,
-        duration,
-        allowSilent,
-        allowNoFrame,
-      })
-      console.log('[generateShotVideoV4] result:', result)
-      if (result.success && result.url) {
-        targetShot.videoUrl = result.url
-        if (result.warning) toastWarn('生成完成，有 1 项提示', { detail: String(result.warning) })
-        return { success: true, url: result.url }
+      // 衔接告警锁（409）的人工放行：确认后带 ignoreSeamAlert 重试（循环而非递归，
+      // 避免 inflight 状态未清导致重试被"该镜正在出片"拦截而静默失败）
+      let ignoreSeamAlert = Boolean(overrides.ignoreSeamAlert)
+      for (;;) {
+        let result
+        try {
+          result = await api.generateVideoV4({
+            shotId: targetShot.id,
+            aspectRatio: overrides.aspectRatio ?? aspectRatio.value,
+            megapixels: overrides.megapixels,
+            duration,
+            allowSilent,
+            ignoreSeamAlert,
+          })
+        } catch (e) {
+          if (e?.status === 409 && !ignoreSeamAlert && /出片链已锁死/.test(String(e.message || ''))) {
+            const ok = await confirmDialog({
+              title: '衔接告警 · 人工放行',
+              description: String(e.message || ''),
+              confirmText: '忽略告警，继续出片',
+              cancelText: '先去重生上一镜',
+              tone: 'warn',
+            })
+            if (ok) { ignoreSeamAlert = true; continue }
+          }
+          throw e
+        }
+        console.log('[generateShotVideoV4] result:', result)
+        if (result.success && result.url) {
+          targetShot.videoUrl = result.url
+          if (result.warning) toastWarn('生成完成，有 1 项提示', { detail: String(result.warning) })
+          return { success: true, url: result.url }
+        }
+        throw new Error(result.error || '出片失败')
       }
-      throw new Error(result.error || '出片失败')
     } catch (e) {
       console.error('[generateShotVideoV4] error:', e)
       toastError('全能V4 出片失败', { detail: String(e.message) })
@@ -1932,7 +2015,7 @@ ${assetBrief}
       }
       writePendingGens(rest)
       if (doneIds.length) {
-        generatingAssetIds.value = generatingAssetIds.value.filter(x => !doneIds.includes(String(x)) && !doneIds.includes(x))
+        generatingAssetIds.value = generatingAssetIds.value.filter(x => !hasId(doneIds, x))
       }
       if (!rest.length) { clearInterval(assetGenPollTimer); assetGenPollTimer = null }
     }, 5000)
@@ -1964,7 +2047,7 @@ ${assetBrief}
 
     let changed = false
     for (const id of toRestore) {
-      if (!generatingAssetIds.value.includes(id)) {
+      if (!hasId(generatingAssetIds.value, id)) {
         generatingAssetIds.value.push(id)
         changed = true
       }
@@ -1998,7 +2081,7 @@ ${assetBrief}
   }
 
   async function generateAssetImage(type, id, description, provider, editInstruction = '') {
-    if (generatingAssetIds.value.includes(id)) return 
+    if (hasId(generatingAssetIds.value, id)) return 
     if (!currentStyle.value?.prompt) {
       toastWarn('请先选择画风')
       return
@@ -2025,7 +2108,7 @@ ${assetBrief}
           toastWarn('该资产还没有图片，无法改造', { detail: '请先用「AI生成」出一张基础形象图' })
           assetGenControllers.delete(String(id)) 
           removePendingGen(id)
-          generatingAssetIds.value = generatingAssetIds.value.filter(x => x !== id)
+          generatingAssetIds.value = generatingAssetIds.value.filter(x => !sameId(x, id))
           return { success: false }
         }
       }
@@ -2083,7 +2166,7 @@ ${assetBrief}
         catch (e) { console.warn('[generateAssetImage] reload 失败，沿用内存值', e.message) }
         assetGenControllers.delete(String(id))
         removePendingGen(id)
-        generatingAssetIds.value = generatingAssetIds.value.filter(x => x !== id)
+        generatingAssetIds.value = generatingAssetIds.value.filter(x => !sameId(x, id))
         return { success: true, url: result.url, description: result.description || '' }
       }
       throw new Error(result.error || '生成失败')
@@ -2093,12 +2176,12 @@ ${assetBrief}
       assetGenControllers.delete(String(id))
       removePendingGen(id)
       if (cancelled) {
-        generatingAssetIds.value = generatingAssetIds.value.filter(x => x !== id)
+        generatingAssetIds.value = generatingAssetIds.value.filter(x => !sameId(x, id))
         return { success: false, cancelled: true }
       }
     }
 
-    generatingAssetIds.value = generatingAssetIds.value.filter(x => x !== id)
+    generatingAssetIds.value = generatingAssetIds.value.filter(x => !sameId(x, id))
     return { success: false }
   }
 
@@ -2238,6 +2321,8 @@ ${assetBrief}
       provider,
       onProgress,
       ids = null,
+      // 组内出图模式：true=并行（同组同时出，快，默认）；false=串联（同组一张画完再画下一张，保锚点时序）
+      groupParallel = true,
     } = options
 
     const list = type === 'character' ? characters.value : type === 'scene' ? assetScenes.value : props.value
@@ -2255,8 +2340,8 @@ ${assetBrief}
     }
 
     const inScope = all.filter((it) => (onlyMissing ? !it.imageUrl : true) && (!idSet || idSet.has(String(it.id))))
-    const targets = inScope.filter((it) => !generatingAssetIds.value.includes(it.id))
-    const skipped = inScope.length - targets.length
+    const targets = inScope.filter((it) => !hasId(generatingAssetIds.value, it.id))
+    let skipped = inScope.length - targets.length
 
     if (!targets.length) {
       if (skipped > 0) toastInfo('待生成的资产都已在生成中')
@@ -2264,7 +2349,6 @@ ${assetBrief}
       return { success: true, successCount: 0, failCount: 0, failedIds: [], total: 0, skipped }
     }
 
-    const total = targets.length
     const model = provider || imageModel.value
     let successCount = 0
     let failCount = 0
@@ -2280,11 +2364,34 @@ ${assetBrief}
       } catch (e) {
         console.warn('[batchGenerateAssetImages] 空间分组获取失败，场景图退化为全串行:', e.message)
       }
-      chains = buildSceneGroupChains(targets, groupInfo)
-      if (!groupInfo) {
+
+      // 组还没定基准图（pending）的场景不允许出图：先定基准，其余成员才能照基准画。
+      // 与成员卡的「先定参考图」锁、服务端 409 拦截三层对齐。
+      if (groupInfo) {
+        const pendingTargets = targets.filter((t) => groupInfo[String(t.id)]?.status === 'pending')
+        if (pendingTargets.length) {
+          const names = pendingTargets.slice(0, 3).map((t) => t.name).join('、')
+          toastWarn(`有 ${pendingTargets.length} 个场景所在组还没定参考图，已跳过（${names}${pendingTargets.length > 3 ? '等' : ''}）。先去场景页确认基准图`)
+          for (const t of pendingTargets) {
+            const idx = targets.indexOf(t)
+            if (idx >= 0) targets.splice(idx, 1)
+          }
+          skipped += pendingTargets.length
+        }
+      }
+
+      if (!targets.length) {
+        toastWarn('所选场景所在的组都还没定参考图，先去场景页定基准')
+        return { success: true, successCount: 0, failCount: 0, failedIds: [], total: 0, skipped }
+      }
+
+      chains = buildSceneGroupChains(targets, groupInfo, { parallel: groupParallel })
+      if (!groupInfo && !groupParallel) {
         console.log('[batchGenerateAssetImages] 场景图无空间分组信息 → 全串行（保证锚点生效）')
       }
     }
+
+    const total = targets.length
 
     async function runChain(chain) {
       for (const task of chain) {
@@ -2361,11 +2468,13 @@ ${assetBrief}
     return loadQcReport({ silent: true, includeIgnored: qcShowIgnored.value })
   }
 
-  async function qcFix(code, shots) {
+  async function qcFix(code, shots, title = '') {
     if (!currentEpisodeId.value || !code) return { success: false }
     if (qcFixing.value.includes(code)) return { success: false }
     qcFixing.value = [...qcFixing.value, code]
     qcLastResult.value = ''
+    qcFixDetails.value = []
+    const label = title || code
     try {
       const res = await api.qcFix({ episodeId: currentEpisodeId.value, code, shots })
       const parts = []
@@ -2375,8 +2484,9 @@ ${assetBrief}
         parts.push(`本次只处理前 ${res.processed} 处，还剩 ${res.requested - res.processed} 处需再点一次`)
       }
       qcLastResult.value = parts.length
-        ? `${code}：${parts.join('，')}`
-        : (res.message || `${code}：处理完成`)
+        ? `「${label}」${parts.join('，')}`
+        : (res.message || `「${label}」处理完成`)
+      qcFixDetails.value = Array.isArray(res.details) ? res.details : []
       if (res.fixed) {
         await loadEpisode(currentEpisodeId.value)
       }
@@ -2384,7 +2494,8 @@ ${assetBrief}
       return res
     } catch (e) {
       console.error('[qcFix] failed:', e)
-      qcLastResult.value = e.message || '修复失败'
+      qcLastResult.value = `「${label}」修复失败：${e.message || '未知错误'}`
+      qcFixDetails.value = []
       return { success: false, error: e.message }
     } finally {
       qcFixing.value = qcFixing.value.filter((c) => c !== code)
@@ -2504,9 +2615,8 @@ ${assetBrief}
   }
 
   return {
-    projectTitle, currentProjectId, currentEpisode, currentEpisodeId, episodes, episodeTheme, artStyle, currentStyle, initialized,
-    segmentPlan,
-    scriptConfirmed, storyboardConfirmed, scenes, activeSceneId, scriptContent, autoExtractAssets,
+    projectTitle, currentProjectId, currentEpisode, currentEpisodeId, episodes, artStyle, currentStyle, initialized,
+    scriptConfirmed, storyboardConfirmed, scenes, activeSceneId, scriptContent,
     scriptVersions, pendingRewrite,
     aiMessages, aiInput, characters, props, assetScenes, storyboardScenes, storyboardSource, projectCharacters,
     wordCount, totalShots, totalDuration,
@@ -2515,20 +2625,21 @@ ${assetBrief}
     generatingAssetIds,
     generatingStoryboardIds, generatingBlockingIds, generatingKeyframeIds, generatingSceneGridIds, generatingShotGridIds, generatingVideoIds,
     shotGridFailed, shotGridStartedAt, clearShotGridFailed,
-    qcReport, qcLoading, qcFixing, qcShowIgnored, qcLastResult,
+    qcReport, qcLoading, qcFixing, qcShowIgnored, qcLastResult, qcFixDetails,
     loadQcReport, toggleQcShowIgnored, qcFix, qcIgnore, qcUnignore, qcCodesForShot, qcHasErrorForShot,
     systemAlerts, systemAlertCount,
     batchStoryboardGenerating, batchBlockingGenerating,
     fullGenRunning, fullGenProgress, fullGenMessage,
     imageModel, videoModel, aspectRatio,
     initProject, ensureReady, selectProject, loadEpisode, loadProjectCharacters, setStyle,
-    loadEpisodes, switchEpisode, addEpisode, renameEpisode, removeEpisode, updateProjectAspectRatio,
+    loadEpisodes, switchEpisode, addEpisode, removeEpisode, updateProjectAspectRatio,
     lastExtractInfo, assetsStale, storyboardStale,
-    sendAiMessage, saveDraft, confirmScript, reconfirmScript,
+    sendAiMessage, saveDraft, confirmScript,
     rewriteScript, acceptRewrite, rejectRewrite, saveAsVersion, revertToVersion, lockScript,
     extractAssets, extractStoryboard, confirmStoryboard, clearStoryboard, saveStoryboardInfo,
     generateShotImage, generateSceneGrid, generateShotGrid, batchGenerateImages, setPrimaryFrame, generateAssetImage, cancelAssetImageGen, batchGenerateAssetImages, regenerateStaleAssets, generateBlocking, generateShotVideoCombat, generateShotVideoByModel,
-    loadAlerts, alertsForShot, alertsForScene, alertsUnattached, resolveAlerts,
+    regeneratingShotIds, regenerateShot, refreshStoryboardShots,
+    loadAlerts, alertsForShot, alertsUnattached, resolveAlerts,
     generateFull,
   }
 })

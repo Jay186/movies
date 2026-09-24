@@ -6,6 +6,23 @@ import { serverDir } from './paths.js'
 
 let db = null
 
+const RETENTION_RULES = [
+  { table: 'ai_calls', dateColumn: 'created_at', days: () => config.retention?.aiCallsDays },
+]
+
+function applyRetentionPolicy() {
+  for (const rule of RETENTION_RULES) {
+    const days = Math.max(0, Number(rule.days?.()) || 0)
+    if (!days) continue
+    try {
+      const r = db.prepare(`DELETE FROM ${rule.table} WHERE ${rule.dateColumn} < datetime('now', ?)`).run(`-${days} days`)
+      if (r.changes) console.log(`[DB] 保留策略：${rule.table} 清理 ${r.changes} 条 ${days} 天前的记录`)
+    } catch (e) {
+      console.warn(`[DB] 保留策略执行失败 ${rule.table}:`, e.message)
+    }
+  }
+}
+
 export function initDB() {
   db = new Database(config.db.path)
   db.pragma('journal_mode = WAL')
@@ -63,8 +80,6 @@ export function initDB() {
     ['storyboard_scenes', 'grid_image_url', "TEXT DEFAULT ''"],
     ['shots', 'is_combat', 'INTEGER'],
     ['projects', 'aspect_ratio', "TEXT DEFAULT '9:16 (Portrait Widescreen)'"],
-    ['video_segments', 'trim_start', 'REAL NOT NULL DEFAULT 0'],
-    ['video_segments', 'shots_fp', "TEXT NOT NULL DEFAULT ''"],
     ['props', 'description_en', "TEXT DEFAULT ''"],
     ['scenes', 'location', "TEXT DEFAULT ''"],
     ['shots', 'asset_states_json', "TEXT DEFAULT ''"],
@@ -73,6 +88,26 @@ export function initDB() {
     ['system_alerts', 'scene_id', 'INTEGER'],
     ['system_alerts', 'scene_number', "TEXT DEFAULT ''"],
     ['scene_anchors', 'source_fingerprint', "TEXT DEFAULT ''"],
+    ['shots', 'locked', 'INTEGER DEFAULT 0'],
+    ['shots', 'purpose', "TEXT DEFAULT ''"],
+    ['shots', 'goal', "TEXT DEFAULT ''"],
+    ['shots', 'emotion_tone', "TEXT DEFAULT ''"],
+    ['shots', 'info_points', "TEXT DEFAULT '[]'"],
+    ['shots', 'world_state_in', "TEXT DEFAULT ''"],
+    ['shots', 'world_state_out', "TEXT DEFAULT ''"],
+    ['shots', 'shot_role', "TEXT DEFAULT ''"],
+    ['shots', 'related_shot_id', 'INTEGER'],
+    ['shots', 'script_span', "TEXT DEFAULT ''"],
+    ['shots', 'qc_status', "TEXT DEFAULT ''"],
+    ['shots', 'qc_report', "TEXT DEFAULT ''"],
+    ['shots', 'qc_waived', "TEXT DEFAULT '[]'"],
+    ['shots', 'version', 'INTEGER DEFAULT 1'],
+    ['shots', 'parent_id', 'INTEGER'],
+    ['shots', 'edited_by', "TEXT DEFAULT ''"],
+    // 出图依据快照：服务端注入的空间锚（基准/布局/要素/环境）落库，供④分镜页"出图依据"面板展示
+    ['shots', 'anchor_refs_snapshot', "TEXT DEFAULT ''"],
+    // 快照冗余镜号：整场重存会按时间轴重排镜号，历史版本需能按当时镜号回溯（无此列时回退按 shot_id 关联）
+    ['shot_versions', 'shot_number', "TEXT DEFAULT ''"],
   ]
   for (const [table, column, definition] of migrations) {
     try {
@@ -116,6 +151,8 @@ export function initDB() {
     ['idx_characters_project_char', 'characters', 'project_character_id'],
     ['idx_project_characters_ip', 'project_characters', 'ip_character_id'],
     ['idx_ip_characters_ip', 'ip_characters', 'ip_id'],
+    ['idx_props_episode', 'props', 'episode_id'],
+    ['idx_storyboard_scenes_episode', 'storyboard_scenes', 'episode_id'],
   ]
   for (const [name, table, column] of deferredIndexes) {
     try {
@@ -126,6 +163,25 @@ export function initDB() {
       console.warn(`[DB] 索引创建失败 ${name}:`, e.message)
     }
   }
+
+  // shot_versions.shot_number 自愈回填：历史版本首次升级时按 shot_id 关联当前镜号补值
+  // 仅补空值，不动已有值（避免覆盖掉重排前的真实镜号）
+  try {
+    const svCols = db.prepare('PRAGMA table_info(shot_versions)').all()
+    if (svCols.find((c) => c.name === 'shot_number')) {
+      const r = db.prepare(
+        `UPDATE shot_versions SET shot_number = COALESCE((
+           SELECT s.shot_number FROM shots s WHERE s.id = shot_versions.shot_id
+         ), '')
+         WHERE shot_number IS NULL OR shot_number = ''`
+      ).run()
+      if (r.changes) console.log(`[DB] 回填 shot_versions.shot_number：${r.changes} 行`)
+    }
+  } catch (e) {
+    console.warn('[DB] shot_versions.shot_number 回填失败（不影响启动）:', e.message)
+  }
+
+  applyRetentionPolicy()
 
   console.log('[DB] 数据库初始化完成:', config.db.path)
   return db

@@ -1,12 +1,13 @@
 
 import { Router } from 'express'
-import { query, queryOne, execute } from '../db.js'
-import { ensureSceneAnalysis, getLayoutAnchor, collectGroupLayoutMaterials, layoutMaterialsFingerprint } from '../ai/sceneAnchors.js'
+import { query, queryOne, execute, transaction } from '../db.js'
+import { ensureSceneAnalysis, normalizeSceneGrouping, getLayoutAnchor, collectGroupLayoutMaterials, layoutMaterialsFingerprint } from '../ai/sceneAnchors.js'
 import { createSpatialGroupReview } from '../ai/spatialGroupReview.js'
 
 const router = Router()
 const review = createSpatialGroupReview({
-  query, queryOne, execute, ensureSceneAnalysis,
+  query, queryOne, execute, transaction, ensureSceneAnalysis,
+  normalizeSceneGrouping,
   getLayoutAnchor,
   layoutMaterialsForGroup: collectGroupLayoutMaterials,
   fingerprintOfMaterials: layoutMaterialsFingerprint,
@@ -52,14 +53,14 @@ router.post('/spatial-group-review/init', async (req, res) => {
 })
 
 router.post('/spatial-group-review/decide', async (req, res) => {
-  const { episodeId, group, action } = req.body || {}
+  const { episodeId, group, action, sceneId } = req.body || {}
   const ep = Number(episodeId)
   if (!ep || !group || !action) {
     return res.status(400).json({ error: 'episodeId/group/action 必填' })
   }
   try {
     if (!assertEpisode(ep, res)) return
-    const result = await review.decideSpatialGroup({ episodeId: ep, group, action })
+    const result = await review.decideSpatialGroup({ episodeId: ep, group, action, sceneId })
     res.json({ success: true, ...result })
   } catch (e) {
     console.error('[spatialGroupReview] POST /decide 失败:', e.message)

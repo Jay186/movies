@@ -16,9 +16,11 @@ import {
   updateProjectCharacter,
   syncProjectCharacterToEpisodes,
 } from '../characterLibrary.js'
-import { backfillShotAssets } from '../ai/assetBackfill.js'
+import { backfillShotAssets, backfillSceneByTitle } from '../ai/assetBackfill.js'
+import { classifyShotCombat } from '../ai/shotClassifier.js'
+import { currentBaselineUrlForGroup } from '../ai/sceneAnchors.js'
 import { parseDialogue, serializeDialogue } from '../ai/dialogue.js'
-import { resolveAlertsByShot, recordAlert } from '../ai/alerts.js'
+import { resolveAlertsByShot, recordAlert, clearAlertsByRef } from '../ai/alerts.js'
 import { runLightingChecks } from '../ai/lightingCheckRuntime.js'
 import {
   snapshotBeforeExtract,
@@ -26,10 +28,11 @@ import {
   applyKeepForScenes,
   applyKeepForProps,
 } from '../ai/extractGuard.js'
-import { clearQcIgnores } from './qc.js'
+import { clearQcIgnores, persistQcToShots } from './qc.js'
+import { regenerateShot } from '../ai/doubao.js'
 import { config } from '../config.js'
 import { ASSET_TYPES } from '../ai/assetTypes.js'
-import { fingerprintOf } from '../ai/sceneAnchors.js'
+import { fingerprintOf, normalizeSceneGrouping } from '../ai/sceneAnchors.js'
 import { serverDir, uploadsDir } from '../paths.js'
 
 const router = Router()
@@ -74,6 +77,103 @@ function restoreAssetStates(rows) {
     console.warn(`[episodes] 状态行回迁失败（不阻断保存）: ${e.message}`)
   }
   return n
+}
+
+const SHOT_VERSION_META_COLS = new Set(['version', 'edited_by'])
+
+// shot_versions.shot_number 是后加迁移列：老库在迁移执行前可能尚未存在，探测一次并缓存
+let _svNumberColCache = null
+function hasShotVersionNumberCol() {
+  if (_svNumberColCache !== null) return _svNumberColCache
+  try {
+    _svNumberColCache = query('PRAGMA table_info(shot_versions)').some((c) => c.name === 'shot_number')
+  } catch {
+    _svNumberColCache = false
+  }
+  return _svNumberColCache
+}
+
+// 包装 shots 行更新：仅在内容发生实质变化时，把被覆盖的旧值快照进 shot_versions
+function withShotVersionSnapshot(shotId, episodeId, reason, editedBy, updateFn) {
+  const before = queryOne('SELECT * FROM shots WHERE id = ?', [shotId])
+  if (!before) { updateFn(); return }
+  updateFn()
+  const after = queryOne('SELECT * FROM shots WHERE id = ?', [shotId])
+  if (!after) return
+  const changed = Object.keys(after).some(
+    (k) => !SHOT_VERSION_META_COLS.has(k) && String(before[k] ?? '') !== String(after[k] ?? '')
+  )
+  if (!changed) return
+  execute(
+    `INSERT INTO shot_versions (shot_id, episode_id, storyboard_scene_id, version, edited_by, reason, snapshot, shot_number)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [shotId, episodeId, before.storyboard_scene_id, before.version || 1, editedBy || '', reason || '', JSON.stringify(before), before.shot_number || '']
+  )
+  execute('UPDATE shots SET version = COALESCE(version, 1) + 1, edited_by = ? WHERE id = ?', [editedBy || '', shotId])
+}
+
+// 删除 shots 行前的无条件快照（行即将消失，不做变化检测）
+function forceSnapshotShot(shotId, episodeId, reason, editedBy) {
+  const row = queryOne('SELECT * FROM shots WHERE id = ?', [shotId])
+  if (!row) return
+  execute(
+    `INSERT INTO shot_versions (shot_id, episode_id, storyboard_scene_id, version, edited_by, reason, snapshot, shot_number)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [shotId, episodeId, row.storyboard_scene_id, row.version || 1, editedBy || '', reason || '', JSON.stringify(row), row.shot_number || '']
+  )
+}
+
+// world_state_in 是派生字段：按时间轴顺序回填为上一镜的 world_state_out（首镜无上一镜则为空串）
+// 供镜间衔接检查器（#8）与单镜重生成（#2）使用；保存与单镜编辑后都需要刷新
+function refreshWorldStateIn(episodeId) {
+  execute(
+    `UPDATE shots SET world_state_in = COALESCE((
+       SELECT s2.world_state_out FROM shots s2
+       JOIN storyboard_scenes ss2 ON ss2.id = s2.storyboard_scene_id
+       WHERE ss2.episode_id = ?
+         AND (s2.start_time < shots.start_time
+              OR (s2.start_time = shots.start_time AND s2.id < shots.id))
+       ORDER BY s2.start_time DESC, s2.id DESC LIMIT 1
+     ), '')
+     WHERE storyboard_scene_id IN (SELECT id FROM storyboard_scenes WHERE episode_id = ?)`,
+    [episodeId, episodeId]
+  )
+}
+
+// 时轴顺延（#4 编辑侧联动）：本镜 duration/start_time 变化后，
+// 强制 end_time = start_time + duration，并把同集时间序后续镜整体平移 delta（对白绝对秒同步平移）
+function shiftFollowingShots(episodeId, shotId, oldEndTime) {
+  const row = queryOne('SELECT start_time, duration, end_time FROM shots WHERE id = ?', [shotId])
+  if (!row) return 0
+  const start = Number(row.start_time) || 0
+  const duration = Number(row.duration) || 0
+  const newEndTime = Math.round((start + duration) * 1000) / 1000
+  const delta = Math.round((newEndTime - (Number(oldEndTime) || 0)) * 1000) / 1000
+  if (!delta) return 0
+  execute('UPDATE shots SET end_time = ? WHERE id = ?', [newEndTime, shotId])
+  const followers = query(
+    `SELECT s.id, s.dialogue FROM shots s
+       JOIN storyboard_scenes ss ON ss.id = s.storyboard_scene_id
+      WHERE ss.episode_id = ?
+        AND (s.start_time > ? OR (s.start_time = ? AND s.id > ?))
+      ORDER BY s.start_time ASC, s.id ASC`,
+    [episodeId, row.start_time, row.start_time, shotId]
+  )
+  for (const f of followers) {
+    const dlg = parseDialogue(f.dialogue)
+    const shiftedDlg = Array.isArray(dlg) && dlg.length
+      ? dlg.map((d) => ({
+          ...d,
+          startTime: Math.round(((Number(d.startTime) || 0) + delta) * 1000) / 1000,
+          endTime: Math.round(((Number(d.endTime) || 0) + delta) * 1000) / 1000,
+        }))
+      : null
+    execute(
+      'UPDATE shots SET start_time = start_time + ?, end_time = end_time + ?, dialogue = COALESCE(?, dialogue) WHERE id = ?',
+      [delta, delta, shiftedDlg ? serializeDialogue(shiftedDlg) : null, f.id]
+    )
+  }
+  return followers.length
 }
 
 router.get('/project/:projectId', (req, res) => {
@@ -143,6 +243,7 @@ router.delete('/:id', (req, res) => {
       )
     }
     execute('DELETE FROM ai_calls WHERE episode_id = ?', [episode.id])
+    clearAlertsByRef('episode', [episode.id])
   } catch (e) {
     console.warn(`[episodes] 无外键表清理失败（删除已生效，仅残留日志/历史）: ${e.message}`)
   }
@@ -198,51 +299,26 @@ router.get('/:id', (req, res) => {
     aiChatHistory = []
   }
 
-  const segments = query(
-    "SELECT * FROM video_segments WHERE episode_id = ? ORDER BY scene_number, segment_index",
-    [req.params.id]
-  )
-  const segmentByShot = new Map()
-  for (const seg of segments) {
-    if (!seg.video_url) continue
-    let segShotIds = []
-    try { segShotIds = JSON.parse(seg.shot_ids || '[]') } catch { segShotIds = [] }
-    for (const sid of segShotIds) segmentByShot.set(sid, seg)
-  }
-  const segmentPlan = segments.map((seg) => {
-    let segShotIds = []
-    try { segShotIds = JSON.parse(seg.shot_ids || '[]') } catch { segShotIds = [] }
-    const rawSpan = (seg.start_time != null && seg.end_time != null)
-      ? Number(seg.end_time) - Number(seg.start_time)
-      : null
-    const span = rawSpan != null ? Number(rawSpan.toFixed(3)) : null
-    return {
-      id: seg.id,
-      sceneNumber: seg.scene_number,
-      segmentIndex: seg.segment_index,
-      shotIds: segShotIds,
-      shotNumbers: seg.shot_numbers || '',
-      startTime: seg.start_time,
-      endTime: seg.end_time,
-      duration: span,
-      durationSec: span,
-      videoUrl: seg.video_url || '',
-      anchorFrameUrl: seg.anchor_frame_url || '',
-      trimStart: Number(seg.trim_start) || 0,
-      status: seg.status || 'pending',
-      error: seg.error || '',
-    }
-  })
-
   const storyboardScenes = query(
     'SELECT * FROM storyboard_scenes WHERE episode_id = ? ORDER BY scene_number',
     [req.params.id]
   )
+  const sceneIds = storyboardScenes.map((s) => s.id)
+  const shotsByScene = new Map()
+  if (sceneIds.length) {
+    const placeholders = sceneIds.map(() => '?').join(', ')
+    const allShots = query(
+      `SELECT * FROM shots WHERE storyboard_scene_id IN (${placeholders}) ORDER BY start_time, id`,
+      sceneIds
+    )
+    for (const shot of allShots) {
+      const list = shotsByScene.get(shot.storyboard_scene_id)
+      if (list) list.push(shot)
+      else shotsByScene.set(shot.storyboard_scene_id, [shot])
+    }
+  }
   for (const s of storyboardScenes) {
-    s.shots = query(
-      'SELECT * FROM shots WHERE storyboard_scene_id = ? ORDER BY start_time, id',
-      [s.id]
-    ).map((shot) => ({
+    s.shots = (shotsByScene.get(s.id) || []).map((shot) => ({
       ...shot,
       characters: JSON.parse(shot.characters || '[]'),
       sceneAssets: JSON.parse(shot.scene_assets || '[]'),
@@ -263,6 +339,14 @@ router.get('/:id', (req, res) => {
         try { return shot.blocking_plan ? JSON.parse(shot.blocking_plan) : null } catch { return null }
       })(),
       finalFrame: shot.final_frame || '',
+      purpose: shot.purpose || '',
+      goal: shot.goal || '',
+      emotionTone: shot.emotion_tone || '',
+      infoPoints: (() => {
+        try { const v = JSON.parse(shot.info_points || '[]'); return Array.isArray(v) ? v : [] } catch { return [] }
+      })(),
+      worldStateIn: shot.world_state_in || '',
+      worldStateOut: shot.world_state_out || '',
       dialogue: (() => {
         const lines = parseDialogue(shot.dialogue)
         return lines.length ? lines : null
@@ -272,25 +356,33 @@ router.get('/:id', (req, res) => {
       frameUrl: shot.frame_url || '',
       frameUrl2: shot.frame_url2 || '',
       videoUrl: shot.video_url || '',
-      segmentVideoUrl: segmentByShot.get(shot.id)?.video_url || '',
-      segmentOffset: (() => {
-        const seg = segmentByShot.get(shot.id)
-        if (!seg || seg.start_time == null || shot.start_time == null) return 0
-        return Math.max(0, Number(shot.start_time) - Number(seg.start_time))
-      })(),
-      segmentLabel: (() => {
-        const seg = segmentByShot.get(shot.id)
-        return seg ? `场${seg.scene_number}·段${seg.segment_index}（${seg.shot_numbers || ''}）` : ''
-      })(),
       continuityUrl: shot.continuity_url || '',
       keyframeUrl: shot.keyframe_url || '',
       seamCheck: (() => {
         try { return shot.seam_check ? JSON.parse(shot.seam_check) : null } catch { return null }
       })(),
-      shotReview: (() => {
-        try { return shot.shot_review ? JSON.parse(shot.shot_review) : null } catch { return null }
+      anchorSnapshot: (() => {
+        try { return shot.anchor_refs_snapshot ? JSON.parse(shot.anchor_refs_snapshot) : null } catch { return null }
       })(),
     }))
+  }
+
+  // 空间锚「依据已变」判定：快照里记的是出图当时的组基准，与当前已确认基准比对；
+  // 组级缓存，一次列表加载每组最多查一次。
+  const baselineNowByGroup = new Map()
+  for (const s of storyboardScenes) {
+    for (const shot of s.shots) {
+      const snapGroup = shot.anchorSnapshot?.scene?.group || ''
+      const snapBaseline = shot.anchorSnapshot?.scene?.baseline_url || ''
+      if (snapGroup && snapBaseline) {
+        if (!baselineNowByGroup.has(snapGroup)) {
+          baselineNowByGroup.set(snapGroup, currentBaselineUrlForGroup(req.params.id, snapGroup))
+        }
+        shot.anchorStale = baselineNowByGroup.get(snapGroup) !== snapBaseline
+      } else {
+        shot.anchorStale = false
+      }
+    }
   }
 
   res.json({
@@ -305,7 +397,6 @@ router.get('/:id', (req, res) => {
     characters,
     props,
     scenes,
-    segmentPlan,
     storyboardScenes: storyboardScenes.map((scene, sceneIndex) => ({
       ...scene,
       scene_number: sceneIndex + 1,
@@ -547,9 +638,12 @@ router.post('/:id/scenes', (req, res) => {
       if (target) {
         seenOldIds.add(target.id)
         if (target.scene_number !== i + 1 || target.title !== name || (target.summary || '') !== finalSummary) contentChanged++
+        // 图片换了（上传/替换）才清空 gen_context——出图快照属于旧图；
+        // 只改描述不动图时保留快照，让「描述改过→图过时」的判定继续成立
+        const imgChanged = String(imgUrl || '').split('?')[0] !== String(target.image_url || '').split('?')[0]
         execute(
-          'UPDATE scenes SET scene_number = ?, title = ?, summary = ?, image_url = ?, prop_names = ?, title_en = ?, summary_en = ?, lighting_en = ?, location = ? WHERE id = ?',
-          [i + 1, name, finalSummary, imgUrl, JSON.stringify(propNames), finalTitleEn, finalSummaryEn, finalLightingEn, finalLocation, target.id]
+          'UPDATE scenes SET scene_number = ?, title = ?, summary = ?, image_url = ?, prop_names = ?, title_en = ?, summary_en = ?, lighting_en = ?, location = ?, gen_context = CASE WHEN ? THEN \'\' ELSE gen_context END WHERE id = ?',
+          [i + 1, name, finalSummary, imgUrl, JSON.stringify(propNames), finalTitleEn, finalSummaryEn, finalLightingEn, finalLocation, imgChanged ? 1 : 0, target.id]
         )
         finalSceneId = target.id
       } else {
@@ -585,13 +679,13 @@ router.post('/:id/scenes', (req, res) => {
 
     restoreAssetStates(stateSnapshot)
 
-    if (deletedRows.length > 0 && inserted === 0 && contentChanged === 0) {
-      const analysisCount = queryOne('SELECT COUNT(*) AS c FROM scene_analysis WHERE episode_id = ?', [episodeId])?.c || 0
-      const liveCount = queryOne('SELECT COUNT(*) AS c FROM scenes WHERE episode_id = ?', [episodeId])?.c || 0
-      if (analysisCount === liveCount) {
-        const live = query('SELECT id, scene_number, title, summary, image_url FROM scenes WHERE episode_id = ? ORDER BY scene_number', [episodeId])
-        execute('UPDATE scene_analysis SET fingerprint = ? WHERE episode_id = ?', [fingerprintOf(live), episodeId])
-      }
+    // 手动保存（source != extract）不做 AI 重析：把尚未归组的场景兜底补成「一场一组」，
+    // 让新场景直接以组卡形态出现；再把指纹对齐到当前场景列表，让 ensureSceneAnalysis
+    // 命中缓存、不触发 LLM。只有「重新提取资产」（source='extract'）才会让 AI 重新分组。
+    if (source !== 'extract') {
+      normalizeSceneGrouping(episodeId)
+      const live = query('SELECT id, scene_number, title, summary, image_url FROM scenes WHERE episode_id = ? ORDER BY scene_number', [episodeId])
+      execute('UPDATE scene_analysis SET fingerprint = ? WHERE episode_id = ?', [fingerprintOf(live), episodeId])
     }
   })
 
@@ -625,9 +719,10 @@ router.post('/:id/storyboard', (req, res) => {
     const existingScenes = query('SELECT id, scene_number FROM storyboard_scenes WHERE episode_id = ?', [episodeId])
     const sceneIdByNum = new Map(existingScenes.map((s) => [s.scene_number, s.id]))
     const existingShots = query(
-      `SELECT s.id, s.storyboard_scene_id, s.shot_number
+      `SELECT s.id, s.storyboard_scene_id, s.shot_number, s.description
        FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
-       WHERE ss.episode_id = ?`,
+       WHERE ss.episode_id = ?
+       ORDER BY ss.scene_number, s.start_time, s.id`,
       [episodeId]
     )
 
@@ -637,6 +732,13 @@ router.post('/:id/storyboard', (req, res) => {
       props: query('SELECT name FROM props WHERE episode_id = ?', [episodeId]).map((r) => r.name),
     }
     const shotIdByKey = new Map(existingShots.map((s) => [`${s.storyboard_scene_id}:${s.shot_number}`, s.id]))
+    // 兜底定位（镜号重排/本地镜号漂移时，避免把既有镜头误判成「新增+删除」而重建，令版本链断裂）
+    // 分两级，均要求既有镜头尚未被认领、且同场次：
+    //   1) 描述精确匹配 —— 内容未改动的镜头稳定命中（重排场景下最可靠）
+    //   2) 同理时间轴起点 —— 描述也改过时就近对位，避免整体错位
+    // 两者都不中才按新增插入，从而保留「真新增」语义
+    const bySceneUnclaimed = (sceneId) =>
+      existingShots.filter((s) => s.storyboard_scene_id === sceneId && !keepShotIds.has(s.id))
 
     const keepSceneIds = new Set()
     const keepShotIds = new Set()
@@ -660,10 +762,54 @@ router.post('/:id/storyboard', (req, res) => {
       for (let shi = 0; shi < (s.shots || []).length; shi++) {
         const shot = s.shots[shi]
         const shotNumber = shot.shotNumber || shot.shot_number || `${sceneNumber}-${shi + 1}`
-        const shotId = shotIdByKey.get(`${sceneId}:${shotNumber}`)
+        const desc = String(shot.description || '').trim()
+        let shotId = shotIdByKey.get(`${sceneId}:${shotNumber}`)
+        // 内容优先：镜号命中行的描述与本次提交不符、而同场次另有未认领镜头描述精确匹配时，
+        // 说明镜号不可信（重排/漂移），改认内容一致的那个，避免把既有镜头覆盖成别的镜
+        if (shotId != null && desc) {
+          const keyed = existingShots.find((s) => s.id === shotId)
+          if (keyed && String(keyed.description || '').trim() !== desc) {
+            const hit = bySceneUnclaimed(sceneId).find((s) => String(s.description || '').trim() === desc)
+            if (hit) shotId = hit.id
+          }
+        }
+        if (shotId == null) {
+          const pool = bySceneUnclaimed(sceneId)
+          // 1) 描述精确匹配：内容未改的镜头稳定命中
+          if (desc) {
+            const hit = pool.find((s) => String(s.description || '').trim() === desc)
+            if (hit) shotId = hit.id
+          }
+          // 2) 描述也改过：按同场次内未认领镜头的时间轴顺序就近对位
+          if (shotId == null) {
+            const hit = pool[0]
+            if (hit) shotId = hit.id
+          }
+        }
+
+        // 锁定镜冻结：整场重存时既不删除、也不被新数据覆盖（人工精修优先于重生成结果）
+        // 必须计入 keepShotIds，否则该镜会被下面 droppedShots 判定为「已删除」
+        let frozenByLock = false
+        if (shotId != null) {
+          const existingLocked = queryOne('SELECT locked FROM shots WHERE id = ?', [shotId])
+          if (existingLocked && existingLocked.locked) {
+            keepShotIds.add(shotId)
+            frozenByLock = true
+            console.log(`[storyboard-save] 锁定镜头 ${shotNumber} 跳过重存覆盖`)
+          }
+        }
+        if (frozenByLock) continue
 
         backfillShotAssets(shot, episodeAssetNames)
+        backfillSceneByTitle(shot, sceneTitle, episodeAssetNames.scenes)
 
+        // is_combat：显式布尔 → 1/0；显式 0/1 → 原值；否则 INSERT 走 classifyShotCombat 兜底、
+        // UPDATE 传 null（配合 COALESCE 保留库中旧值）。与 /full 路径（generate-script.js）判定口径一致。
+        const isCombatValue = shot.isCombat === true || shot.isCombat === false
+          ? (shot.isCombat ? 1 : 0)
+          : (shot.is_combat === 0 || shot.is_combat === 1
+              ? shot.is_combat
+              : (shotId == null ? (classifyShotCombat(shot) ? 1 : 0) : null))
         const fields = [
           shot.duration || 8,
           shot.description || '',
@@ -686,17 +832,24 @@ router.post('/:id/storyboard', (req, res) => {
           shot.nonDiegeticMusic || shot.non_diegetic_music || '',
           shot.integratedMultimodalDescription || shot.integrated_multimodal_description || '',
           shot.finalFrame || shot.final_frame || '',
-          shot.isCombat === true || shot.isCombat === false
-            ? (shot.isCombat ? 1 : 0)
-            : (shot.is_combat === 0 || shot.is_combat === 1 ? shot.is_combat : null),
+          isCombatValue,
         ]
         const camAngle = shot.camera_angle || shot.cameraAngle || null
+        // 叙事层字段：空值传 null，配合 COALESCE 在 UPDATE 时保留库中旧值
+        const narrativeFields = [
+          shot.purpose || null,
+          shot.goal || null,
+          shot.emotionTone || shot.emotion_tone || null,
+          shot.infoPoints?.length ? JSON.stringify(shot.infoPoints)
+            : (shot.info_points?.length ? JSON.stringify(shot.info_points) : null),
+          shot.worldStateOut || shot.world_state_out || null,
+        ]
 
         if (shotId == null) {
           const r = execute(
-            `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, storyboard_url, frame_url, blocking_url, video_url, video_generated, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [sceneId, shotNumber, ...fields, camAngle || '']
+            `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, storyboard_url, frame_url, blocking_url, video_url, video_generated, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [sceneId, shotNumber, ...fields, camAngle || '', ...narrativeFields]
           )
           keepShotIds.add(r.lastInsertRowid)
         } else {
@@ -704,21 +857,47 @@ router.post('/:id/storyboard', (req, res) => {
           const frameUrl2Value = shot.frameUrl2 !== undefined ? shot.frameUrl2 : ''
           const continuityUrlValue = shot.continuityUrl !== undefined ? shot.continuityUrl : ''
           const keyframeUrlValue = shot.keyframeUrl !== undefined ? shot.keyframeUrl : ''
-          execute(
-            `UPDATE shots SET duration=?, description=?, characters=?, scene_assets=?, prop_assets=?, storyboard_url=?, frame_url=?, blocking_url=?, video_url=?, video_generated=?, shot_type=?, start_time=?, end_time=?, action_note=?, sound_effects=?, dialogue=?, camera_movement=?, overall_soundscape=COALESCE(NULLIF(?, ''), overall_soundscape), non_diegetic_music=COALESCE(NULLIF(?, ''), non_diegetic_music), integrated_multimodal_description=?, final_frame=?, is_combat=COALESCE(?, is_combat), camera_angle=COALESCE(?, camera_angle), blocking_plan=?, frame_url2=?, continuity_url=?, keyframe_url=? WHERE id=?`,
-            [...fields, camAngle, planValue, frameUrl2Value, continuityUrlValue, keyframeUrlValue, shotId]
-          )
+          withShotVersionSnapshot(shotId, episodeId, 'save_overwrite', 'save', () => {
+            execute(
+              `UPDATE shots SET duration=?, description=?, characters=?, scene_assets=?, prop_assets=?, storyboard_url=?, frame_url=?, blocking_url=?, video_url=?, video_generated=?, shot_type=?, start_time=?, end_time=?, action_note=?, sound_effects=?, dialogue=?, camera_movement=?, overall_soundscape=COALESCE(NULLIF(?, ''), overall_soundscape), non_diegetic_music=COALESCE(NULLIF(?, ''), non_diegetic_music), integrated_multimodal_description=?, final_frame=?, is_combat=COALESCE(?, is_combat), camera_angle=COALESCE(?, camera_angle), purpose=COALESCE(?, purpose), goal=COALESCE(?, goal), emotion_tone=COALESCE(?, emotion_tone), info_points=COALESCE(?, info_points), world_state_out=COALESCE(?, world_state_out), blocking_plan=?, frame_url2=?, continuity_url=?, keyframe_url=? WHERE id=?`,
+              [...fields, camAngle, ...narrativeFields, planValue, frameUrl2Value, continuityUrlValue, keyframeUrlValue, shotId]
+            )
+          })
           keepShotIds.add(shotId)
         }
       }
     }
 
-    for (const s of existingShots) {
-      if (!keepShotIds.has(s.id)) execute('DELETE FROM shots WHERE id = ?', [s.id])
+    const droppedShots = existingShots.filter((s) => !keepShotIds.has(s.id))
+    const prunedShotIds = []
+    for (const s of droppedShots) {
+      const lockedRow = queryOne('SELECT locked FROM shots WHERE id = ?', [s.id])
+      if (lockedRow && lockedRow.locked) {
+        console.log(`[storyboard-save] 锁定镜头 ${s.shot_number || s.id} 跳过删除`)
+        continue
+      }
+      forceSnapshotShot(s.id, episodeId, 'save_prune', 'save')
+      execute('DELETE FROM shots WHERE id = ?', [s.id])
+      prunedShotIds.push(s.id)
     }
-    for (const s of existingScenes) {
-      if (!keepSceneIds.has(s.id)) execute('DELETE FROM storyboard_scenes WHERE id = ?', [s.id])
+    clearAlertsByRef('shot', prunedShotIds)
+    const droppedSceneIds = existingScenes.filter((s) => !keepSceneIds.has(s.id)).map((s) => s.id)
+    const prunedSceneIds = []
+    const prunedSceneShotIds = []
+    for (const s of droppedSceneIds) {
+      const hasLocked = queryOne('SELECT id FROM shots WHERE storyboard_scene_id = ? AND locked = 1 LIMIT 1', [s])
+      if (hasLocked) {
+        console.log(`[storyboard-save] 场次 ${s} 含锁定镜头，跳过删除`)
+        continue
+      }
+      const sceneShotIds = query('SELECT id FROM shots WHERE storyboard_scene_id = ?', [s]).map((r) => r.id)
+      for (const sid of sceneShotIds) forceSnapshotShot(sid, episodeId, 'scene_prune', 'save')
+      execute('DELETE FROM storyboard_scenes WHERE id = ?', [s])
+      prunedSceneIds.push(s)
+      prunedSceneShotIds.push(...sceneShotIds)
     }
+    clearAlertsByRef('scene', prunedSceneIds)
+    clearAlertsByRef('shot', prunedSceneShotIds)
     execute(
       `UPDATE shots SET shot_number = (
          SELECT ss.scene_number || '-' || (
@@ -733,6 +912,20 @@ router.post('/:id/storyboard', (req, res) => {
        WHERE storyboard_scene_id IN (SELECT id FROM storyboard_scenes WHERE episode_id = ?)`,
       [episodeId]
     )
+    // 镜号重排后同步刷新版本冗余镜号：历史版本始终跟随后端当前镜号，避免按旧镜号回溯落空
+    if (hasShotVersionNumberCol()) {
+      execute(
+        `UPDATE shot_versions SET shot_number = COALESCE((
+           SELECT s.shot_number FROM shots s WHERE s.id = shot_versions.shot_id
+         ), shot_number)
+         WHERE shot_id IN (
+           SELECT s.id FROM shots s JOIN storyboard_scenes ss ON ss.id = s.storyboard_scene_id
+           WHERE ss.episode_id = ?
+         )`,
+        [episodeId]
+      )
+    }
+    refreshWorldStateIn(episodeId)
   })
   const epForFp = queryOne('SELECT script_content FROM episodes WHERE id = ?', [req.params.id])
   if (epForFp?.script_content) {
@@ -743,147 +936,34 @@ router.post('/:id/storyboard', (req, res) => {
   if (storyboard_confirmed !== undefined) {
     execute('UPDATE episodes SET storyboard_confirmed = ? WHERE id = ?', [storyboard_confirmed ? 1 : 0, req.params.id])
   }
+  persistQcToShots(req.params.id)
   res.json({ success: true })
 })
 
 router.delete('/:id/storyboard', (req, res) => {
   const episodeId = req.params.id
   try {
-    const segIds = query('SELECT id FROM video_segments WHERE episode_id = ?', [episodeId]).map((r) => r.id)
     transaction(() => {
-      execute(
-        `DELETE FROM shots WHERE storyboard_scene_id IN (SELECT id FROM storyboard_scenes WHERE episode_id = ?)`,
+      const droppedShotIds = query(
+        `SELECT shots.id FROM shots
+         JOIN storyboard_scenes ss ON ss.id = shots.storyboard_scene_id
+         WHERE ss.episode_id = ?`,
         [episodeId]
-      )
+      ).map((r) => r.id)
+      for (const id of droppedShotIds) forceSnapshotShot(id, episodeId, 'storyboard_reset', 'save')
+      if (droppedShotIds.length) console.log(`[storyboard-reset] 删除前已快照 ${droppedShotIds.length} 个镜头进 shot_versions`)
+      for (const id of droppedShotIds) execute('DELETE FROM shots WHERE id = ?', [id])
+      clearAlertsByRef('shot', droppedShotIds)
+      const droppedSceneIds = query('SELECT id FROM storyboard_scenes WHERE episode_id = ?', [episodeId]).map((r) => r.id)
       execute('DELETE FROM storyboard_scenes WHERE episode_id = ?', [episodeId])
-      execute('DELETE FROM video_segments WHERE episode_id = ?', [episodeId])
+      clearAlertsByRef('scene', droppedSceneIds)
       execute('UPDATE episodes SET storyboard_script_fp = NULL, storyboard_confirmed = 0, storyboard_source = ? WHERE id = ?', ['generated', episodeId])
     })
     clearQcIgnores(episodeId)
-    if (segIds.length) {
-      const trashDir = path.join(serverDir, '..', '_video_trash', String(Date.now()))
-      for (const sid of segIds) recycleSliceDir(path.join('segments', `seg${sid}`), trashDir)
-    }
     res.json({ success: true })
   } catch (e) {
     console.error('[清空分镜失败]', e)
     res.status(500).json({ error: e.message || '清空分镜失败' })
-  }
-})
-
-router.get('/:id/segments', (req, res) => {
-  const episodeId = Number(req.params.id)
-  const rows = query(
-    'SELECT * FROM video_segments WHERE episode_id = ? ORDER BY scene_number, segment_index',
-    [episodeId]
-  )
-  res.json({
-    segments: rows.map((r) => {
-      const span = (r.start_time != null && r.end_time != null)
-        ? Number((Number(r.end_time) - Number(r.start_time)).toFixed(3))
-        : null
-      return {
-        id: r.id,
-        sceneNumber: r.scene_number,
-        segmentIndex: r.segment_index,
-        shotNumbers: r.shot_numbers,
-        startTime: r.start_time,
-        endTime: r.end_time,
-        duration: span,
-        durationSec: span,
-        videoUrl: r.video_url || '',
-        anchorFrameUrl: r.anchor_frame_url || '',
-        status: r.status,
-        error: r.error || '',
-      }
-    }),
-  })
-})
-
-router.get('/:id/segments/staleness', async (req, res) => {
-  const episodeId = Number(req.params.id)
-  try {
-    const { segmentStaleness } = await import('../ai/segmentBuilder.js')
-    const rows = query(
-      'SELECT id, shots_fp, status, episode_id FROM video_segments WHERE episode_id = ?',
-      [episodeId]
-    )
-    if (!rows.length) {
-      return res.json({ episodeId, hasPlan: false, stale: false, staleCount: 0, total: 0, reason: 'no_plan' })
-    }
-    const judged = rows.map((r) => ({ row: r, verdict: segmentStaleness(r) }))
-    const isStale = (j) => j.verdict.stale || j.row.status === 'stale'
-    const staleRows = judged.filter(isStale)
-    res.json({
-      episodeId,
-      hasPlan: true,
-      stale: staleRows.length > 0,
-      staleCount: staleRows.length,
-      total: rows.length,
-      emptyFingerprint: staleRows.filter((j) => !j.row.shots_fp).length,
-      fingerprintMismatch: staleRows.filter((j) => j.row.shots_fp && j.verdict.stale).length,
-      currentFingerprint: judged[0]?.verdict.currentFingerprint || '',
-      reason: staleRows.length ? 'stale' : 'fresh',
-    })
-  } catch (e) {
-    res.json({ episodeId, hasPlan: false, stale: false, staleCount: 0, total: 0, reason: 'error', error: String(e?.message || e) })
-  }
-})
-
-router.post('/:id/segments', async (req, res) => {
-  const episodeId = Number(req.params.id)
-  const { persist = false, replace = true, scene = null } = req.body || {}
-  try {
-    const { buildSegments, formatPlan, persistSegments, SEG_MIN_SEC, SEG_MAX_SEC } = await import('../ai/segmentBuilder.js')
-    const plan = buildSegments(episodeId, scene != null ? { scene: Number(scene) } : {})
-    let write = null
-    if (persist) {
-      write = persistSegments(plan, { replace, episodeId })
-    }
-    const unusableSegments = plan.scenes.flatMap((sc) => sc.segments
-      .filter((s) => s.status === 'unusable')
-      .map((s) => ({ sceneNumber: s.sceneNumber, segmentIndex: s.segIndexInScene, shotNumbers: s.shotNumbers.join('+'), durationSec: s.durationSec })))
-    res.json({
-      success: true,
-      totals: plan.totals,
-      warnings: plan.warnings,
-      plan: formatPlan(plan),
-      shotsFp: plan.shotsFp || '',
-      isEmpty: Boolean(plan.isEmpty),
-      unusableSegments,
-      segments: plan.scenes.flatMap((sc) => sc.segments.map((s) => ({
-        sceneNumber: s.sceneNumber,
-        segmentIndex: s.segIndexInScene,
-        shotNumbers: s.shotNumbers,
-        duration: s.durationSec,
-        startTime: s.startTime,
-        endTime: s.endTime,
-        anchorMode: s.anchorMode,
-        status: s.status,
-        shotsFp: plan.shotsFp || '',
-      }))),
-      write,
-    })
-  } catch (e) {
-    console.error('[段方案] 计算失败', e)
-    res.status(500).json({ error: e.message || '段方案计算失败' })
-  }
-})
-
-router.post('/:id/segments/slice', async (req, res) => {
-  const episodeId = Number(req.params.id)
-  const { scene = null, force = false, segmentId = null } = req.body || {}
-  try {
-    const { sliceSegment, sliceEpisode } = await import('../ai/segmentSlicer.js')
-    if (segmentId != null) {
-      const r = await sliceSegment(Number(segmentId), { force })
-      return res.json(r)
-    }
-    const r = await sliceEpisode(episodeId, { scene: scene != null ? Number(scene) : null, force })
-    res.json(r)
-  } catch (e) {
-    console.error('[段切片] 失败', e)
-    res.status(500).json({ error: e.message || '段切片失败' })
   }
 })
 
@@ -895,7 +975,12 @@ router.put('/:id/shots/:shotId', (req, res) => {
     non_diegetic_music, integrated_multimodal_description, blocking_plan, blockingPlan, final_frame, finalFrame,
     video_prompt_override,
     is_combat,
+    locked,
     camera_angle, cameraAngle,
+    purpose, goal,
+    emotion_tone, emotionTone,
+    info_points, infoPoints,
+    world_state_out, worldStateOut,
   } = req.body
   console.log('[/episodes/:id/shots/:shotId] update', { episodeId: req.params.id, shotId: req.params.shotId, hasStoryboardUrl: !!storyboard_url, hasFrameUrl: !!frame_url, hasFrameUrl2: frame_url2 !== undefined, hasBlockingUrl: !!blocking_url, hasBlockingPlan: blocking_plan !== undefined })
 
@@ -908,6 +993,15 @@ router.put('/:id/shots/:shotId', (req, res) => {
   if (!ownedShot) {
     return res.status(404).json({ error: '镜头不存在或不属于该集' })
   }
+  // 锁定镜拒写：锁定 = 冻结，仅放行"单独解锁"（body 只含 locked: 0），其余编辑一律 409
+  const existingShot = queryOne('SELECT locked, start_time, end_time, duration FROM shots WHERE id = ?', [req.params.shotId])
+  if (existingShot?.locked) {
+    const bodyKeys = Object.keys(req.body || {}).filter((k) => req.body[k] !== undefined)
+    const isUnlockOnly = bodyKeys.length === 1 && bodyKeys[0] === 'locked' && !req.body.locked
+    if (!isUnlockOnly) {
+      return res.status(409).json({ error: '镜头已锁定，编辑被拒绝；请先解锁（锁定镜仅允许单独的解锁操作）' })
+    }
+  }
   let blockingPlanValue
   if (blocking_plan !== undefined) {
     blockingPlanValue = typeof blocking_plan === 'object' ? JSON.stringify(blocking_plan) : blocking_plan
@@ -917,43 +1011,337 @@ router.put('/:id/shots/:shotId', (req, res) => {
     blockingPlanValue = null
   }
   const finalFrameValue = final_frame !== undefined ? final_frame : (finalFrame !== undefined ? finalFrame : null)
-  execute(
-    `UPDATE shots SET
-       storyboard_url = COALESCE(?, storyboard_url),
-       frame_url = COALESCE(?, frame_url),
-       frame_url2 = COALESCE(?, frame_url2),
-       blocking_url = COALESCE(?, blocking_url),
-       video_url = COALESCE(?, video_url),
-       video_generated = COALESCE(?, video_generated),
-       description = COALESCE(?, description),
-       duration = COALESCE(?, duration),
-       shot_type = COALESCE(?, shot_type),
-       start_time = COALESCE(?, start_time),
-       end_time = COALESCE(?, end_time),
-       action_note = COALESCE(?, action_note),
-       sound_effects = COALESCE(?, sound_effects),
-       dialogue = COALESCE(?, dialogue),
-       camera_movement = COALESCE(?, camera_movement),
-       overall_soundscape = COALESCE(NULLIF(?, ''), overall_soundscape),
-       non_diegetic_music = COALESCE(NULLIF(?, ''), non_diegetic_music),
-       integrated_multimodal_description = COALESCE(?, integrated_multimodal_description),
-       blocking_plan = COALESCE(?, blocking_plan),
-       final_frame = COALESCE(?, final_frame),
-       video_prompt_override = COALESCE(?, video_prompt_override),
-       is_combat = COALESCE(?, is_combat),
-       camera_angle = COALESCE(?, camera_angle)
-     WHERE id = ?`,
-    [storyboard_url, frame_url, frame_url2, blocking_url, video_url, video_generated, description, duration,
-      shot_type, start_time, end_time, action_note, sound_effects, dialogue,
-      camera_movement, overall_soundscape, non_diegetic_music,
-      integrated_multimodal_description, blockingPlanValue, finalFrameValue,
-      (typeof video_prompt_override === 'string' && video_prompt_override.trim()) ? video_prompt_override.trim() : null,
-      is_combat !== undefined ? (is_combat ? 1 : 0) : null,
-      (camera_angle !== undefined ? camera_angle : cameraAngle) || null,
-      req.params.shotId]
-  )
+  const infoPointsValue = (() => {
+    const v = info_points ?? infoPoints
+    if (Array.isArray(v)) return v.length ? JSON.stringify(v) : null
+    if (typeof v === 'string' && v.trim()) return v
+    return null
+  })()
+  const narrativeValues = [
+    purpose ?? null,
+    goal ?? null,
+    emotion_tone ?? emotionTone ?? null,
+    infoPointsValue,
+    world_state_out ?? worldStateOut ?? null,
+  ]
+  withShotVersionSnapshot(req.params.shotId, req.params.id, 'manual_edit', 'manual', () => {
+    execute(
+      `UPDATE shots SET
+         storyboard_url = COALESCE(?, storyboard_url),
+         frame_url = COALESCE(?, frame_url),
+         frame_url2 = COALESCE(?, frame_url2),
+         blocking_url = COALESCE(?, blocking_url),
+         video_url = COALESCE(?, video_url),
+         video_generated = COALESCE(?, video_generated),
+         description = COALESCE(?, description),
+         duration = COALESCE(?, duration),
+         shot_type = COALESCE(?, shot_type),
+         start_time = COALESCE(?, start_time),
+         end_time = COALESCE(?, end_time),
+         action_note = COALESCE(?, action_note),
+         sound_effects = COALESCE(?, sound_effects),
+         dialogue = COALESCE(?, dialogue),
+         camera_movement = COALESCE(?, camera_movement),
+         overall_soundscape = COALESCE(NULLIF(?, ''), overall_soundscape),
+         non_diegetic_music = COALESCE(NULLIF(?, ''), non_diegetic_music),
+         integrated_multimodal_description = COALESCE(?, integrated_multimodal_description),
+         blocking_plan = COALESCE(?, blocking_plan),
+         final_frame = COALESCE(?, final_frame),
+         video_prompt_override = COALESCE(?, video_prompt_override),
+         is_combat = COALESCE(?, is_combat),
+         locked = COALESCE(?, locked),
+         camera_angle = COALESCE(?, camera_angle),
+         purpose = COALESCE(?, purpose),
+         goal = COALESCE(?, goal),
+         emotion_tone = COALESCE(?, emotion_tone),
+         info_points = COALESCE(?, info_points),
+         world_state_out = COALESCE(?, world_state_out)
+       WHERE id = ?`,
+      [storyboard_url, frame_url, frame_url2, blocking_url, video_url, video_generated, description, duration,
+        shot_type, start_time, end_time, action_note, sound_effects, dialogue,
+        camera_movement, overall_soundscape, non_diegetic_music,
+        integrated_multimodal_description, blockingPlanValue, finalFrameValue,
+        (typeof video_prompt_override === 'string' && video_prompt_override.trim()) ? video_prompt_override.trim() : null,
+        is_combat !== undefined ? (is_combat ? 1 : 0) : null,
+        locked !== undefined ? (locked ? 1 : 0) : null,
+        (camera_angle !== undefined ? camera_angle : cameraAngle) || null,
+        ...narrativeValues,
+        req.params.shotId]
+    )
+  })
+  // 时轴顺延（#4）：duration/start_time/end_time 任一被编辑时，重算本镜 end_time 并平移后续镜
+  const timelineTouched = duration !== undefined || start_time !== undefined || end_time !== undefined
+  if (timelineTouched && existingShot) {
+    const shiftedCount = shiftFollowingShots(req.params.id, req.params.shotId, existingShot.end_time)
+    if (shiftedCount) console.log(`[PUT shot] 时轴顺延：后续 ${shiftedCount} 镜已平移`)
+  }
+  refreshWorldStateIn(req.params.id)
+  persistQcToShots(req.params.id)
   const shot = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
   res.json(shot)
+})
+
+// ---- 单镜重生成 + 版本链（#2）----
+
+// 时间轴相邻镜（跨场口径，与 refreshWorldStateIn 一致）：prev 供 Airlock 继承，next 供出画状态约束
+function getTimelineNeighbors(episodeId, shotRow) {
+  const prev = queryOne(
+    `SELECT s.shot_number, s.final_frame, s.world_state_out FROM shots s
+       JOIN storyboard_scenes ss ON ss.id = s.storyboard_scene_id
+      WHERE ss.episode_id = ?
+        AND (s.start_time < ? OR (s.start_time = ? AND s.id < ?))
+      ORDER BY s.start_time DESC, s.id DESC LIMIT 1`,
+    [episodeId, shotRow.start_time, shotRow.start_time, shotRow.id]
+  )
+  const next = queryOne(
+    `SELECT s.shot_number, s.world_state_in FROM shots s
+       JOIN storyboard_scenes ss ON ss.id = s.storyboard_scene_id
+      WHERE ss.episode_id = ?
+        AND (s.start_time > ? OR (s.start_time = ? AND s.id > ?))
+      ORDER BY s.start_time ASC, s.id ASC LIMIT 1`,
+    [episodeId, shotRow.start_time, shotRow.start_time, shotRow.id]
+  )
+  return { prev: prev || null, next: next || null }
+}
+
+// 供 AI 使用的资产清单（名字 + 描述 + 参考图标记，喂给 buildAssetListPrompt）
+function getEpisodeAssetsForAi(episodeId) {
+  const characters = query(
+    'SELECT name, name_en, description, description_en, image_url FROM characters WHERE episode_id = ?',
+    [episodeId]
+  )
+  const scenes = query(
+    'SELECT title, title_en, summary, summary_en, image_url, prop_names, lighting_en FROM scenes WHERE episode_id = ?',
+    [episodeId]
+  ).map((s) => {
+    let propNames = []
+    try { propNames = JSON.parse(s.prop_names || '[]') } catch { propNames = [] }
+    return { ...s, description: s.summary, props: propNames }
+  })
+  const props = query(
+    'SELECT name, name_en, description, description_en, image_url, owner FROM props WHERE episode_id = ?',
+    [episodeId]
+  )
+  return { characters, scenes, props }
+}
+
+function parseJsonArraySafe(raw, fallback = []) {
+  try {
+    const v = JSON.parse(raw || '[]')
+    return Array.isArray(v) ? v : fallback
+  } catch { return fallback }
+}
+
+// 单镜重生成：锁定镜拒绝；重写内容字段 + 清空衍生产出物（旧图/旧视频与新内容不符，回退版本可找回）
+router.post('/:id/shots/:shotId/regenerate', async (req, res) => {
+  const { instruction = '' } = req.body || {}
+  const ownedShot = queryOne(
+    `SELECT s.id FROM shots s
+       JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
+      WHERE s.id = ? AND ss.episode_id = ?`,
+    [req.params.shotId, req.params.id]
+  )
+  if (!ownedShot) {
+    return res.status(404).json({ error: '镜头不存在或不属于该集' })
+  }
+  const row = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
+  if (!row) return res.status(404).json({ error: '镜头不存在' })
+  if (row.locked) {
+    return res.status(409).json({ error: '镜头已锁定，锁定镜头不会被重生成覆盖，请先解锁' })
+  }
+
+  const episode = queryOne('SELECT * FROM episodes WHERE id = ?', [req.params.id])
+  if (!episode) return res.status(404).json({ error: '集不存在' })
+  const project = queryOne('SELECT p.art_style, sp.category_key AS style_category FROM projects p LEFT JOIN style_presets sp ON sp.label = p.art_style WHERE p.id = ?', [episode.project_id])
+  const scene = queryOne('SELECT title FROM storyboard_scenes WHERE id = ?', [row.storyboard_scene_id])
+  const { prev, next } = getTimelineNeighbors(req.params.id, row)
+  const related = row.related_shot_id
+    ? queryOne('SELECT shot_number, description, world_state_out FROM shots WHERE id = ?', [row.related_shot_id])
+    : null
+  const assets = getEpisodeAssetsForAi(req.params.id)
+
+  const ctx = {
+    current: {
+      shotNumber: row.shot_number,
+      duration: row.duration,
+      startTime: row.start_time,
+      shotType: row.shot_type,
+      cameraMovement: row.camera_movement,
+      cameraAngle: row.camera_angle,
+      description: row.description,
+      actionNote: row.action_note,
+      characters: parseJsonArraySafe(row.characters),
+      sceneAssets: parseJsonArraySafe(row.scene_assets),
+      propAssets: parseJsonArraySafe(row.prop_assets),
+      dialogue: parseDialogue(row.dialogue),
+      purpose: row.purpose,
+      goal: row.goal,
+      emotionTone: row.emotion_tone,
+      infoPoints: parseJsonArraySafe(row.info_points),
+      worldStateOut: row.world_state_out,
+    },
+    prev,
+    next,
+    related: related || null,
+    sceneTitle: scene?.title || '',
+    scriptSpan: row.script_span || '',
+    instruction: String(instruction || '').trim(),
+  }
+
+  let regen
+  try {
+    regen = await regenerateShot(ctx, assets, project?.art_style || config.defaultArtStyle, {
+      directorNotes: episode.director_notes || '',
+      styleCategory: project?.style_category || '',
+    })
+  } catch (e) {
+    console.error('[单镜重生成] 失败', e)
+    return res.status(502).json({ error: e.message || '单镜重生成失败' })
+  }
+
+  const shot = regen.shot
+  // 对白时间从镜内相对秒换算为全片绝对秒（与整场生成的存储口径一致）
+  const baseStart = Number(row.start_time) || 0
+  const dialogueList = Array.isArray(shot.dialogue)
+    ? shot.dialogue.map((d) => ({
+        ...d,
+        startTime: Math.round(((Number(d.startTime) || 0) + baseStart) * 1000) / 1000,
+        endTime: Math.round(((Number(d.endTime) || 0) + baseStart) * 1000) / 1000,
+      }))
+    : null
+
+  withShotVersionSnapshot(req.params.shotId, req.params.id, 'regenerate', 'ai', () => {
+    execute(
+      `UPDATE shots SET
+         description = ?, shot_type = ?, camera_movement = ?, camera_angle = COALESCE(?, camera_angle),
+         action_note = ?, sound_effects = ?,
+         overall_soundscape = COALESCE(NULLIF(?, ''), overall_soundscape),
+         non_diegetic_music = COALESCE(NULLIF(?, ''), non_diegetic_music),
+         integrated_multimodal_description = ?, final_frame = ?,
+         is_combat = COALESCE(?, is_combat),
+         purpose = COALESCE(?, purpose), goal = COALESCE(?, goal),
+         emotion_tone = COALESCE(?, emotion_tone), info_points = COALESCE(?, info_points),
+         world_state_out = COALESCE(?, world_state_out),
+         dialogue = ?, characters = ?, scene_assets = ?, prop_assets = ?,
+         frame_url = '', frame_url2 = '', continuity_url = '', keyframe_url = '',
+         blocking_url = '', blocking_plan = NULL, video_url = '', video_generated = 0, video_prompt_override = ''
+       WHERE id = ?`,
+      [
+        shot.description || '', shot.shotType || '', shot.cameraMovement || '',
+        shot.camera_angle || null,
+        shot.actionNote || '', shot.soundEffects || '',
+        shot.overallSoundscape || '', shot.nonDiegeticMusic || '',
+        shot.integratedMultimodalDescription || '', shot.finalFrame || '',
+        typeof shot.isCombat === 'boolean' ? (shot.isCombat ? 1 : 0) : null,
+        shot.purpose || null, shot.goal || null,
+        shot.emotionTone || null,
+        shot.infoPoints?.length ? JSON.stringify(shot.infoPoints) : null,
+        shot.worldStateOut || null,
+        dialogueList?.length ? serializeDialogue(dialogueList) : null,
+        JSON.stringify(shot.characters || []), JSON.stringify(shot.sceneAssets || []), JSON.stringify(shot.propAssets || []),
+        req.params.shotId,
+      ]
+    )
+  })
+  refreshWorldStateIn(req.params.id)
+  persistQcToShots(req.params.id)
+  const updated = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
+  res.json({ success: true, shot: updated })
+})
+
+// 版本列表：当前版（shots 行）+ 历史快照（shot_versions 倒序）
+router.get('/:id/shots/:shotId/versions', (req, res) => {
+  const ownedShot = queryOne(
+    `SELECT s.id FROM shots s
+       JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
+      WHERE s.id = ? AND ss.episode_id = ?`,
+    [req.params.shotId, req.params.id]
+  )
+  if (!ownedShot) {
+    return res.status(404).json({ error: '镜头不存在或不属于该集' })
+  }
+  const current = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
+  if (!current) return res.status(404).json({ error: '镜头不存在' })
+  const versions = query(
+    'SELECT id, version, edited_by, reason, snapshot, created_at FROM shot_versions WHERE shot_id = ? ORDER BY version DESC, id DESC',
+    [req.params.shotId]
+  ).map((v) => {
+    let snapshot = null
+    try { snapshot = JSON.parse(v.snapshot || '{}') } catch { snapshot = {} }
+    return {
+      id: v.id,
+      version: v.version,
+      editedBy: v.edited_by,
+      reason: v.reason,
+      createdAt: v.created_at,
+      snapshot,
+    }
+  })
+  res.json({
+    current: {
+      version: current.version || 1,
+      editedBy: current.edited_by || '',
+      shot: current,
+    },
+    versions,
+  })
+})
+
+// 版本内容字段清单：回退时恢复"内容 + 衍生产出物"，不恢复时轴位置/锁定/结构字段
+const SHOT_RESTORE_CONTENT_COLS = [
+  'description', 'shot_type', 'camera_movement', 'camera_angle', 'action_note', 'sound_effects',
+  'overall_soundscape', 'non_diegetic_music', 'integrated_multimodal_description', 'final_frame',
+  'is_combat', 'purpose', 'goal', 'emotion_tone', 'info_points', 'world_state_out',
+  'dialogue', 'characters', 'scene_assets', 'prop_assets',
+  'frame_url', 'frame_url2', 'continuity_url', 'keyframe_url', 'blocking_url', 'blocking_plan',
+  'video_url', 'video_generated', 'video_prompt_override',
+]
+
+// 回退到指定版本快照：先快照当前值（回退本身可撤销），再用快照覆盖内容与产出物
+router.post('/:id/shots/:shotId/versions/:versionId/restore', (req, res) => {
+  const ownedShot = queryOne(
+    `SELECT s.id FROM shots s
+       JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
+      WHERE s.id = ? AND ss.episode_id = ?`,
+    [req.params.shotId, req.params.id]
+  )
+  if (!ownedShot) {
+    return res.status(404).json({ error: '镜头不存在或不属于该集' })
+  }
+  const current = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
+  if (!current) return res.status(404).json({ error: '镜头不存在' })
+  if (current.locked) {
+    return res.status(409).json({ error: '镜头已锁定，锁定镜头不回退版本，请先解锁' })
+  }
+  const versionRow = queryOne(
+    'SELECT * FROM shot_versions WHERE id = ? AND shot_id = ?',
+    [req.params.versionId, req.params.shotId]
+  )
+  if (!versionRow) return res.status(404).json({ error: '版本不存在' })
+  let snapshot
+  try { snapshot = JSON.parse(versionRow.snapshot || '{}') } catch { snapshot = null }
+  if (!snapshot || !Object.keys(snapshot).length) {
+    return res.status(422).json({ error: '版本快照数据损坏，无法回退' })
+  }
+
+  withShotVersionSnapshot(req.params.shotId, req.params.id, 'version_restore', 'manual', () => {
+    const sets = SHOT_RESTORE_CONTENT_COLS.map((c) => `${c} = ?`).join(', ')
+    const values = SHOT_RESTORE_CONTENT_COLS.map((c) => snapshot[c] ?? null)
+    // duration 属于内容属性：恢复并同步本镜 end_time（后续镜时轴由顺延逻辑/质检处理）
+    const restoredDuration = Number.isFinite(Number(snapshot.duration)) ? Number(snapshot.duration) : null
+    const setClause = restoredDuration != null
+      ? `${sets}, duration = ?, end_time = ? + start_time`
+      : sets
+    const tail = restoredDuration != null ? [restoredDuration, restoredDuration] : []
+    execute(
+      `UPDATE shots SET ${setClause} WHERE id = ?`,
+      [...values, ...tail, req.params.shotId]
+    )
+  })
+  refreshWorldStateIn(req.params.id)
+  persistQcToShots(req.params.id)
+  const updated = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
+  res.json({ success: true, shot: updated })
 })
 
 
@@ -981,40 +1369,6 @@ function moveUploadsToTrash(urls, trashDir) {
   return moved
 }
 
-function recycleSliceDir(relDir, trashDir) {
-  const root = path.resolve(uploadsDir)
-  const absDir = path.resolve(root, relDir)
-  if (absDir === root || !absDir.startsWith(root + path.sep)) return 0
-  if (!fs.existsSync(absDir)) return 0
-  let files = []
-  try { files = fs.readdirSync(absDir) } catch { return 0 }
-  const urls = files
-    .map((f) => `/uploads/${relDir.replace(/\\/g, '/')}/${f}`)
-    .filter((u) => fs.existsSync(path.resolve(root, decodeURIComponent(u).replace(/^\/uploads\//, ''))))
-  const movable = filterUnreferencedUploadUrls(urls)
-  let moved = 0
-  for (const u of movable) {
-    try {
-      const rel = decodeURIComponent(String(u).split(/[?#]/)[0]).replace(/^\/uploads\//, '')
-      const abs = path.resolve(root, rel)
-      if (abs === root || !abs.startsWith(root + path.sep)) continue
-      if (!fs.existsSync(abs)) continue
-      const dest = path.join(trashDir, rel)
-      fs.mkdirSync(path.dirname(dest), { recursive: true })
-      try {
-        fs.renameSync(abs, dest)
-      } catch {
-        fs.copyFileSync(abs, dest)
-        fs.unlinkSync(abs)
-      }
-      moved++
-    } catch {  }
-  }
-  try {
-    if (fs.existsSync(absDir) && fs.readdirSync(absDir).length === 0) fs.rmdirSync(absDir)
-  } catch {  }
-  return moved
-}
 
 function deleteShotVideos(episodeId, rawShotIds) {
   const skipped = []
@@ -1030,55 +1384,24 @@ function deleteShotVideos(episodeId, rawShotIds) {
   )
   const shotById = new Map(epShots.map((s) => [Number(s.id), s]))
 
-  const segments = query('SELECT * FROM video_segments WHERE episode_id = ?', [episodeId])
-  const segmentByShot = new Map()
-  for (const seg of segments) {
-    if (!seg.video_url) continue
-    let ids = []
-    try { ids = JSON.parse(seg.shot_ids || '[]') } catch { ids = [] }
-    for (const sid of ids) segmentByShot.set(Number(sid), seg)
-  }
-
-  const segmentIdsToClear = new Map() 
-  const shotIdsToClear = new Set()    
+  const shotIdsToClear = new Set()
   for (const sid of requested) {
     const shot = shotById.get(sid)
     if (!shot) { skipped.push({ shotId: sid, reason: '镜头不存在' }); continue }
-    const seg = segmentByShot.get(sid)
-    if (seg) {
-      segmentIdsToClear.set(Number(seg.id), seg)
-      let ids = []
-      try { ids = JSON.parse(seg.shot_ids || '[]') } catch { ids = [] }
-      for (const s2 of ids) if (shotById.has(Number(s2))) shotIdsToClear.add(Number(s2))
-    } else if (shot.video_url) {
-      shotIdsToClear.add(sid)
-    } else {
-      skipped.push({ shotId: sid, reason: '该镜头没有成片' })
-    }
+    if (shot.video_url) shotIdsToClear.add(sid)
+    else skipped.push({ shotId: sid, reason: '该镜头没有成片' })
   }
-
   const fileCandidates = []
   for (const sid of shotIdsToClear) {
     const u = shotById.get(sid)?.video_url
     if (u) fileCandidates.push(u)
   }
-  for (const seg of segmentIdsToClear.values()) {
-    if (seg.video_url) fileCandidates.push(seg.video_url)
-  }
-  const segmentSliceDirs = []
-  for (const seg of segmentIdsToClear.values()) {
-    segmentSliceDirs.push(path.join('segments', `seg${seg.id}`))
-  }
-
   transaction(() => {
     for (const sid of shotIdsToClear) {
       execute(
         "UPDATE shots SET video_url = '', video_generated = 0, shot_review = NULL, seam_check = '', retry_feedback = '' WHERE id = ?",
         [sid]
       )
-    }
-    for (const seg of segmentIdsToClear.values()) {
-      execute("UPDATE video_segments SET video_url = '', status = 'pending', error = '' WHERE id = ?", [seg.id])
     }
     for (const sid of shotIdsToClear) {
       try { execute('DELETE FROM salvage_queue WHERE shot_id = ?', [sid]) } catch {  }
@@ -1090,25 +1413,10 @@ function deleteShotVideos(episodeId, rawShotIds) {
 
   const trashDir = path.join(serverDir, '..', '_video_trash', String(Date.now()))
   const movedFiles = moveUploadsToTrash(filterUnreferencedUploadUrls(fileCandidates), trashDir)
-  let removedSliceDirs = 0
-  for (const relDir of segmentSliceDirs) {
-    removedSliceDirs += recycleSliceDir(relDir, trashDir)
-  }
-
   const shotsOut = [...shotIdsToClear]
     .sort((a, b) => a - b)
     .map((sid) => ({ id: sid, shotNumber: shotById.get(sid)?.shot_number || '' }))
-  const segmentsOut = [...segmentIdsToClear.values()]
-    .sort((a, b) => Number(a.id) - Number(b.id))
-    .map((seg) => ({
-      id: seg.id,
-      sceneNumber: seg.scene_number,
-      segmentIndex: seg.segment_index,
-      shotNumbers: seg.shot_numbers || '',
-      shotIds: (() => { try { return JSON.parse(seg.shot_ids || '[]') } catch { return [] } })(),
-    }))
-
-  return { ok: true, episodeId: Number(episodeId), shots: shotsOut, segments: segmentsOut, movedFiles, removedSliceDirs, alertsCleared, skipped }
+  return { ok: true, episodeId: Number(episodeId), shots: shotsOut, movedFiles, alertsCleared, skipped }
 }
 
 router.delete('/:episodeId/shots/:shotId/video', (req, res) => {

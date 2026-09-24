@@ -92,22 +92,24 @@ const hasExtractedAssets = computed(
 const extractState = computed(() => {
   if (!hasExtractedAssets.value) return 'none'
   const fp = store.lastExtractInfo
-  if (!fp) return 'done' 
+  if (!fp) return 'done'
   const scriptChanged = fp.script !== (store.scriptContent || '')
-  return scriptChanged ? 'script-changed' : 'fresh'
+  const styleChanged = Boolean(
+    store.currentStyle?.label && fp.styleLabel && fp.styleLabel !== store.currentStyle.label
+  )
+  if (scriptChanged && styleChanged) return 'both-changed'
+  if (scriptChanged) return 'script-changed'
+  if (styleChanged) return 'style-changed'
+  return 'fresh'
 })
 
-const extractStateHint = computed(() =>
-  extractState.value === 'script-changed'
-    ? '剧本已更新（新增或修改了场次），建议重新提取资产以覆盖新内容'
-    : '剧本未改动，无需重复提取，可直接前往设定页查看'
-)
-
-const styleSwitchHint = computed(() => {
-  const fp = store.lastExtractInfo
-  const cur = store.currentStyle?.label || ''
-  if (!fp || !cur || fp.styleLabel === cur) return ''
-  return `画风已更换为「${cur}」，新画风将在后续生成图片时自动应用；已生成的图片仍为原画风，可在设定页重新生成`
+const extractStateHint = computed(() => {
+  const state = extractState.value
+  if (state === 'both-changed') return '剧本和画风都改过了，建议重新提取资产，让资产跟上最新的内容与画风'
+  if (state === 'style-changed')
+    return `画风已换为「${store.currentStyle?.label || ''}」，当前资产与已生成的图还是旧画风「${store.lastExtractInfo?.styleLabel || ''}」的，建议重新提取`
+  if (state === 'script-changed') return '剧本已更新（新增或修改了场次），建议重新提取资产以覆盖新内容'
+  return '剧本与画风均未改动，无需重复提取，可直接前往设定页查看'
 })
 
 const needsExtract = computed(() =>
@@ -406,9 +408,6 @@ async function confirmDelete() {
             </div>
             <div class="mt-1 text-[10px] leading-relaxed" :class="extractState === 'fresh' || extractState === 'done' ? 'text-text-muted' : 'text-amber-400/80'">
               {{ extractStateHint }}
-            </div>
-            <div v-if="styleSwitchHint" class="mt-1 text-[10px] leading-relaxed text-text-muted">
-              {{ styleSwitchHint }}
             </div>
           </div>
 

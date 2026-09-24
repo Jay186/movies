@@ -19,7 +19,7 @@ export function listIpCharacters() {
   }))
 }
 
-export function getIpSyncStatus(ipId) {
+function getIpSyncStatus(ipId) {
   const ip = getIpCharacter(ipId)
   if (!ip) return null
   const projects = query('SELECT id, title FROM projects ORDER BY id').map((p) => {

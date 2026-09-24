@@ -11,9 +11,9 @@ export const VIDEO_ENGINES = [
   },
   {
     value: 'h3v4',
-    label: '全能V4工作流',
-    short: '全能V4',
-    desc: 'MiniMax H3 全能生视频 V4 · 9参考图+3音色+Ref2VA+一采二采放大 · 5~15s',
+    label: '全能V5工作流',
+    short: '全能V5',
+    desc: 'MiniMax H3 全能生视频 V5 视频参考版 · 9参考图+3音色+Ref2VA视频续写+一采二采放大 · 5~15s',
     coinLow: 50,
     coinHigh: 110,
     workflowKey: null,
@@ -22,8 +22,4 @@ export const VIDEO_ENGINES = [
 
 export function getVideoEngine(value) {
   return VIDEO_ENGINES.find((e) => e.value === value) || VIDEO_ENGINES.find((e) => e.value === 'h3v4') || VIDEO_ENGINES[0]
-}
-
-export function getWorkflowKey(value) {
-  return getVideoEngine(value).workflowKey || ''
 }

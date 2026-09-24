@@ -154,8 +154,6 @@ export const FIELD_DEFS = [
   },
 ]
 
-export const FIELD_LABELS = Object.fromEntries(FIELD_DEFS.map((d) => [d.key, d.label]))
-
 const SHOT_FIELD_OF = {
   camera: 'cameraMovement',
   integrated: 'integratedMultimodalDescription',
@@ -208,7 +206,6 @@ const CAMERA_ANGLE_WORDS = [
   '正面', '侧面', '背面', '过肩', '俯拍', '仰拍', '正拍', '背拍', '平视', '45度', '三分四',
   'front', 'side', 'back', 'over the shoulder', 'over-the-shoulder', 'high angle', 'low angle', 'three-quarter',
 ]
-
 
 const isStr = (v) => typeof v === 'string'
 const ratio = (arr, fn) => {
@@ -268,7 +265,6 @@ export function matchSemanticKey(rawKey) {
   return best
 }
 
-
 const DECOR_CHARS = '\\s\\-=_─━═╌╍┈┉┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬╭╮╰╯·'
 const isDecorLine = (line) => new RegExp(`^[${DECOR_CHARS}]*$`).test(String(line || ''))
 
@@ -284,25 +280,11 @@ export async function decodeFileBuffer(buf) {
   }
 }
 
-export function detectFormat(text) {
-  const src = String(text || '').trim()
-  if (!src) return 'empty'
-  const unwrapped = src.replace(/^```(?:json|jsonc)?\s*/i, '').replace(/```\s*$/, '')
-  if (unwrapped.startsWith('{') || unwrapped.startsWith('[')) {
-    try {
-      JSON.parse(unwrapped)
-      return 'json'
-    } catch {
-    }
-  }
-  return 'text'
-}
-
-
 function detectDelimiter(lines) {
   const sample = lines.slice(0, 30).filter((l) => l.trim())
   if (sample.length < 2) return null
-  const candidates = ['|', '\t', '；', ';', ',', '，']
+  // 注：不把全角逗号「，」当分隔符——它是中文自然语句标点，误判会让自由文本被当成表格
+  const candidates = ['|', '\t', '；', ';', ',']
   let best = null
   for (const d of candidates) {
     const counts = sample.map((l) => splitDelimited(l, d).length)
@@ -409,7 +391,7 @@ function findSectionTitle(lines, tableStart) {
   return ''
 }
 
-export function extractRows(text) {
+function extractRows(text) {
   const box = extractBoxTables(text)
   if (box) return box
 
@@ -449,7 +431,7 @@ function looksLikeHeader(row, dataRows) {
   return false
 }
 
-export function inferMapping(rows, { hasHeader }) {
+function inferMapping(rows, { hasHeader }) {
   const header = hasHeader ? rows[0].map((c) => String(c || '').trim()) : []
   const body = hasHeader ? rows.slice(1) : rows
   const colCount = Math.max(...rows.map((r) => r.length))
@@ -528,7 +510,7 @@ function absorbInlineFields(shot, text) {
   }
 }
 
-export function buildShotsFromRows(rows, mapping, { hasHeader, knownAssets, sections } = {}) {
+function buildShotsFromRows(rows, mapping, { hasHeader, knownAssets, sections } = {}) {
   const body = hasHeader ? rows.slice(1) : rows
   const sectionAt = new Map((sections || []).map((s) => [s.index, s.title]))
   const canMergeWrapped = ['shotNo', 'duration', 'timecode'].some((k) => mapping[k] !== undefined)
@@ -616,7 +598,6 @@ export function buildShotsFromRows(rows, mapping, { hasHeader, knownAssets, sect
   return groupIntoScenes(shots, knownAssets)
 }
 
-
 function collectObjectArrays(node, path, out, depth = 0) {
   if (depth > 8 || node == null) return
   if (Array.isArray(node)) {
@@ -688,7 +669,7 @@ function repairJson(src) {
   return out
 }
 
-export function parseJson(text, knownAssets) {
+function parseJson(text, knownAssets) {
   const unwrapped = String(text).trim().replace(/^```(?:json|jsonc)?\s*/i, '').replace(/```\s*$/, '')
   let data
   try {
@@ -768,7 +749,6 @@ function objectToShot(obj) {
   return shot
 }
 
-
 const CN_NUM = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
 function cn2num(s) {
   if (!s) return NaN
@@ -790,7 +770,7 @@ const SHOT_STRONG_RE = /^\s*(?:#{1,6}\s*)?[-*•·]?\s*[【\[（(]?\s*(?:镜头|
 const C_NUM_RE = /^\s*[【\[（(]?\s*([A-Za-z]{1,3})[\s\-_]?(\d{1,4})\s*[】\]）)]?\s*[：:.\-–—]?\s+(.{6,})$/
 const NUM_RE = /^\s*(?:#{1,6}\s*)?[-*•·]?\s*[【\[（(]?\s*(\d{1,3})\s*[、.。)）\]】]\s*(.+)$/
 
-export function parseFreeText(text, knownAssets) {
+function parseFreeText(text, knownAssets) {
   const lines = String(text || '').split(/\r?\n/)
   const scenes = []
   let current = null
@@ -974,7 +954,6 @@ function isSectionLabel(line) {
   return false
 }
 
-
 function emptyShot() {
   return {
     shotType: '',
@@ -1044,6 +1023,7 @@ function postProcess(scenes, knownAssets) {
         if (charNames.includes(t)) push(shot.characters, t)
         else if (propNames.includes(t)) push(shot.propAssets, t)
         else if (sceneNames.includes(t)) push(shot.sceneAssets, t)
+        else unknown.props.add(t) // 未登记的 @mention 无法判型，兜底归入道具桶，至少不静默丢失
       }
 
       const prose = `${shot.description} ${shot.actionNote}`
@@ -1118,7 +1098,6 @@ function splitDialogueFromSound(shot, charNames) {
     return
   }
 }
-
 
 const round1 = (n) => Math.round(n * 10) / 10
 
@@ -1358,16 +1337,19 @@ export function parseDuration(raw) {
   if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0
   const val = String(raw).trim()
   if (!val) return 0
-  const tc = val.match(/(\d+)\s*[:：]\s*(\d+)(?:\s*[:：]\s*(\d+))?\s*[-–—~至]\s*(\d+)\s*[:：]\s*(\d+)/)
+  // 时间码区间：左右端各自独立判断段数（两段=mm:ss，三段=hh:mm:ss），避免量纲错配
+  const tc = val.match(/(\d+)\s*[:：]\s*(\d+)(?:\s*[:：]\s*(\d+))?\s*[-–—~至]\s*(\d+)\s*[:：]\s*(\d+)(?:\s*[:：]\s*(\d+))?/)
   if (tc) {
-    const s1 = Number(tc[1]) * 3600 + Number(tc[2]) * 60 + Number(tc[3] || 0)
-    const s2 = Number(tc[1]) * 3600 + Number(tc[4]) * 60 + Number(tc[5])
-    return s2 > s1 ? s2 - s1 : 0
-  }
-  const range = val.match(/(\d+)\s*[:：]\s*(\d+)\s*[-–—~至]\s*(\d+)\s*[:：]\s*(\d+)/)
-  if (range) {
-    const s1 = Number(range[1]) * 60 + Number(range[2])
-    const s2 = Number(range[3]) * 60 + Number(range[4])
+    const leftHasHour = tc[3] != null
+    const rightHasHour = tc[6] != null
+    const s1 = leftHasHour
+      ? Number(tc[1]) * 3600 + Number(tc[2]) * 60 + Number(tc[3])
+      : Number(tc[1]) * 60 + Number(tc[2])
+    const s2 = rightHasHour
+      ? Number(tc[4]) * 3600 + Number(tc[5]) * 60 + Number(tc[6])
+      : leftHasHour
+        ? Number(tc[1]) * 3600 + Number(tc[4]) * 60 + Number(tc[5])
+        : Number(tc[4]) * 60 + Number(tc[5])
     return s2 > s1 ? s2 - s1 : 0
   }
   const secRange = val.match(/(\d+(?:\.\d+)?)\s*[-–—~至]\s*(\d+(?:\.\d+)?)\s*[秒s]?/)
@@ -1381,7 +1363,6 @@ export function parseDuration(raw) {
   const n = Number(val.replace(/[^\d.]/g, ''))
   return Number.isFinite(n) ? n : 0
 }
-
 
 export function parseStoryboard(text, options = {}) {
   const knownAssets = options.knownAssets || {}

@@ -1,7 +1,7 @@
 
 import fs from 'fs'
 import path from 'path'
-import { query, execute, transaction } from '../db.js'
+import { query } from '../db.js'
 import { recordAlert } from './alerts.js'
 import { serverDir } from '../paths.js'
 
@@ -24,7 +24,6 @@ const TABLE_META = {
     protected: ['summary', 'prop_names', 'image_url', 'title_en', 'summary_en', 'lighting_en', 'location'],
   },
 }
-
 
 function pad2(n) {
   return String(n).padStart(2, '0')
@@ -52,8 +51,6 @@ function normField(field, v) {
   }
   return s
 }
-
-
 
 export function snapshotBeforeExtract({ episodeId, trigger = 'extract', tables = [] } = {}) {
   try {
@@ -99,7 +96,7 @@ export function snapshotBeforeExtract({ episodeId, trigger = 'extract', tables =
   }
 }
 
-export function listSnapshots(episodeId = null) {
+function listSnapshots(episodeId = null) {
   try {
     if (!fs.existsSync(SNAPSHOT_DIR)) return []
     const files = fs.readdirSync(SNAPSHOT_DIR)
@@ -122,7 +119,7 @@ export function listSnapshots(episodeId = null) {
   }
 }
 
-export function pruneSnapshots(keep = SNAPSHOT_KEEP) {
+function pruneSnapshots(keep = SNAPSHOT_KEEP) {
   try {
     const all = listSnapshots(null)
     for (const item of all.slice(Math.max(0, keep))) {
@@ -130,36 +127,6 @@ export function pruneSnapshots(keep = SNAPSHOT_KEEP) {
     }
   } catch {  }
 }
-
-export function restoreSnapshot(file) {
-  const abs = path.isAbsolute(file) ? file : path.join(SNAPSHOT_DIR, file)
-  const payload = JSON.parse(fs.readFileSync(abs, 'utf8'))
-  const episodeId = Number(payload?.meta?.episodeId)
-  const data = payload?.data || {}
-  if (!episodeId) throw new Error('快照缺少 episodeId')
-
-  const result = {}
-  transaction(() => {
-    for (const table of Object.keys(data)) {
-      if (!TABLE_META[table]) continue
-      const rows = Array.isArray(data[table]) ? data[table] : []
-      const cols = query(`PRAGMA table_info(${table})`).map((c) => c.name).filter((c) => c !== 'id')
-      execute(`DELETE FROM ${table} WHERE episode_id = ?`, [episodeId])
-      let inserted = 0
-      for (const row of rows) {
-        const useCols = cols.filter((c) => Object.prototype.hasOwnProperty.call(row, c))
-        if (!useCols.length) continue
-        const sql = `INSERT INTO ${table} (${useCols.join(', ')}) VALUES (${useCols.map(() => '?').join(', ')})`
-        execute(sql, useCols.map((c) => row[c]))
-        inserted++
-      }
-      result[table] = inserted
-    }
-  })
-  return result
-}
-
-
 
 export function computeExtractDiff({ table, oldRows = [], incoming = [] } = {}) {
   const meta = TABLE_META[table]
@@ -204,7 +171,6 @@ export function computeExtractDiff({ table, oldRows = [], incoming = [] } = {}) 
     counts: { overwrites: overwrites.length, deletions: deletions.length },
   }
 }
-
 
 function parsePropNames(v) {
   try {

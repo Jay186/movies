@@ -53,5 +53,5 @@ _archive_bak/
 _video_trash/
 _snapshots/
 
-# [约束 2026-09-19] AI 生成过程文件统一归档（勿入库）
-/generated/
+# [约束 2026-09-19] AI 生成过程文件统一归档（勿入库；任意层级）
+generated/

@@ -1,8 +1,16 @@
 
 import { chatCompletion } from './doubao.js'
 import { CJK_DIRTY_RE, pickInjectableEnglish } from './shared.js'
+import { config } from '../config.js'
 import { recordAlert } from './alerts.js'
 
+// MiniMax H3 官方未给景别枚举表，官方范例只出现过 4 个景别词（已用离线探针核对 base-en/ref-en 原文）：
+//   medium-wide shot (base-en L81/L175) · medium shot (ref-en L330) · close-up (ref-en L331/L332) · extreme close-up (ref-en L239)
+// 故本表以"官方范例原词 + 导演语义"双重对齐，避免整体上移一级：
+//   近景 = 半身/胸上景 → medium close-up（MCU）
+//   特写 = 看脸/细节   → close-up（CU，官方原词；此前误映射为 extreme close-up 导致"情绪点必特写"出片成脸贴满画面的 ECU）
+//   大特写 = 更极端    → extreme close-up（ECU，唯一入口；此前与"特写"撞成同值）
+// 产线（doubao.js L2338 白名单）只产 全景/中景/近景/特写 这 4 个值，其余条目为历史/兜底用，保留不删。
 const SHOT_SIZE_MAP = {
   '大远景': 'extreme long establishing shot',
   '远景': 'long establishing shot',
@@ -11,8 +19,8 @@ const SHOT_SIZE_MAP = {
   '中全景': 'medium-wide shot',
   '中景': 'medium shot',
   '中近景': 'medium close-up',
-  '近景': 'close-up',
-  '特写': 'extreme close-up',
+  '近景': 'medium close-up',
+  '特写': 'close-up',
   '大特写': 'extreme close-up',
 }
 
@@ -21,11 +29,20 @@ export function translateShotSize(cn) {
   return SHOT_SIZE_MAP[key] || `medium shot`
 }
 
+// MiniMax H3 官方 camera-motion 三维语法（base-en.txt §4.3）：
+//   Motion type: Zoom In/Out · Push In/Pull Out · Pan Left/Right · Truck Left/Right ·
+//                Tilt Up/Down · Pedestal Up/Down · Arc Shot · Tracking Shot · Static Shot ·
+//                Shake Slightly/Strongly · POV · Roll Clockwise/Counterclockwise
+//   Amplitude:   仅 with small amplitude / with large amplitude（中等幅度=省略不写）
+//   Speed:       仅 at slow speed / at fast speed（常速=省略不写）
+// 本表只输出官方枚举值；方向是 Pan/Truck/Pedestal 的必选组成部分（Left/Right、Up/Down）。
+// 中文词未指明方向时，取一个官方方向的默认值，绝不臆造 medium amplitude / 自由速度描述。
 const CAMERA_MAP = {
-  '固定': 'holds a static shot with no camera movement throughout',
-  '静止': 'holds a static shot with no camera movement throughout',
-  '静态': 'holds a static shot with no camera movement throughout',
-  '不动': 'holds a static shot with no camera movement throughout',
+  // 官方枚举为 Static Shot；不再追加官方没有的 "with no camera movement throughout" 尾句。
+  '固定': 'holds a static shot',
+  '静止': 'holds a static shot',
+  '静态': 'holds a static shot',
+  '不动': 'holds a static shot',
   '推近': 'pushes in with small amplitude at slow speed',
   '推': 'pushes in with small amplitude at slow speed',
   '推镜头': 'pushes in with small amplitude at slow speed',
@@ -38,52 +55,106 @@ const CAMERA_MAP = {
   '推焦': 'zooms in with small amplitude at slow speed',
   '变焦拉远': 'zooms out with small amplitude at slow speed',
   '拉焦': 'zooms out with small amplitude at slow speed',
-  '横摇': 'pans horizontally with medium amplitude at slow speed',
-  '摇镜头': 'pans horizontally with medium amplitude at slow speed',
-  '左摇': 'pans left with medium amplitude at slow speed',
-  '右摇': 'pans right with medium amplitude at slow speed',
+  '横摇': 'pans left with small amplitude at slow speed',
+  '摇镜头': 'pans left with small amplitude at slow speed',
+  '左摇': 'pans left with small amplitude at slow speed',
+  '右摇': 'pans right with small amplitude at slow speed',
   '摇上': 'tilts up with small amplitude at slow speed',
   '摇下': 'tilts down with small amplitude at slow speed',
   '上摇': 'tilts up with small amplitude at slow speed',
   '下摇': 'tilts down with small amplitude at slow speed',
-  '横移': 'trucks sideways with medium amplitude at slow speed',
-  '平移': 'trucks sideways with medium amplitude at slow speed',
-  '移镜': 'trucks sideways with medium amplitude at slow speed',
-  '左移': 'trucks left with medium amplitude at slow speed',
-  '右移': 'trucks right with medium amplitude at slow speed',
-  '升降': 'pedestals vertically with medium amplitude at slow speed',
-  '升降镜头': 'pedestals vertically with medium amplitude at slow speed',
-  '升高': 'pedestals up with medium amplitude at slow speed',
-  '降低': 'pedestals down with medium amplitude at slow speed',
-  '升镜': 'pedestals up with medium amplitude at slow speed',
-  '降镜': 'pedestals down with medium amplitude at slow speed',
-  '环绕': 'arcs around the subject with medium amplitude at slow speed',
-  '环摇': 'arcs around the subject with medium amplitude at slow speed',
-  '绕拍': 'arcs around the subject with medium amplitude at slow speed',
-  '弧形环绕': 'arcs around the subject with medium amplitude at slow speed',
-  '跟拍': 'tracks the subject with medium amplitude at a speed matching the subject motion',
-  '跟随': 'tracks the subject with medium amplitude at a speed matching the subject motion',
-  '跟镜': 'tracks the subject with medium amplitude at a speed matching the subject motion',
-  '跟移': 'tracks the subject with medium amplitude at a speed matching the subject motion',
-  '推轨': 'pushes in on a dolly with medium amplitude at slow speed',
-  '滑轨': 'slides along a dolly track with medium amplitude at slow speed',
-  '轨道': 'pushes in on a dolly with medium amplitude at slow speed',
-  '手持': 'shakes slightly with natural handheld camera motion',
-  '手持跟拍': 'shakes slightly while tracking the subject with handheld camera motion',
-  '肩扛': 'shakes slightly with shoulder-mounted handheld camera motion',
+  '横移': 'trucks left with small amplitude at slow speed',
+  '平移': 'trucks left with small amplitude at slow speed',
+  '移镜': 'trucks left with small amplitude at slow speed',
+  '左移': 'trucks left with small amplitude at slow speed',
+  '右移': 'trucks right with small amplitude at slow speed',
+  '升降': 'pedestals up with small amplitude at slow speed',
+  '升降镜头': 'pedestals up with small amplitude at slow speed',
+  '升高': 'pedestals up with small amplitude at slow speed',
+  '降低': 'pedestals down with small amplitude at slow speed',
+  '升镜': 'pedestals up with small amplitude at slow speed',
+  '降镜': 'pedestals down with small amplitude at slow speed',
+  '环绕': 'arcs around the subject with small amplitude at slow speed',
+  '环摇': 'arcs around the subject with small amplitude at slow speed',
+  '绕拍': 'arcs around the subject with small amplitude at slow speed',
+  '弧形环绕': 'arcs around the subject with small amplitude at slow speed',
+  '跟拍': 'tracks the subject with small amplitude',
+  '跟随': 'tracks the subject with small amplitude',
+  '跟镜': 'tracks the subject with small amplitude',
+  '跟移': 'tracks the subject with small amplitude',
+  // 官方 §4.3 运动类型枚举无 Dolly 型；中文「推轨/滑轨/轨道」在实拍里就是推/移，
+  // 按官方枚举落到 Push In / Truck，不再自造 "on a dolly" / "along a dolly track"。
+  '推轨': 'pushes in with small amplitude at slow speed',
+  '滑轨': 'trucks right with small amplitude at slow speed',
+  '轨道': 'trucks right with small amplitude at slow speed',
+  // 官方运动类型枚举无 handheld / shoulder-mounted 修饰语；手持感由 Shake Slightly/Strongly 承担。
+  '手持': 'shakes slightly',
+  '手持跟拍': 'shakes slightly while tracking the subject with small amplitude',
+  '肩扛': 'shakes slightly',
   '轻微晃动': 'shakes slightly',
   '剧烈晃动': 'shakes strongly',
   '强烈晃动': 'shakes strongly',
-  'POV': 'holds a POV shot from the subject eyeline',
-  '主观镜头': 'holds a POV shot from the subject eyeline',
-  '第一人称': 'holds a POV shot from the subject eyeline',
-  '旋转': 'rolls clockwise around the lens axis with medium amplitude at slow speed',
-  '旋转镜头': 'rolls clockwise around the lens axis with medium amplitude at slow speed',
-  '滚转': 'rolls clockwise around the lens axis with medium amplitude at slow speed',
-  '俯拍': 'holds a high-angle static shot looking down, with no camera movement',
-  '俯视': 'holds a high-angle static shot looking down, with no camera movement',
-  '仰拍': 'holds a low-angle static shot looking up, with no camera movement',
-  '仰视': 'holds a low-angle static shot looking up, with no camera movement',
+  // 官方枚举为 POV（语义即"主体视点"）；不再追加官方没有的 "from the subject eyeline"。
+  'POV': 'holds a POV shot',
+  '主观': 'holds a POV shot',
+  '主观镜头': 'holds a POV shot',
+  '第一人称': 'holds a POV shot',
+  '旋转': 'rolls clockwise around the lens axis with small amplitude at slow speed',
+  '旋转镜头': 'rolls clockwise around the lens axis with small amplitude at slow speed',
+  '滚转': 'rolls clockwise around the lens axis with small amplitude at slow speed',
+
+  // —— 幅度/速度变体：对齐官方三维语法（只有 small/large × slow/fast 四种组合，无 medium）
+  '急推': 'pushes in with large amplitude at fast speed',
+  '猛推': 'pushes in with large amplitude at fast speed',
+  '快推': 'pushes in with large amplitude at fast speed',
+  '缓推': 'pushes in with small amplitude at slow speed',
+  '大范围推近': 'pushes in with large amplitude at slow speed',
+  '急拉': 'pulls out with large amplitude at fast speed',
+  '快拉': 'pulls out with large amplitude at fast speed',
+  '缓拉': 'pulls out with small amplitude at slow speed',
+  '大范围拉远': 'pulls out with large amplitude at slow speed',
+  // 变焦无方向语义：中文「急/缓变焦」只表达速度快慢，不指定推/拉方向，故此处不做 in/out 单向化
+  '急变焦': 'zooms in with large amplitude at fast speed',
+  '缓变焦': 'zooms in with small amplitude at slow speed',
+  '急摇': 'pans left with large amplitude at fast speed',
+  '快甩': 'pans left with large amplitude at fast speed',
+  '缓摇': 'pans left with small amplitude at slow speed',
+  '快摇左': 'pans left with large amplitude at fast speed',
+  '快摇右': 'pans right with large amplitude at fast speed',
+  '缓摇左': 'pans left with small amplitude at slow speed',
+  '缓摇右': 'pans right with small amplitude at slow speed',
+  '大范围摇': 'pans left with large amplitude at slow speed',
+  '急移左': 'trucks left with large amplitude at fast speed',
+  '急移右': 'trucks right with large amplitude at fast speed',
+  '快移左': 'trucks left with large amplitude at fast speed',
+  '快移右': 'trucks right with large amplitude at fast speed',
+  '缓移左': 'trucks left with small amplitude at slow speed',
+  '缓移右': 'trucks right with small amplitude at slow speed',
+  '急摇上': 'tilts up with large amplitude at fast speed',
+  '急摇下': 'tilts down with large amplitude at fast speed',
+  '缓摇上': 'tilts up with small amplitude at slow speed',
+  '缓摇下': 'tilts down with small amplitude at slow speed',
+  '急升': 'pedestals up with large amplitude at fast speed',
+  '急降': 'pedestals down with large amplitude at fast speed',
+  '缓升': 'pedestals up with small amplitude at slow speed',
+  '缓降': 'pedestals down with small amplitude at slow speed',
+  '急环绕': 'arcs around the subject with large amplitude at fast speed',
+  '快环绕': 'arcs around the subject with large amplitude at fast speed',
+  '缓环绕': 'arcs around the subject with small amplitude at slow speed',
+  '急跟': 'tracks the subject with large amplitude at fast speed',
+  '快跟': 'tracks the subject with large amplitude at fast speed',
+  '缓跟': 'tracks the subject with small amplitude at slow speed',
+  '急旋转': 'rolls clockwise around the lens axis with large amplitude at fast speed',
+  '缓旋转': 'rolls clockwise around the lens axis with small amplitude at slow speed',
+  '剧烈手持跟拍': 'shakes strongly while tracking the subject with small amplitude',
+
+  // 俯拍/仰拍 = 机位角度，不是运镜：此处只作为「静置俯角/仰角」的运镜兜底，
+  // 真实机位朝向由 CAMERA_ANGLE_MAP 输出（见 camera_angle 字段），避免一词双籍。
+  // 官方枚举只到 Static Shot；"high-angle/low-angle looking down/up" 属机位措辞，保留描述但去掉冗余尾句。
+  '俯拍': 'holds a static shot from a high angle looking down',
+  '俯视': 'holds a static shot from a high angle looking down',
+  '仰拍': 'holds a static shot from a low angle looking up',
+  '仰视': 'holds a static shot from a low angle looking up',
 }
 
 const CAMERA_ANGLE_MAP = {
@@ -101,11 +172,24 @@ export function translateCameraAngle(cn) {
   return CAMERA_ANGLE_MAP[key] || ''
 }
 
+// 运镜无安全默认值（瞎给"固定"会把动态运镜降级成胡编），故 translateCameraMovement
+// 精确匹配失败时用中文子串兜底：按键长度降序取首个被输入包含的中文键（抓基础动词，
+// 如"缓慢推近"→命中"推近"）。幅度/速度可能降级（取基础键的档），但运镜类型不丢、不静默。
+// 英文/复合运镜值（如"arc right + dolly out"）子串兜底覆盖不了，仍返空串——不瞎翻，
+// 这类值应在生成时归一为单一中文枚举，不是 translator 的职责。
+const CAMERA_SUBSTR_KEYS = Object.keys(CAMERA_MAP)
+  .filter((k) => k && /[\u4e00-\u9fa5]/.test(k))
+  .sort((a, b) => b.length - a.length)
+
 export function translateCameraMovement(cn) {
   const key = String(cn || '').trim()
-  return CAMERA_MAP[key] || ''
+  if (!key) return ''
+  if (CAMERA_MAP[key]) return CAMERA_MAP[key]
+  for (const k of CAMERA_SUBSTR_KEYS) {
+    if (key.includes(k)) return CAMERA_MAP[k]
+  }
+  return ''
 }
-
 
 const TONE_MAP = {
   '压低声音': 'in a hushed tone',
@@ -185,6 +269,10 @@ export function translateTone(cn) {
 
 const translationCache = new Map()
 
+// 站位/末帧翻译规则（数据模型重构 C：worldStateOut 与含中文 finalFrame 接入出片链路）
+const WORLD_STATE_RULES = `8. **站位信息（world_state）翻译**：输入的「站位」是首帧构图硬约束——谁在画面哪个位置、什么姿态、面向哪边、谁驮着谁、谁抱着谁。必须**逐字忠实**翻译，一个位置关系/姿态/朝向都不许省略、合并或改写；输出 30-80 英文词，用 "X is at ... facing ..." 的直陈句式。这是首帧构图的决定性信息，优先级高于一切铺陈。
+9. **末帧（final_frame）翻译**：仅当末帧含中文时才翻译，输出 40-100 英文词的末帧构图描述，忠实保留每个角色的位置/姿态/朝向与环境状态；末帧纯英文时返回空字符串。`
+
 const TRANSLATE_SYSTEM_PROMPT = `你是 AI 视频 prompt 翻译与扩写专家，把中文分镜描述翻译成符合 MiniMax H3 Ref2VA 规范的英文。
 
 【翻译规则】
@@ -192,7 +280,7 @@ const TRANSLATE_SYSTEM_PROMPT = `你是 AI 视频 prompt 翻译与扩写专家�
    **空间关系是硬约束，必须逐字忠实保留、禁止改写或省略**——谁在哪儿、面向哪个方向
    （背对镜头/侧对镜头/面对镜头）、被什么遮挡（躲在某物后/只露出头部）、露了多少、
    谁在看谁、相对远近与高低。这些是镜头的戏剧核心，即使与扩写词数冲突，也**宁少勿改**。
-2. 角色名/场景名直接保留原文（中文名不变，如"一二""布布""大白熊"原样保留）
+2. 角色名/场景名直接保留原文（中文名不变，如"角色甲""角色乙""角色丙"原样保留）
 3. 运镜不要翻译（已在别处处理），只翻译画面与动作
 4. 语气词翻译成英文副词短语（如"压低声音"→"in a hushed tone"）
 5. 不要翻译台词内容（台词单独处理）
@@ -210,7 +298,8 @@ const TRANSLATE_SYSTEM_PROMPT = `你是 AI 视频 prompt 翻译与扩写专家�
 【扩写要求】官方 ref-en.txt §5.2：detailed_description 正常需要 **350-500 英文词**，且明确反对
 「reducing the description to a plot summary / A single shot does not automatically justify a shorter
 description」。注意 description_en + action_note_en 会拼成同一段 detailed_description，
-所以两者的词数之和必须落进 350-500。按「首帧锚定 → 动作起始 → 连续发展 → 结果或反应」展开：
+所以两者的词数之和必须落进 350-500（若用户消息末尾给出【本次词数预算】，预算优先于该区间——
+API 单条 7000 字符硬上限优先于词数质量指导）。按「首帧锚定 → 动作起始 → 连续发展 → 结果或反应」展开：
 
 - description_en：**300-380 英文词**。**首先**逐字忠实保留原文的空间关系与朝向（谁背对/面对/侧对镜头、谁躲在什么后、只露出什么、谁看谁、远近高低）；**然后**在保留这些硬信息的前提下，扩写景别与构图布局、光线的方向/质量/色温、材质与色彩细节、环境元素与空间纵深、角色的姿态变化与面部表情。用可拍摄的视觉化语言，不要复述剧情。**一个镜头也要写满**，信息分部在前景/中景/远景三层铺开。
 - action_note_en：**60-100 英文词**。按时间进程分解动作：起始姿态 → 动作过程 → 结束状态，写明动作幅度与节奏。
@@ -224,13 +313,17 @@ description」。注意 description_en + action_note_en 会拼成同一段 detai
   "action_note_en": "...",
   "soundscape_en": "...",
   "music_en": "...",
-  "tone_en": "..."
+  "tone_en": "...",
+  "world_state_en": "...",
+  "final_frame_en": "..."
 }
+
+${WORLD_STATE_RULES}
 
 字段为空就返回空字符串。只输出 JSON，不要任何其他文字。`
 
-export function rescueLeakedFields(result = {}, hasLeaked = () => true) {
-  const FIELDS = ['description_en', 'action_note_en', 'soundscape_en', 'music_en', 'tone_en']
+function rescueLeakedFields(result = {}, hasLeaked = () => true) {
+  const FIELDS = ['description_en', 'action_note_en', 'soundscape_en', 'music_en', 'tone_en', 'world_state_en', 'final_frame_en']
   const rescued = {}
   for (const k of FIELDS) {
     const v = String(result[k] || '').trim()
@@ -240,11 +333,16 @@ export function rescueLeakedFields(result = {}, hasLeaked = () => true) {
 }
 
 export async function translateShotFields(shot = {}, ctx = {}) {
-  const { characterNames = [], sceneNames = [], voiceClone = false, voicedNames = [] } = ctx
+  const { characterNames = [], sceneNames = [], voiceClone = false, voicedNames = [], wordBudget = null } = ctx
 
   const dlgRaw = shot.dialogue
   const dlgArr = Array.isArray(dlgRaw) ? dlgRaw : (dlgRaw && typeof dlgRaw === 'object' ? [dlgRaw] : [])
   const toneList = dlgArr.map((x) => String(x?.tone || '').trim()).filter(Boolean)
+
+  // 站位信息（首帧构图硬约束）与含中文的末帧（数据模型重构 C：接入出片链路）
+  const worldStateRaw = String(shot.world_state_out || shot.worldStateOut || '').replace(/@/g, '').trim()
+  const finalFrameRaw = String(shot.final_frame || shot.finalFrame || '').replace(/@/g, '').trim()
+  const finalFrameNeedsTranslate = finalFrameRaw && CJK_DIRTY_RE.test(finalFrameRaw)
 
   const cacheKey = JSON.stringify({
     d: shot.description || '',
@@ -254,6 +352,9 @@ export async function translateShotFields(shot = {}, ctx = {}) {
     t: toneList,
     n: [...characterNames, ...sceneNames],
     vc: voiceClone ? voicedNames : false,
+    wb: wordBudget?.descActionMax ?? 0, // 预算进缓存键：同文本不同预算须重译，否则收缩预算会命中旧长译文
+    w: worldStateRaw,
+    f: finalFrameNeedsTranslate ? finalFrameRaw : '',
   })
 
   if (translationCache.has(cacheKey)) return translationCache.get(cacheKey)
@@ -264,16 +365,24 @@ export async function translateShotFields(shot = {}, ctx = {}) {
     soundscape: [shot.overall_soundscape || shot.overallSoundscape, shot.sound_effects || shot.soundEffects].filter(Boolean).join('；').trim(),
     music: String(shot.non_diegetic_music || shot.nonDiegeticMusic || '').trim(),
     tone: toneList.join('，'),
+    worldState: worldStateRaw,
+    finalFrame: finalFrameNeedsTranslate ? finalFrameRaw : '',
   }
 
-  const empty = { description_en: '', action_note_en: '', soundscape_en: '', music_en: '', tone_en: '', failed: false }
+  const empty = { description_en: '', action_note_en: '', soundscape_en: '', music_en: '', tone_en: '', world_state_en: '', final_frame_en: '', failed: false }
 
-  if (!cn.description && !cn.actionNote && !cn.soundscape && !cn.music && !cn.tone) {
+  if (!cn.description && !cn.actionNote && !cn.soundscape && !cn.music && !cn.tone && !cn.worldState && !cn.finalFrame) {
     translationCache.set(cacheKey, empty)
     return empty
   }
 
   const nameList = [...characterNames, ...sceneNames].filter(Boolean).map((n) => `- ${n}`).join('\n')
+
+  // 预算制（buildShotVideoPromptV4 两遍组装传入）：本镜参考素材多、detailed_description
+  // 可用空间有限时，按预算收缩扩写——API 7000 字符硬上限优先于 350-500 词质量区间。
+  const budgetNote = wordBudget?.descActionMax
+    ? `\n【本次词数预算】本镜参考素材较多、detailed_description 可用空间有限，此预算优先于系统提示词的默认词数区间：\n- description_en + action_note_en 合计 ≤ ${wordBudget.descActionMax} 英文词。先逐字保住空间关系/朝向与动作时间轴，再按预算压缩景别铺陈与次要细节，宁短勿超\n- soundscape_en ≤ 30 词、music_en ≤ 30 词（原文为空仍返回空字符串）`
+    : ''
 
   const messages = [
     { role: 'system', content: TRANSLATE_SYSTEM_PROMPT },
@@ -285,9 +394,11 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
 需要翻译并扩写的内容：
 画面描述：${cn.description || '（空）'}
 动作说明：${cn.actionNote || '（空）'}
+站位（首帧构图硬约束，按规则 8 逐字忠实翻译）：${cn.worldState || '（空）'}
+末帧（含中文时按规则 9 翻译，纯英文则返回空）：${cn.finalFrame || '（空）'}
 环境音与画内音效：${cn.soundscape || '（空）'}
 配乐：${cn.music || '（空）'}
-语气：${cn.tone || '（空）'}`,
+语气：${cn.tone || '（空）'}${budgetNote}`,
     },
   ]
 
@@ -313,7 +424,7 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
         temperature: 0.4,
         maxTokens: 2600,
         responseFormat: { type: 'json_object' },
-        timeoutMs: 90000,
+        timeoutMs: config.timeouts.llm.repair,
         usageContext: { task: 'h3-prompt-translate' },
       })
       const parsed = JSON.parse(text)
@@ -323,6 +434,8 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
         soundscape_en: String(parsed.soundscape_en || '').trim(),
         music_en: String(parsed.music_en || '').trim(),
         tone_en: String(parsed.tone_en || '').trim(),
+        world_state_en: String(parsed.world_state_en || '').trim(),
+        final_frame_en: String(parsed.final_frame_en || '').trim(),
         failed: false,
       }
       const leaked = hasLeakedChinese(result.description_en)
@@ -330,6 +443,8 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
         || hasLeakedChinese(result.soundscape_en)
         || hasLeakedChinese(result.music_en)
         || hasLeakedChinese(result.tone_en)
+        || hasLeakedChinese(result.world_state_en)
+        || hasLeakedChinese(result.final_frame_en)
       if (leaked) {
         console.warn(`[h3PromptTranslator] 第 ${attempt + 1} 次翻译输出含中文，${attempt === 0 ? '重试' : '先试删残救济'}`)
         if (attempt === 0) continue
@@ -365,7 +480,6 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
   translationCache.set(cacheKey, degraded)
   return degraded
 }
-
 
 const parseDialogueLines = (raw) => {
   if (!raw) return []

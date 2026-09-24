@@ -261,7 +261,7 @@ process.on('exit', () => { if (!shuttingDown) cleanup(0) })
 
 async function main() {
   console.log(`${C.bold}============================================${C.reset}`)
-  console.log(`${C.bold}  分镜项目 · 一键启动${C.reset}`)
+  console.log(`${C.bold}  AI短剧开发平台 · 一键启动${C.reset}`)
   console.log(`${C.bold}  后端 http://127.0.0.1:${BACKEND_PORT}   前端 ${frontendUrl}${C.reset}`)
   console.log(`${C.bold}============================================${C.reset}`)
 
