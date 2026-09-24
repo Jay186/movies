@@ -338,16 +338,19 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   const rawVisual = cleanDesc(pickEnglish(translated.description_en) || stripResidualCjk(translated.description_en) || pickEnglish(shot.description))
 
   // —— IMD 直连（数据模型重构 C）：分镜成品的 integratedMultimodalDescription 含逐字精确的
-  // 动作时间轴（Airlock + At 时刻表 + 道具专属），经 LLM 翻译扩写会弱化节拍、丢失时刻精度。
+  // 动作时间轴（m4 At 时刻表 + m5 道具专属），经 LLM 翻译扩写会弱化节拍、丢失时刻精度。
   // IMD 为纯英文时直接提取动作模块作为 actionDesc，字面直达 H3。
   // 模块取舍：m1（景别/运镜）由上方官方映射承担更规范；m2（角色外形）/m3（环境冻结）由
   // subject_definitions/retention_analysis 参考图承担；m6（末帧）由 finalFrame 句承担——均不重复引入。
+  // airlock 段【不进出片】（2026-09-24 修复）：它是出图侧的落幅复刻语义，出片侧已由 continuity
+  // 锚图 + "begins from <Picture N>" 承接句承担；其冻结文本（holds for N seconds / no walking /
+  // no turning...）直灌 H3 会压死整镜动作——1-2 七秒冻结、碎石滚落表演拍全丢即此根因。
   // IMD 缺失、含中文或无动作模块时回落翻译器的 action_note_en，行为与旧版一致。
   let imdAction = ''
   const imdRaw = String(shot.integratedMultimodalDescription || shot.integrated_multimodal_description || '').replace(/@/g, '').trim()
   if (imdRaw && !CJK_DIRTY_RE.test(imdRaw)) {
     try {
-      const keep = groupImdModules(imdRaw).filter((g) => ['airlock', 'm4', 'm5'].includes(g.kind))
+      const keep = groupImdModules(imdRaw).filter((g) => ['m4', 'm5'].includes(g.kind))
       if (keep.length) {
         // 平化为一行（官方 detailed_description 为连续段落格式），并剥尾部句号（拼接处统一加）
         imdAction = keep.map((g) => g.lines.join(' ')).join(' ').replace(/\s{2,}/g, ' ').trim().replace(/[.。]+\s*$/, '')

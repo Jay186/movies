@@ -5,7 +5,6 @@ export const PHASE = {
   DONE: 'done',              
 
   SCENES: 'scenes',          
-  AIRLOCK: 'airlock',        
   SINGLE: 'single',          
 
   NORMALIZE: 'normalize',    
@@ -21,7 +20,6 @@ const PHASE_LABEL = {
   [PHASE.DONE]: '已完成',
 
   [PHASE.SCENES]: '分场生成',
-  [PHASE.AIRLOCK]: '画面衔接',
   [PHASE.SINGLE]: '整本生成',
 
   [PHASE.NORMALIZE]: '结构规整',

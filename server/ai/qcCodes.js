@@ -2,7 +2,6 @@
 export const QC_LEVEL = { ERROR: 'error', WARNING: 'warning' }
 
 export const QC_ACTION = {
-  AIRLOCK_LINK: 'airlock_link',
   AXIS_REPOSITION: 'axis_reposition',
   REGEN_FRAME: 'regen_frame',
   CAMERA_DIVERSIFY: 'camera_diversify',
@@ -87,10 +86,10 @@ export const QC_CODES = {
 
   AIRLOCK_SIDE_FLIP: {
     level: QC_LEVEL.WARNING,
-    title: 'Airlock 复刻侧位相反',
-    hint: 'Airlock 段本应逐字复刻上一镜最终画面，角色侧位却相反——首帧空间直接错位',
-    action: QC_ACTION.AIRLOCK_LINK,
-    fixLabel: '重做 Airlock 衔接',
+    title: '开场承接段侧位相反',
+    hint: '开场承接段应承接上一镜最终画面构图，角色侧位却相反——首帧空间直接错位（承接逻辑已废除，此项仅供对照/人工复核）',
+    action: QC_ACTION.MANUAL,
+    fixLabel: '',
   },
   SCREEN_SIDE_FLIP: {
     level: QC_LEVEL.WARNING,
@@ -109,10 +108,10 @@ export const QC_CODES = {
 
   AIRLOCK_CHAR_MISSING: {
     level: QC_LEVEL.WARNING,
-    title: 'Airlock 角色消失',
-    hint: '上一镜最终画面里的角色，本镜未提及——Airlock 要求复刻上一镜画面，角色不应凭空消失',
-    action: QC_ACTION.AIRLOCK_LINK,
-    fixLabel: '补 Airlock 衔接',
+    title: '跨镜连戏角色消失',
+    hint: '上一镜最终画面里的角色，本镜未提及——跨镜连戏断裂，角色不应凭空消失',
+    action: QC_ACTION.MANUAL,
+    fixLabel: '',
   },
 
   ASSET_MISSING_IMAGE: {
@@ -197,7 +196,7 @@ export const QC_CODES = {
   MULTI_BEAT_SUSPECT: {
     level: QC_LEVEL.WARNING,
     title: '一镜多拍嫌疑',
-    hint: '一镜塞了多个叙事节拍（连接词+肢体动作+角色切换三信号触发）——一拍一镜才出电影感，建议拆成多镜靠 Airlock 衔接。历史样本验证：纯连接词版零报，三信号版命中真实多拍',
+    hint: '一镜塞了多个叙事节拍（连接词+肢体动作+角色切换三信号触发）——一拍一镜才出电影感，建议拆成多镜、用开场承接句衔接。历史样本验证：纯连接词版零报，三信号版命中真实多拍',
     action: QC_ACTION.MANUAL,
     fixLabel: '',
   },
@@ -334,7 +333,7 @@ export const QC_CODES = {
   DIALOGUE_SPEED_TIGHT: {
     level: QC_LEVEL.WARNING,
     title: '台词说不完',
-    hint: '本镜台词总字数 ÷ 镜时长 超过自然语速上限——配音要么加速到不自然，要么溢出到下一镜，Airlock 首帧对位被破坏',
+    hint: '本镜台词总字数 ÷ 镜时长 超过自然语速上限——配音要么加速到不自然，要么溢出到下一镜，镜间首帧承接被打乱',
     action: QC_ACTION.MANUAL,
     fixLabel: '',
   },
@@ -408,7 +407,7 @@ export const QC_CODES = {
   WS_OUT_EMPTY: {
     level: QC_LEVEL.WARNING,
     title: '出场状态快照缺失',
-    hint: '本镜 world_state_out 为空——下一镜的 Airlock 继承与镜间衔接只能退回 finalFrame 文本，状态校验失效。补写出场状态快照（每个出场角色的"画面位置·手持·朝向"与关键道具状态）',
+    hint: '本镜 world_state_out 为空——下一镜的承接与镜间衔接只能退回 finalFrame 文本，状态校验失效。补写出场状态快照（每个出场角色的"画面位置·手持·朝向"与关键道具状态）',
     action: QC_ACTION.MANUAL,
     fixLabel: '',
   },
@@ -442,15 +441,22 @@ export const QC_CODES = {
   },
   DIALOGUE_IN_AIRLOCK: {
     level: QC_LEVEL.ERROR,
-    title: '台词落在 Airlock 锁定期',
-    hint: '台词 startTime 落在镜头前段 Airlock 禁语期（默认前 2 秒）——Airlock 期嘴唇应闭合，台词会被口型/时间轴冲突',
+    title: '台词落在开场锁定期',
+    hint: '台词 startTime 落在镜头前段禁语期——该判定仅在 AIRLOCK_SEC>0（旧 Airlock 冻结模式）下生效，用于回退对照；默认 AIRLOCK_SEC=0 不做开场冻结，不再产出该码',
     action: QC_ACTION.DIALOGUE_SHIFT,
     fixLabel: '移出禁语期',
   },
   DIALOGUE_OVERFLOW: {
     level: QC_LEVEL.ERROR,
     title: '台词溢出镜头',
-    hint: '台词按自然语速估算的结束时间超过镜尾——该句会被截断或溢出到下一镜，破坏 Airlock 首帧对位',
+    hint: '台词按自然语速估算的结束时间超过镜尾——该句会被截断或溢出到下一镜，破坏镜间首帧承接',
+    action: QC_ACTION.MANUAL,
+    fixLabel: '',
+  },
+  DIALOGUE_VERBATIM: {
+    level: QC_LEVEL.ERROR,
+    title: '台词与剧本原文不一致',
+    hint: '分镜台词必须逐字复制剧本原文（台词完整铁律）——LLM 改写/漏句/增句会让配音稿与剧本脱节，下游配音、字幕、审片全部返工',
     action: QC_ACTION.MANUAL,
     fixLabel: '',
   },

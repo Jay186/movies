@@ -83,7 +83,7 @@ function checkAirlockInheritance(prevShot, currShot, warnings, shotLabel, charNa
     warnings.push({
       code: 'AIRLOCK_CHAR_MISSING',
       shot: shotLabel,
-      message: `Airlock 继承缺失角色：上一镜 finalFrame 有 @${prevChars.join(' @')}，当前镜未提及 @${missing.join(' @')}。Airlock 要求复刻上一镜最终画面，角色不应消失。`,
+      message: `跨镜连戏断裂：上一镜 finalFrame 有 @${prevChars.join(' @')}，当前镜未提及 @${missing.join(' @')}。上一镜末帧出现的角色在本镜消失，跨镜连戏中断，角色不应凭空消失。`,
     })
   }
 }
@@ -186,7 +186,7 @@ function checkFrameGeography(prevShot, currShot, warnings, shotLabel, charNames,
           warnings.push({
             code: 'AIRLOCK_SIDE_FLIP',
             shot: shotLabel,
-            message: `镜头 ${shotLabel}：Airlock 复刻段里 @${name} 在 frame ${aSide}，但上一镜 finalFrame 里在 frame ${prevSide}。Airlock 应逐字复刻上一镜最终画面，侧位相反说明复刻被改写，首帧空间直接错位。`,
+            message: `镜头 ${shotLabel}：开场承接段里 @${name} 在 frame ${aSide}，但上一镜 finalFrame 里在 frame ${prevSide}。开场构图应承接上一镜最终画面，侧位相反说明承接被改写，首帧空间直接错位。`,
           })
         }
       }
@@ -272,7 +272,7 @@ function checkLocationTeleport(prevShot, currShot, warnings, shotLabel, charName
       warnings.push({
         code: 'LOCATION_TELEPORT',
         shot: shotLabel,
-        message: `镜头 ${shotLabel}：@${name} 的位置从上一镜的「${prevTag}」变成「${currTag}」，但本镜动作时间轴里没有显式移动动作（jump/leap/climb/slide 等）——角色瞬移。请在模块4 补移动过程，或在本镜 Airlock 后立即交代位置变化。`,
+        message: `镜头 ${shotLabel}：@${name} 的位置从上一镜的「${prevTag}」变成「${currTag}」，但本镜动作时间轴里没有显式移动动作（jump/leap/climb/slide 等）——角色瞬移。请在模块4 补移动过程，或在本镜开场后立即交代位置变化。`,
       })
     }
   }
@@ -296,7 +296,7 @@ function checkDialogueSpeed(shot, warnings, label) {
     warnings.push({
       code: 'DIALOGUE_SPEED_TIGHT',
       shot: label,
-      message: `镜头 ${label}：${chars} 字台词 ÷ ${dur}s = ${rate.toFixed(1)} 字/秒，超过自然语速上限（${SPEECH_RATE_MAX} 字/秒）——配音要么赶得不自然，要么溢出到下一镜、破坏 Airlock 首帧对位。请删减台词，或把部分台词挪到相邻镜，或加长本镜时长。`,
+      message: `镜头 ${label}：${chars} 字台词 ÷ ${dur}s = ${rate.toFixed(1)} 字/秒，超过自然语速上限（${SPEECH_RATE_MAX} 字/秒）——配音要么赶得不自然，要么溢出到下一镜、破坏镜间首帧承接。请删减台词，或把部分台词挪到相邻镜，或加长本镜时长。`,
     })
   }
 }
@@ -1072,7 +1072,7 @@ function checkCinematicGrammar(shot, warnings, label) {
       warnings.push({
         code: 'MULTI_BEAT_SUSPECT',
         shot: label,
-        message: `镜头 ${label}：疑似一镜多拍（连接词${connectorCount} + 肢体动作${bodyCount} + 角色切换${switchCount}）——请按任务边界复核：若这些动作分属多个独立任务（发现/反应/新动作各自独立），拆成多镜靠 Airlock 衔接；若为同一任务的连续动作链（如听见→决定→循声走去），可保留一镜，忽略此告警。`,
+        message: `镜头 ${label}：疑似一镜多拍（连接词${connectorCount} + 肢体动作${bodyCount} + 角色切换${switchCount}）——请按任务边界复核：若这些动作分属多个独立任务（发现/反应/新动作各自独立），拆成多镜、用开场承接句衔接；若为同一任务的连续动作链（如听见→决定→循声走去），可保留一镜，忽略此告警。`,
       })
     }
   }
@@ -1129,7 +1129,9 @@ export function checkSceneIndexAlignment(storyboardSceneNumbers = [], sceneRows 
 
 const SPECIES_DRIFT_CHECK_ENABLED = config.storyboard?.speciesDriftCheckEnabled !== false
 const DIALOGUE_WINDOW_CHECK_ENABLED = config.storyboard?.dialogueWindowCheckEnabled !== false
-export const AIRLOCK_SEC = config.storyboard?.airlockSec ?? 2
+// 台词逐字对账开关：依赖调用方传入剧本原文（ctx.scriptText），不传不查（存量数据不制造告警洪水）
+const DIALOGUE_VERBATIM_CHECK_ENABLED = config.storyboard?.dialogueVerbatimCheckEnabled !== false
+export const AIRLOCK_SEC = config.storyboard?.airlockSec ?? 0
 export const DIALOGUE_OVERFLOW_EPS = config.storyboard?.dialogueOverflowEpsSec ?? 0.5
 const DIALOGUE_TIGHT_MIN = config.storyboard?.dialogueTightMinSec ?? 2.5
 const SCENE_TEMPLATE_CHECK_ENABLED = config.storyboard?.sceneTemplateCheckEnabled !== false
@@ -1298,7 +1300,7 @@ function checkWorldStateSeam(shot, errors, warnings, label, codedErrors, hasAnyW
       warnings.push({
         code: 'WS_OUT_EMPTY',
         shot: label,
-        message: `镜头 ${label}：world_state_out 为空（本集其他镜头有出场状态快照）——下一镜 Airlock 继承与镜间衔接只能退回 finalFrame 文本，状态校验失效。请补写出场状态快照（每个出场角色的"画面位置·手持·朝向"与关键道具状态）。`,
+        message: `镜头 ${label}：world_state_out 为空（本集其他镜头有出场状态快照）——下一镜的承接与镜间衔接只能退回 finalFrame 文本，状态校验失效。请补写出场状态快照（每个出场角色的"画面位置·手持·朝向"与关键道具状态）。`,
       })
     }
     return
@@ -1384,14 +1386,18 @@ function checkDialogueWindow(shot, errors, warnings, label, codedErrors) {
     ? shot.dialogue
     : (shot.dialogue && typeof shot.dialogue === 'object' ? [shot.dialogue] : [])
   if (!dlgList.length) return
-  const airlockEnd = shotStart + AIRLOCK_SEC
+  // Airlock 开场冻结已整体废除（默认 AIRLOCK_SEC=0）：<=0 时跳过开场禁语期判定，不再产出 DIALOGUE_IN_AIRLOCK。
+  // 这里读取当前 config（而非加载期常量），使旧 Airlock 冻结模式（AIRLOCK_SEC>0）的对照/回退路径可被测试与运行时切换。
+  const airlockSec = Math.max(0, Number(config.storyboard?.airlockSec) || 0)
+  const airlockEnd = shotStart + airlockSec
+  const airlockCheckEnabled = airlockSec > 0
   let lastStart = -Infinity
   for (const d of dlgList) {
     const lineStart = Number(d?.startTime)
     if (!Number.isFinite(lineStart)) continue
     if (lineStart > lastStart) lastStart = lineStart
-    if (lineStart >= shotStart && lineStart < airlockEnd) {
-      const message = `镜头 ${label}：台词「${String(d?.text || '').slice(0, 12)}」startTime=${lineStart}s 落在 Airlock 禁语期 [${shotStart}, ${airlockEnd})s——Airlock 期嘴唇应闭合，台词与口型/时间轴冲突。请把台词移到 ${airlockEnd}s 之后。`
+    if (airlockCheckEnabled && lineStart >= shotStart && lineStart < airlockEnd) {
+      const message = `镜头 ${label}：台词「${String(d?.text || '').slice(0, 12)}」startTime=${lineStart}s 落在开场禁语期 [${shotStart}, ${airlockEnd})s——该判定仅在 AIRLOCK_SEC>0（旧 Airlock 冻结模式）下生效，请把台词移到 ${airlockEnd}s 之后。`
       errors.push(message)
       if (Array.isArray(codedErrors)) codedErrors.push({ code: 'DIALOGUE_IN_AIRLOCK', shot: label, message })
     }
@@ -1414,6 +1420,34 @@ function checkDialogueWindow(shot, errors, warnings, label, codedErrors) {
         shot: label,
         message: `镜头 ${label}：末句 startTime=${lastStart}s，距镜尾 ${shotEnd}s 仅剩 ${window.toFixed(1)}s（< ${DIALOGUE_TIGHT_MIN}s）——虽不溢出但留白不足，换气/收音仓促，建议加长镜头或提前台词。`,
       })
+    }
+  }
+}
+
+// 台词逐字铁律（storyboardRules.js「台词完整铁律」的程序化对账）：
+// 分镜台词必须逐字存在于剧本原文。LLM 修复其它问题时顺手改台词是已知风险
+// （同义替换/漏句/增句），此类改写下游无声——配音按错词录、字幕按错词打，审片才爆。
+// 只做空白字符归一（剧本排版换行/空格不构成改写），标点与用字差异一律视为改写。
+function normalizeVerbatim(s) {
+  return String(s || '').replace(/\s+/g, '')
+}
+
+export function checkDialogueVerbatim(shot, errors, label, codedErrors, ctx = {}) {
+  if (!DIALOGUE_VERBATIM_CHECK_ENABLED) return
+  const scriptText = String(ctx.scriptText || '')
+  if (!scriptText.trim()) return
+  const dlgList = Array.isArray(shot.dialogue)
+    ? shot.dialogue
+    : (shot.dialogue && typeof shot.dialogue === 'object' ? [shot.dialogue] : [])
+  if (!dlgList.length) return
+  const haystack = normalizeVerbatim(scriptText)
+  for (const d of dlgList) {
+    const line = normalizeVerbatim(d?.text || '')
+    if (!line) continue
+    if (!haystack.includes(line)) {
+      const message = `镜头 ${label}：台词「${String(d?.text || '').slice(0, 12)}」在剧本原文中逐字找不到——可能被 LLM 改写/增删。台词必须原样复制剧本原文，请对照剧本逐字修正。`
+      errors.push(message)
+      if (Array.isArray(codedErrors)) codedErrors.push({ code: 'DIALOGUE_VERBATIM', shot: label, message })
     }
   }
 }
@@ -1735,7 +1769,7 @@ export function validateShot(shot, ctx = {}) {
   const label = ctx.shotLabel || shot.shotNumber || shot.shot_number || shot.id || 'unknown'
 
   if (!shot.finalFrame && !shot.final_frame) {
-    errors.push(`镜头 ${label}：finalFrame 字段为空，必须填写本镜最终画面描述（下一镜 Airlock 继承依据）`)
+    errors.push(`镜头 ${label}：finalFrame 字段为空，必须填写本镜最终画面描述（下一镜承接依据）`)
   }
   if (!shot.integratedMultimodalDescription && !shot.integrated_multimodal_description) {
     errors.push(`镜头 ${label}：integratedMultimodalDescription 字段为空，必须填写 AI 图像/视频模型使用的完整提示词`)
@@ -1853,6 +1887,8 @@ export function validateShot(shot, ctx = {}) {
 
   checkDialogueWindow(shot, errors, warnings, label, codedErrors)
 
+  checkDialogueVerbatim(shot, errors, label, codedErrors, ctx)
+
   checkMusicMoodWord(shot, warnings, label)
 
   checkH3PromptLimit(shot, errors, warnings, label, codedErrors, ctx)
@@ -1949,7 +1985,7 @@ export function validateStoryboard(storyboard, assetNames, opts = {}) {
       shotCount++
       const label = shot.shotNumber || shot.shot_number || `scene${scene.sceneNumber || ''}-shot${shotCount}`
 
-      const res = validateShot(shot, { assetNames, prevShot, nextShot, shotLabel: label, projectStyleText: opts.projectStyleText, projectStyleCategory: opts.projectStyleCategory, sceneIndex, prevSceneIndex, isLastShot: shotCount === totalShots, speciesMap, aliasMap, sceneNumber: scene.sceneNumber ?? scene.scene_number })
+      const res = validateShot(shot, { assetNames, prevShot, nextShot, shotLabel: label, projectStyleText: opts.projectStyleText, projectStyleCategory: opts.projectStyleCategory, scriptText: opts.scriptText, sceneIndex, prevSceneIndex, isLastShot: shotCount === totalShots, speciesMap, aliasMap, sceneNumber: scene.sceneNumber ?? scene.scene_number })
       errors.push(...res.errors)
       warnings.push(...res.warnings)
       fixed.push(...res.fixed)

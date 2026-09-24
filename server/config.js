@@ -58,7 +58,7 @@ export const config = {
     frameReviewRetry: Math.max(0, Number(process.env.FRAME_REVIEW_RETRY ?? 1)),
     sceneReview: process.env.SCENE_REVIEW !== '0',
     sceneReviewRetry: Math.max(0, Number(process.env.SCENE_REVIEW_RETRY ?? 1)),
-    lightTasks: (process.env.LLM_LIGHT_TASKS ?? 'h3-prompt-translate,style-prompt-en,lighting-check,storyboard-airlock,storyboard-axis,storyboard-geography')
+    lightTasks: (process.env.LLM_LIGHT_TASKS ?? 'h3-prompt-translate,style-prompt-en,lighting-check,storyboard-axis')
       .split(',').map((s) => s.trim()).filter(Boolean),
     durationMin: Math.max(1, Number(process.env.SHOT_DURATION_MIN) || 4),
     durationMax: Math.max(1, Number(process.env.SHOT_DURATION_MAX) || 15),
@@ -98,7 +98,18 @@ export const config = {
 
     speciesDriftCheckEnabled: process.env.SPECIES_DRIFT_CHECK !== '0',
     dialogueWindowCheckEnabled: process.env.DIALOGUE_WINDOW_CHECK !== '0',
-    airlockSec: Math.max(0, Number(process.env.AIRLOCK_SEC) || 2),
+    // 台词逐字对账：分镜台词必须逐字存在于剧本原文（0 关闭）。生成管线与 QC 面板同口径共用。
+    dialogueVerbatimCheckEnabled: process.env.DIALOGUE_VERBATIM_CHECK !== '0',
+    // Airlock 开场冻结已在 2026-09-24 事故整改中整体废除，默认 0 = 不做开场冻结
+    //（承接即刻完成、动作与台词可从第 0 秒直接开始）。AIRLOCK_SEC>0 可恢复旧 Airlock 冻结行为，
+    // 仅用于对照排查，非推荐值。跨场连戏改由「尾帧参考图 + 提示词承接句」承担。
+    airlockSec: process.env.AIRLOCK_SEC != null && process.env.AIRLOCK_SEC !== '' ? Math.max(0, Number(process.env.AIRLOCK_SEC)) : 0,
+    // 对话反打是否强制切镜（默认 false=允许合并）：对白驱动的连续戏（双主角对话）若强制切镜，
+    // 整场被锁成 6-7s 短镜（2026-09-24 1-1/1-2 节奏稀烂事故）；H3 一镜多说话人由 v4Video 时间轴承载。
+    dialogueReverseBlock: process.env.DIALOGUE_REVERSE_BLOCK === '1',
+    // 分镜保存接口的 QC 闸（默认 false=只告警不阻断）：true 时 errorCount>0 的保存请求返回 409。
+    // 2026-09-24 事故：带病数据（30 条 QC 警告含 6 条位置瞬移）无任何拦截直接入库。
+    saveQcBlockOnError: process.env.SAVE_QC_BLOCK_ON_ERROR === '1',
     dialogueOverflowEpsSec: Math.max(0, Number(process.env.DIALOGUE_OVERFLOW_EPS_SEC) || 0.5),
     dialogueTightMinSec: Math.max(0, Number(process.env.DIALOGUE_TIGHT_MIN_SEC) || 2.5),
     sceneTemplateCheckEnabled: process.env.SCENE_TEMPLATE_CHECK !== '0',

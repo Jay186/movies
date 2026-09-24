@@ -1026,7 +1026,7 @@ async function saveDuration() {
         :disabled="isLocked || regenBusy"
         :title="isLocked
           ? '锁定镜不可 AI 重写，请先解锁'
-          : 'AI 单镜重写：保持时长与时轴不变，按前镜 Airlock 继承、后镜出画约束、剧本片段与资产库重写本镜内容；已产出的分镜图/尾帧/站位/成片会被清空'"
+          : 'AI 单镜重写：保持时长与时轴不变，按前镜落帧承接、后镜出画约束、剧本片段与资产库重写本镜内容；已产出的分镜图/尾帧/站位/成片会被清空'"
         @click.stop="openRegen"
       >{{ regenBusy ? '重写中…' : '重写' }}</button>
       <button
@@ -1089,7 +1089,7 @@ async function saveDuration() {
           <section>
             <h4 class="mb-2 flex items-center gap-2 text-text-secondary">
               <span class="rounded-tag bg-info/20 px-1.5 py-0.5 text-micro font-medium text-info">主结构</span>
-              <span>integrated_multimodal_description（含 Airlock 继承 / 视觉锁定 / 环境冻结 / 动作微分解 / 道具专属 / 最终画面）</span>
+              <span>integrated_multimodal_description（图像六模块：镜头声明 / 风格与角色锁定 / 环境冻结声明 / 时间轴动作 / 道具专属声明 / 最终画面）</span>
             </h4>
             <pre class="whitespace-pre-wrap rounded-btn border border-border bg-bg-card p-3 font-mono text-[11px] leading-relaxed text-text-secondary">{{ shot.integratedMultimodalDescription }}</pre>
           </section>
@@ -1097,7 +1097,7 @@ async function saveDuration() {
           <section v-if="shot.finalFrame">
             <h4 class="mb-2 flex items-center gap-2 text-text-secondary">
               <span class="rounded-tag bg-warn/20 px-1.5 py-0.5 text-micro font-medium text-warn">Final Frame</span>
-              <span>本镜最终画面（供下镜 Airlock 继承）</span>
+              <span>本镜最终画面（供下镜承接）</span>
             </h4>
             <pre class="whitespace-pre-wrap rounded-btn border border-border bg-bg-card p-3 font-mono text-[11px] leading-relaxed text-text-secondary">{{ shot.finalFrame }}</pre>
           </section>
@@ -1268,7 +1268,7 @@ async function saveDuration() {
             <div class="mb-1 font-medium text-info">重写规则</div>
             <ul class="list-disc space-y-0.5 pl-4">
               <li>时长 {{ shot.duration }}s 与时间轴位置<b>保持不变</b>，只重写内容</li>
-              <li>自动继承前镜结尾画面（Airlock）与后镜出画约束，角色/场景外形锁定资产库设定</li>
+              <li>自动承接前镜结尾画面与后镜出画约束，角色/场景外形锁定资产库设定</li>
               <li>重写前当前内容自动存入历史版本，可随时回退</li>
               <li>本镜已产出的分镜图 / 尾帧锚 / 站位图 / 成片会被<b>清空</b>，需重新生成</li>
             </ul>

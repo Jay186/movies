@@ -29,6 +29,7 @@ import {
   applyKeepForProps,
 } from '../ai/extractGuard.js'
 import { clearQcIgnores, persistQcToShots } from './qc.js'
+import { validateStoryboard } from '../ai/storyboardValidator.js'
 import { regenerateShot } from '../ai/doubao.js'
 import { config } from '../config.js'
 import { ASSET_TYPES } from '../ai/assetTypes.js'
@@ -713,6 +714,34 @@ router.post('/:id/storyboard', (req, res) => {
   if (!Array.isArray(storyboardScenes) || storyboardScenes.length === 0) {
     return res.status(400).json({ error: 'storyboardScenes 不能为空' })
   }
+
+  // 保存前 QC 终检（2026-09-24 事故修复：带病数据无任何拦截直接入库——30 条警告含 6 条
+  // 位置瞬移照存不误，出片翻车后才回头查因）。默认只告警不阻断（console.warn），
+  // SAVE_QC_BLOCK_ON_ERROR=1 升级为 409 硬阻断。QC 检查自身失败不阻断保存。
+  try {
+    const episodeId = req.params.id
+    const qcAssets = {
+      characters: query('SELECT name FROM characters WHERE episode_id = ?', [episodeId]).map((r) => r.name),
+      scenes: query('SELECT title FROM scenes WHERE episode_id = ?', [episodeId]).map((r) => r.title),
+      props: query('SELECT name FROM props WHERE episode_id = ?', [episodeId]).map((r) => r.name),
+    }
+    const qc = validateStoryboard({ scenes: storyboardScenes }, qcAssets, {})
+    const qcErrors = (qc.errors?.length || 0) + (qc.codedErrors?.length || 0)
+    if (qcErrors > 0) {
+      const preview = [...(qc.errors || []), ...(qc.codedErrors || [])]
+        .slice(0, 3)
+        .map((e) => String(e?.message || e).slice(0, 90))
+        .join('；')
+      const message = `[storyboard-save] 分镜入库 QC 硬错误 ${qcErrors} 条：${preview}`
+      if (config.storyboard?.saveQcBlockOnError) {
+        return res.status(409).json({ error: `分镜 QC 未过（${qcErrors} 条硬错误，SAVE_QC_BLOCK_ON_ERROR 已开启阻断）：${preview}` })
+      }
+      console.warn(message + '（未阻断：SAVE_QC_BLOCK_ON_ERROR 未开启）')
+    }
+  } catch (qcErr) {
+    console.warn('[storyboard-save] 保存前 QC 检查执行失败（不阻断保存）:', qcErr.message)
+  }
+
   transaction(() => {
     const episodeId = req.params.id
 
@@ -847,9 +876,9 @@ router.post('/:id/storyboard', (req, res) => {
 
         if (shotId == null) {
           const r = execute(
-            `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, storyboard_url, frame_url, blocking_url, video_url, video_generated, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [sceneId, shotNumber, ...fields, camAngle || '', ...narrativeFields]
+            `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, storyboard_url, frame_url, blocking_url, video_url, video_generated, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out, qc_status, qc_report)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [sceneId, shotNumber, ...fields, camAngle || '', ...narrativeFields, shot.qcStatus || '', shot.qcReport || '']
           )
           keepShotIds.add(r.lastInsertRowid)
         } else {

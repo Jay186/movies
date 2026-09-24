@@ -419,8 +419,8 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
       for (let shi = 0; shi < (s.shots || []).length; shi++) {
         const shot = s.shots[shi]
         const shotResult = execute(
-          `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out, qc_status, qc_report)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             sceneId,
             `${si + 1}-${shi + 1}`,
@@ -451,6 +451,9 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
             shot.infoPoints?.length ? JSON.stringify(shot.infoPoints)
               : (shot.info_points?.length ? JSON.stringify(shot.info_points) : null),
             shot.worldStateOut || shot.world_state_out || null,
+            // 生成管线 QC 兜底标记（qcClean=false / Airlock 失败时由 doubao.js 写入），无则默认空
+            shot.qcStatus || '',
+            shot.qcReport || '',
           ]
         )
         ids.push(shotResult.lastInsertRowid)

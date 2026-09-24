@@ -489,7 +489,7 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
-  // 单镜 AI 重写：上下文由后端组装（前镜 Airlock 继承/后镜出画约束/剧本片段/资产清单），完成后全量刷新
+  // 单镜 AI 重写：上下文由后端组装（前镜落帧承接/后镜出画约束/剧本片段/资产清单），完成后全量刷新
   async function regenerateShot(shotId, instruction = '') {
     if (!currentEpisodeId.value) return { success: false, error: '未加载剧集' }
     if (regeneratingShotIds.value.includes(shotId)) return { success: false, error: '该镜头正在重写中' }

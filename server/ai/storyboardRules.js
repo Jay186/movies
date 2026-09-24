@@ -50,14 +50,14 @@ export function assetNameRule() {
 
 export function characterCoverageRule() {
   return '【角色覆盖硬约束】characters 必须包含本镜画面中【出现的所有角色】，不只是说话或做主动作的角色——'
-    + '凡 Airlock 继承的上一镜角色、最终画面中可见的角色，都必须列入，否则该角色会缺失参考图被画错。'
+    + '凡承接自上一镜最终画面的角色、最终画面中可见的角色，都必须列入，否则该角色会缺失参考图被画错。'
 }
 
 export function integratedModulesRule() {
   return '【图像六模块】按模块1~模块6 顺序输出（这是画面描述结构，不是出片 prompt 的结构）：\n'
     + '模块1【镜头声明】[Shot X] [画风声明]. [机位 wide establishing shot/medium shot/close-up] [距离 大全景/全景/中距离/近景/特写] [角度 正前方平视/45°侧视/正侧方/俯拍/仰拍] [运动：写进自然英文句，含运动类型 + small/large amplitude + slow/fast speed，如 "The camera pushes in with small amplitude at slow speed toward the folded letter in her hands."，禁止句尾堆标签].\n'
     + '\n'
-    + '  Module 2 [Style & Character Lock] @角色A, exactly as shown, [此处必须使用资产清单中角色A 的英文外貌描述（description_en）原句；若该资产没有英文描述，就把它的外貌特征改写成英文。禁止增删改任何外貌特征，禁止直接粘贴中文描述]. @角色B, exactly as shown, [同上]. Speaking rule for this segment: [谁说话/不说话的角色 lips remain completely closed]. [Character Coverage — Hard Constraint] 模块2 必须为画面中出现的【每一个角色】（含 Airlock 继承自上一镜最终画面的角色）逐个输出外观锁定；【禁止】使用 "no other character present" 或类似表述——只要角色在画面中可见，即使不说话不动作，也必须锁定其外观\n'
+    + '  Module 2 [Style & Character Lock] @角色A, exactly as shown, [此处必须使用资产清单中角色A 的英文外貌描述（description_en）原句；若该资产没有英文描述，就把它的外貌特征改写成英文。禁止增删改任何外貌特征，禁止直接粘贴中文描述]. @角色B, exactly as shown, [同上]. Speaking rule for this segment: [谁说话/不说话的角色 lips remain completely closed]. [Character Coverage — Hard Constraint] 模块2 必须为画面中出现的【每一个角色】（含承接自上一镜最终画面的角色）逐个输出外观锁定；【禁止】使用 "no other character present" 或类似表述——只要角色在画面中可见，即使不说话不动作，也必须锁定其外观\n'
     + '\n'
     + '  模块3【环境冻结声明】The [此处必须使用资产清单中该场景的英文描述（summary_en/title_en）原句；若没有英文描述，就把它的环境特征改写成英文，禁止直接粘贴中文，可补充 frozen 声明] remains completely unchanged in structure, color, and arrangement throughout the entire segment — no [可能变化的元素] shifts, no [可能消失的元素] disappears. 若资产清单提供了该场景的【场景光影常量】英文句，必须在模块3 末尾追加一句：Lighting stays constant: [逐字复制那句英文光影常量，禁止改写或翻译]。\n'
     + '\n'
@@ -90,19 +90,6 @@ export function styleLockRule(styleLabel = '', styleCategory = '') {
     + '4. "压迫感/重量感"等演出需求写成画面与动作语言（towering scale / real weight and inertia），不得借道画风切换。'
 }
 
-export function airlockRule() {
-  return '【Airlock 跨镜继承规则】\n'
-    + '- 整个剧本的第一个镜头不需要 Airlock 开头。\n'
-    + '- 第二镜及之后的每个镜头，其 integratedMultimodalDescription 必须在模块1【镜头声明】之后、模块2之前先插入 Airlock 段。\n'
-    + '- Airlock 段必须是【纯英文】，逐字套用下列模板；中括号处替换为实际内容，其余部分原样保留——不要翻译、不要改写、不要追加任何中文：\n'
-    + '  "The camera opens holding the exact final-frame composition of the previous segment — [copy the previous shot\'s final-frame description here, in English]. '
-    + 'The airlock holds for two seconds with only micro-movement: both characters breathe gently, [allowed micro-movements]. '
-    + 'No walking, no turning, no crouching, no prop displacement, no new prop entering the frame, and no speaking (unless this shot\'s dialogue begins here)."\n'
-    + '- [allowed micro-movements] 只能取以下英文短语（可多选，用逗号分隔）：breathing, gaze shifting, weight shifting, ears twitching。\n'
-    + '- 自检：Airlock 段内不得出现任何中文字符（该段本身也不应包含台词）。\n'
-    + '【落点说明】Airlock 段写在 IMD 里，作用是【出图】时复刻上一镜落幅构图（IMD 只喂出图模型）。出片层的跨镜连戏靠 continuity 锚图承担（上一段末帧作为参考图），不靠这段文字——两者都要有，不要以为写了文字连戏就稳了。'
-}
-
 export function timelineRule() {
   return '时间轴规则：第一个镜头 startTime=0，后续镜头 startTime=上一镜 endTime，连续不重叠，不留空档。'
 }
@@ -118,7 +105,7 @@ export function actionDensityRule() {
   return '\n\n【单镜动作密度硬约束（与台词铁律同级，违反即输出无效）】\n'
     + '1. 单镜核心动作数 ≤2~3 个。核心动作 = 一个角色完成一个完整动作单元（「扑抱」「抡拳」「甩头」「竖起围巾」各算一个）。'
     + '（本条是给创作直觉用的近似说法；【机械计数一律以第 5 条为准】，两条口径不一致时按更严的执行——不要用"核心动作只有 3 个"当理由绕过第 5 条的肢体动作动词上限。）\n'
-    + '2. 一镜出现 ≥2 个角色各自独立发力的核心动作时（如 A 扑抱、B 抡拳同时发生），必须按角色拆成两镜，每镜只承载一个角色的发力动作，靠 Airlock 衔接。\n'
+    + '2. 一镜出现 ≥2 个角色各自独立发力的核心动作时（如 A 扑抱、B 抡拳同时发生），必须按角色拆成两镜，每镜只承载一个角色的发力动作，靠承接上一镜落幅衔接。\n'
     + '3. 台词与动作同镜时动作数降到 1~2 个，优先保证台词能念全。\n'
     + '4. 时长不能替代动作数：把 5 个动作塞进 15 秒同样会糊，处理顺序是【先加时长、后考虑拆】：同任务链的动作优先加长时长消化（换算见第 5 条），"塞不下就拆"是最后手段、不是首选，只有分属多个独立任务才拆镜。\n'
     + '5. 【可数上限 · 输出前必须自己数一遍】本镜 description 里的肢体动作动词总数 ÷ 时长（秒）≤0.6。'
@@ -306,13 +293,12 @@ export function episodeStructureRule() {
 export function beatLayerRule() {
   return '\n\n【L3 拍层补充约束（镜内时间轴排布，与台词铁律同级）】\n'
     + '【落点铁律】拍点必须写进 actionNote（中文），不要只写进 integratedMultimodalDescription 模块4——出片提示词只读 actionNote / description / finalFrame / cameraMovement，模块4 不进出片提示词（只喂出图模型，而图没有时间维度）。\n'
-    + '1. 拍数预算（扣除 Airlock 冻结 2 秒后，每满 2 秒排 1 拍）：4s≤2拍、5-6s≤2拍、7-8s≤3拍、9-10s≤3拍、11s+≤4拍。\n'
+    + '1. 拍数预算（每满 2 秒排 1 拍）：4s≤2拍、5-6s≤2拍、7-8s≤3拍、9-10s≤3拍、11s+≤4拍。\n'
     + '2. actionNote 用「At X.Xs，动作」逐拍写清。例：「0-2s 保持静止；At 2.0s 攥紧信纸；At 4.5s 抬头看向门口；末 0.8s 静止无动作」。\n'
-    + '3. Airlock 冻结段不入拍（非首镜前 2 秒只允许微动作，展开写法见 Airlock 规则）；唯一例外：本镜台词在此开口时，冻结缩短到开口时刻。\n'
-    + '4. 拍点按因果顺序排，禁止平均分配：起因拍早、结果拍晚，中间留反应时间。0s/2s/4s/6s 等距分布是错的——动作有先后，不是节拍器。\n'
-    + '5. 剧情转折性动作（摔倒/撞上/跳起/水没胸口）必须独占一拍，不得与其他动作合并，否则会演成"轻轻倒下"。\n'
-    + '6. 运动段必须覆盖动作拍：动作在演时镜头在动，动作停下镜头也该停（详见运镜节拍规则）。\n'
-    + '7. 【拍层必须与台词开口时刻对齐】台词 startTime 是已通过开口校验的准数据（开口偏移+估时+1s 余量 ≤ 镜长），拍层适配它、不能相反。逐句核对：每句台词的镜内开口秒数必须落在某个拍段内，且该段的动作描述要包含说话/发声（写"开口说/喊/惊呼"，不能只写"低头/静立"这类无发声动作）。拍段后标注开口时刻，如「2-4 低头·开口说（@2.5）」。错位后果：成片嘴动与声音不同步，人物在该说话时闭着嘴。'
+    + '3. 拍点按因果顺序排，禁止平均分配：起因拍早、结果拍晚，中间留反应时间。0s/2s/4s/6s 等距分布是错的——动作有先后，不是节拍器。\n'
+    + '4. 剧情转折性动作（摔倒/撞上/跳起/水没胸口）必须独占一拍，不得与其他动作合并，否则会演成"轻轻倒下"。\n'
+    + '5. 运动段必须覆盖动作拍：动作在演时镜头在动，动作停下镜头也该停（详见运镜节拍规则）。\n'
+    + '6. 【拍层必须与台词开口时刻对齐】台词 startTime 是已通过开口校验的准数据（开口偏移+估时+1s 余量 ≤ 镜长），拍层适配它、不能相反。逐句核对：每句台词的镜内开口秒数必须落在某个拍段内，且该段的动作描述要包含说话/发声（写"开口说/喊/惊呼"，不能只写"低头/静立"这类无发声动作）。拍段后标注开口时刻，如「2-4 低头·开口说（@2.5）」。错位后果：成片嘴动与声音不同步，人物在该说话时闭着嘴。'
 }
 
 // 运镜节拍：三维参数 + 三段式时间分配（规范 v4.1 §7.5）
@@ -329,7 +315,7 @@ export function cameraBeatRule() {
     + '   【不存在的一格】"small+fast（小幅度快速）"产线没有对应中文词，禁止设计这个组合——危机突发/惊变改用 large+fast（急推），情绪逼近改用 small+slow（缓推）。\n'
     + '2. cameraMovement 与 description / 模块1 的运镜描述必须语义一致，禁止一处缓推一处急推（出片以 cameraMovement 为准，写了急推却填"缓推"等于白写）。\n'
     + '3. 幅度×速度匹配情绪：情绪逼近/发现细节 = 缓X；危机突发/惊变 = 急X；释放压力/揭示空间 = 大范围X。禁配：情绪爆点用缓推、抒情段用急推。\n'
-    + '4. 禁止全程匀速，一次运镜切三段：起幅稳定（0.5-1.5s，Airlock 镜取 2s）→ 运动段（占镜长 50-70%）→ 落幅静止（0.5-2s）。三段起止时刻写进 actionNote（例「0-1s 静止；1-4.5s 缓推；4.5-5.5s 静止」）。本镜若有留白，留白段的运镜要求见【留白硬约束】，此处不重复。'
+    + '4. 禁止全程匀速，一次运镜切三段：起幅稳定（0.5-1.5s）→ 运动段（占镜长 50-70%）→ 落幅静止（0.5-2s）。三段起止时刻写进 actionNote（例「0-1s 静止；1-4.5s 缓推；4.5-5.5s 静止」）。本镜若有留白，留白段的运镜要求见【留白硬约束】，此处不重复。'
 }
 
 // 摄影设计：光位/光质/焦段/景深/影调（规范 v4 §10）

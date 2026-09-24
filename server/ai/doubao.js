@@ -3,12 +3,12 @@ import path from 'node:path'
 import { config } from '../config.js'
 import { logAiCall, classifyError } from './aiLog.js'
 import { compileIntegratedModules } from './imdCompiler.js'
-import { validateStoryboard, extractScreenSides, hasExplicitReposition, buildAliasMap, findMusicMoodWords, findStylePoison, stylePoisonText, CAMERA_MOVE_LEXICON, extractMentions, extractLightCues, estimateShotVideoPromptChars } from './storyboardValidator.js'
+import { validateStoryboard, extractScreenSides, hasExplicitReposition, buildAliasMap, findMusicMoodWords, findStylePoison, stylePoisonText, CAMERA_MOVE_LEXICON, extractLightCues, estimateShotVideoPromptChars } from './storyboardValidator.js'
 import { PHASE } from './progressPhases.js'
 import { pickContainmentCandidate } from './propNameMatch.js'
 import {
   dialogueRule, assetNameRule, characterCoverageRule, integratedModulesRule,
-  airlockRule, timelineRule, directorNotesPrompt, llmBoundaryRule, episodeStructureRule,
+  timelineRule, directorNotesPrompt, llmBoundaryRule, episodeStructureRule,
   actionDensityRule, beatLayerRule, cameraAngleRule, cameraBeatRule, cinematographyRule,
   holdRule, genreTemplateRule, editRule,
   frameGeographyRule, cinematicGrammarRule, styleLockRule,
@@ -16,6 +16,7 @@ import {
 } from './storyboardRules.js'
 import { applyShotMergeToStoryboard } from './shotMergeEngine.js'
 import { backfillShotAssets, backfillSceneByTitle } from './assetBackfill.js'
+import { qcMeta } from './qcCodes.js'
 
 
 
@@ -851,60 +852,6 @@ async function generateWithVerify(gen, validate, opts = {}) {
   return null
 }
 
-export async function repairShotAirlock(firstShot, prevFinalFrame, style = '', requiredChars = []) {
-  // requiredChars 由调用方（generateStoryboard 的 Airlock 段）算出，是「上一镜末帧里已登记的出场角色」，
-  // 用来校验改写结果有没有把这些角色全带上。此前形参漏接该参数、函数体内却直接引用同名标识符，
-  // 校验回调每次都抛 ReferenceError 并被 generateWithVerify 的 try 吞成「未通过验收」，
-  // 于是每处修补都白跑一次重试（实测 7 处 × 2 次全部作废）。此处补形参并做数组兜底。
-  const required = Array.isArray(requiredChars) ? requiredChars : []
-  const original = (firstShot?.integratedMultimodalDescription || '').trim()
-  const prevFrame = String(prevFinalFrame || '').replace(/^\s*The final frame:\s*/i, '').trim()
-  if (!original || !prevFrame) return null
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 AI 视频控制式 prompt 写法（用于本项目的画面描述字段，按其六模块结构书写）。立刻输出改写后的正文，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿保持一致，禁止偏离）。
-
-【任务】把给定的某场次第一个镜头的 integrated_multimodal_description 改写为带 Airlock 跨场衔接的版本：
-- 正文必须以 "Airlock:" 开头，完整复刻【上一场最终画面】的画面（人物姿态、位置、构图、光线），前 2 秒内只允许呼吸、视线偏移、重心转移等微动作；Airlock 段只写画面内容本身，不要出现 "The final frame:" 之类的标签前缀；
-- 2 秒之后自然过渡到本镜原稿内容（保留原稿的景别、动作、台词与声音设计）；
-- 保持原稿的 6 模块结构（用换行分隔）、英文语言与画风声明不变：
-${integratedModulesRule()}
-- 禁止增删角色、禁止改变角色外貌描述（逐字保留原稿中的角色外观锁定文字）；除 @中文资产名 外不得出现任何中文字符；
-- 只输出改写后的 integrated_multimodal_description 正文，不要 JSON、不要标题、不要解释。`,
-    },
-    {
-      role: 'user',
-      content: `【上一场最终画面】\n${prevFrame}\n\n【本场首镜原稿】\n${original}`,
-    },
-  ]
-  const text = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.3 : 0.1, 
-      maxTokens: 2500,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2, 
-      disableThinking: true,
-      usageContext: { task: 'storyboard-airlock', attempt },
-    }),
-    (raw) => {
-      const rewritten = sanitizeIntegrated(raw)
-      if (!(rewritten && rewritten.toLowerCase().startsWith('airlock'))) return null
-      // 收敛校验：检出条件（checkAirlockInheritance）是"上一镜角色必须在改写后 IMD 里被提及"——
-      // 只验开头会让模型丢角色的改写蒙混过关，复检照样告警、修复死循环。
-      const mentions = new Set(extractMentions(rewritten))
-      if (required.some((c) => !mentions.has(c))) return null
-      return rewritten
-    },
-    { attempts: 2, label: 'repairShotAirlock' }
-  )
-  if (!text) {
-    console.warn('[repairShotAirlock] 重试后仍未产出以 Airlock 开头的改写，按修补失败处理')
-    return null
-  }
-  return text
-}
-
 export async function repairShotAxis(shot, charName, prevSide, currSide, style = '') {
   const original = (shot?.integratedMultimodalDescription || '').trim()
   const origNote = String(shot?.actionNote || shot?.action_note || '').trim()
@@ -1612,7 +1559,7 @@ export async function generateStoryboard(script, style = config.defaultArtStyle,
    【若确实要切：跳切预防】相邻两镜的景别与机位必须至少拉开一项（景别不同；本项目景别只有 全景/中景/近景/特写 四档，全景→中景 跨一档、全景→近景 跨两档；或机位朝向换档满足 30° 法则：正面→侧面→背面）。景别相同且机位相同的硬切 = 跳切，禁止（前后镜动作连续的动作匹配剪辑除外）。
    【节奏】连续动作段落可用跟拍、推拉、环绕和时长变化制造速度，不得为了"快"机械切碎；只有对抗双方独立发力、视角反打或危险升级需要分别承接时才缩短镜头。安静与抒情段落允许 7-15 秒长镜，用时长和运镜完成余韵。
    【时间切片基础】每镜 4-15 秒（H3 模型官方上限 15s；实际成片会对齐 17 帧网格档位，如请求 15s 出 15.08s，属正常）；镜头边界按"任务完成或任务转向"划分，不按逗号、动作动词数量或剧本句号机械切片。
-2. 状态继承（Airlock）：非首镜开头必须复刻上一镜最终画面，2 秒内只允许呼吸/视线偏移/重心转移等微动作，禁止走路/转身/道具位移
+2. 状态继承：非首镜开头承接上一镜最终画面（人物姿态、位置、构图、光线延续），承接即刻完成、不设冻结期，本镜动作与台词可从第 0 秒直接开始
 3. 视觉锁定：角色必须用 "exactly as shown" + 完整外貌（物种/颜色/耳朵/眼睛/腮红/鼻子/嘴巴/轮廓/服装逐部位描写）。【外貌内容硬约束】描写内容必须【逐字复制】资产清单中该角色的 description（有参考图的角色同样如此：文字特征与参考图互为双重锚定，参考图本身也从该 description 生成）——它是角色唯一权威外貌；清单里没有的特征（帽子、服装、性别、年龄、体型等）绝对禁止自行添加，禁止为了让画面更"有趣"而改编角色形象
 4. 道具专属：每个道具声明 "belongs exclusively to @XX"，其他角色 "paws/hands remain empty"。【有参考图的道具】外观以参考图为准，不要描写外观细节
 5. 动作微分解：道具动作必须拆成 动作方式(gently/slowly) → 最终状态(rests upright/stands steady) → 材质确认(weave/color unchanged) → 否定约束(does not fall/disappear/change hands) 四段
@@ -1622,12 +1569,12 @@ export async function generateStoryboard(script, style = config.defaultArtStyle,
 每个镜头必须输出以下字段：
 - shotType: 景别 全景/中景/近景/特写
 - startTime/endTime: 时间轴（秒，整数），duration = endTime - startTime，范围 4-15 秒
-- description: 中文画面描述。【硬约束·必读】必须是一句连贯叙事，【40-80 字】，不能短于 30 字也不能超 100 字；用 @角色名 / @道具名 / @场景名 标记每一个出现的资产；严禁：换行/分段/列表/项目符号/JSON 风格、"音效：..."/"角色：..."/"场景：..."/"BGM：..."/"画面：..." 等任何带冒号的段落小标题、"（无 BGM 配乐）"这类元注释、英文 AI prompt 词汇（Audio/Visual/Camera/Characters 等）、【结构性标记，会原样泄漏进出片提示词】"模块1~6"/"Module 1~6"/"Airlock"/"At 00:02.000"这类时间戳/结构名/字段名（shotType/finalFrame/cameraMovement 等）、把 integratedMultimodalDescription 的内容塞进来。正确示例："@角色乙 踩着 @道具丙 沿 @地点丙 滑行，@角色甲 从后面跃上 @角色乙 的背。"；错误示例（绝不能这样写）："音效：海浪、海风、海鸥"（这是 overallSoundscape）、"角色甲：浅棕色幼犬团子..."（这是 integratedMultimodalDescription 模块2）、"模块1 [Shot 1] 全景..."（结构标记，出片时会被翻译成噪音）。【摄影落点】景深/影调/光质/焦段质感写进本字段（10-15 字，如"侧逆光勾出轮廓，背景虚化"），不要只写进模块3——出片提示词不读模块3
+- description: 中文画面描述。【硬约束·必读】必须是一句连贯叙事，【40-80 字】，不能短于 30 字也不能超 100 字；用 @角色名 / @道具名 / @场景名 标记每一个出现的资产；严禁：换行/分段/列表/项目符号/JSON 风格、"音效：..."/"角色：..."/"场景：..."/"BGM：..."/"画面：..." 等任何带冒号的段落小标题、"（无 BGM 配乐）"这类元注释、英文 AI prompt 词汇（Audio/Visual/Camera/Characters 等）、【结构性标记，会原样泄漏进出片提示词】"模块1~6"/"Module 1~6"/"At 00:02.000"这类时间戳/结构名/字段名（shotType/finalFrame/cameraMovement 等）、把 integratedMultimodalDescription 的内容塞进来。正确示例："@角色乙 踩着 @道具丙 沿 @地点丙 滑行，@角色甲 从后面跃上 @角色乙 的背。"；错误示例（绝不能这样写）："音效：海浪、海风、海鸥"（这是 overallSoundscape）、"角色甲：浅棕色幼犬团子..."（这是 integratedMultimodalDescription 模块2）、"模块1 [Shot 1] 全景..."（结构标记，出片时会被翻译成噪音）。【摄影落点】景深/影调/光质/焦段质感写进本字段（10-15 字，如"侧逆光勾出轮廓，背景虚化"），不要只写进模块3——出片提示词不读模块3
 - purpose: 【必填】本镜叙事任务（中文一句话，10-30字）：这个镜头承担的叙事功能、"为什么切这一刀"，如"建立空间关系""危机升级推动逃跑决定""反应镜头承接发现"
 - goal: 【必填】观众任务（中文一句话，10-30字）：本镜结束时观众应获得的信息增量或情绪变化，如"知道篮里装的是过冬食物""为角色乙的安危担忧"
 - emotionTone: 【必填】本镜情绪基调（中文2-6字），如"克制不安""明快温暖""压抑紧绷""释然"
 - infoPoints: 【必填】本镜必须让观众看清的关键信息点（中文短语数组，0-3个；纯氛围镜可为空数组）。【硬约束】每个信息点都必须织入 description 或 actionNote 的可见描写中——出片提示词只从这两个字段取料，信息点只写在本字段而不进画面描写，等于没写
-- worldStateOut: 【必填】本镜结束瞬间的实体状态快照（中文，分号分隔的紧凑格式）：列出每个出场角色的"画面位置·手持·朝向"和每个关键道具的"位置·状态"。这是镜间一致性校验与下一镜 Airlock 继承的结构化依据，必须与 finalFrame 完全一致。示例："@角色甲：画面左·右手持@道具甲·面向右；@角色乙：画面右·手空·面向左；@道具甲：@角色甲右手·直立"
+- worldStateOut: 【必填】本镜结束瞬间的实体状态快照（中文，分号分隔的紧凑格式）：列出每个出场角色的"画面位置·手持·朝向"和每个关键道具的"位置·状态"。这是镜间一致性校验与下一镜画面承接的结构化依据，必须与 finalFrame 完全一致。示例："@角色甲：画面左·右手持@道具甲·面向右；@角色乙：画面右·手空·面向左；@道具甲：@角色甲右手·直立"
 - actionNote: 【必填·本镜镜内时间轴】动作说明，按拍点写（中文）：「At X.Xs，动作」。例「0-2s 保持静止；At 2.0s 攥紧信纸；At 4.5s 抬头看向门口；末 0.8s 静止无动作」。本字段是【出片提示词的时间轴来源】——拍点、运镜三段式起止时刻、留白秒数都写在这里。（写进 integratedMultimodalDescription 模块4 对出片无效：出片提示词不读模块4。）
 - cameraMovement: 固定/推近/拉远/变焦推近/变焦拉远/左摇/右摇/左移/右移/摇上/摇下/升高/降低/环绕/跟拍/手持跟拍/主观/滚转【运镜规则】本字段为单值，只填一个运镜（H3 官方运镜规范 base-en.txt §4.3：运动类型 + 幅度 small/large + 速度 slow/fast 三维，出片时写成画面描述的自然英文句，禁止句尾堆标签）。情绪升级/震惊发现/危机逼近用快速变体（急推/快推/急拉/快甩/快摇左/快摇右/急移左/急移右/急摇上/急升/急降/急环绕/急跟）；安静抒情/情绪沉淀段落用缓慢变体（缓推/缓拉/缓摇左/缓摇右/缓移左/缓移右/缓摇上/缓升/缓降/缓环绕/缓跟/缓变焦）；移动段落用跟拍或手持跟拍。俯拍/仰拍是机位朝向不是运镜，写进 camera_angle，不要写在这里
 - camera_angle: 机位朝向，六选一：正面/侧面/背面/过肩/俯拍/仰拍（必须与运镜语义一致，见上方【机位朝向硬约束】；出片靠这个字段锚定首帧朝向，缺失会导致朝向被参考图带偏）
@@ -1637,12 +1584,10 @@ export async function generateStoryboard(script, style = config.defaultArtStyle,
 - isCombat: 【必填】本镜戏型布尔值。true=武戏（有肢体冲突/物理撞击/打斗/变身/狂暴/追击/破坏等动作对抗），false=文戏（对话、情绪、观望、行走、静态展示等无对抗动作）。判定看【本镜自身内容】，不要看场次号或它在剧本里的位置。出片时武戏会加载打斗 LoRA，文戏不加载，判错会直接毁掉画面调性，务必准确。
 - dialogue: ${dialogueRule()}
 - characters/sceneAssets/propAssets: 资产名数组。${assetNameRule()}${characterCoverageRule()}无法确定某个名字是否在清单里时，宁可不列也不要猜
-- finalFrame: 【必填】本镜最终画面精确描述（英文）：每个角色的精确位置和朝向、每个道具的精确位置和状态、环境光照氛围、角色表情。这是下一镜 Airlock 继承的依据。【摄影落点】光位 + 绝对方向 + 色温必须同时写全（如 "warm golden light from frame left"）——只写色温不写方向等于没声明，出图时光源位置会随参考图漂移。【画面地理硬约束】每个可见角色必须带画面侧位（at frame left / at frame right / at center frame）与视线锚物（gazes toward @角色/具体物体），并至少声明一个不动环境锚点的画面位置，详见上方【画面地理硬约束（Frame Geography）】。
+- finalFrame: 【必填】本镜最终画面精确描述（英文）：每个角色的精确位置和朝向、每个道具的精确位置和状态、环境光照氛围、角色表情。这是下一镜画面承接的依据。【摄影落点】光位 + 绝对方向 + 色温必须同时写全（如 "warm golden light from frame left"）——只写色温不写方向等于没声明，出图时光源位置会随参考图漂移。【画面地理硬约束】每个可见角色必须带画面侧位（at frame left / at frame right / at center frame）与视线锚物（gazes toward @角色/具体物体），并至少声明一个不动环境锚点的画面位置，详见上方【画面地理硬约束（Frame Geography）】。
 - integratedMultimodalDescription: 【必填】给 AI **图像**模型使用的完整多模态提示词（用途：生成分镜图 / 首帧 / 尾帧锚），必须严格按以下 6 模块结构书写（英文，用换行分隔）。【重要·落点】出片（视频）提示词**不读本字段**——它是按 shot_type / description / action_note / camera_movement / camera_angle / finalFrame 重建的。因此：留白、镜内拍点、运镜三段式起止时刻写入 actionNote；景深/影调/光质/焦段质感写入 description；光位+方向+色温写入 finalFrame。只写在本字段里的时间维度内容对出片无效。【篇幅硬约束】每个模块 1-2 句，整段不超过 220 词——超长会被输出截断导致整体失败，精炼比详尽更重要：
 
   ${integratedModulesRule()}
-
-${airlockRule()}
 
 ${timelineRule()}
 
@@ -1684,7 +1629,7 @@ ${timelineRule()}
 ${sceneScope
 ? `${style ? `画风：${style}。` : ''}【本场范围】${sceneScope.title
 ? `整个剧本共 ${sceneScope.total} 个场次，你只负责第 ${sceneScope.index} 场「${sceneScope.title}」。输出的 scenes 数组必须包含且仅包含 1 个场次对象，其 title 必须是「${sceneScope.title}」。`
-: `整份剧本没有分场标记，已被自动切成 ${sceneScope.total} 个连续部分，你只负责第 ${sceneScope.index} 部分。输出的 scenes 数组必须包含且仅包含 1 个场次对象，title 请根据该部分剧情自行概括（2-8 个字）。`}${sceneScope.perSceneDuration ? `本场内容量参考约 ${sceneScope.perSceneDuration} 秒——★这是【长度参考】，不是镜头数目标：不要用"时长÷单镜"反推镜头数，镜头数完全由任务边界决定。单镜 4-15 秒。【镜头数纪律】默认一个连续任务只出一条镜头（8-15s，运镜承载过渡）；同一主体、同一空间、同一目的下的连续动作必须一镜到底，只有切镜能挣得新主体/新信息/新情绪收益时才切。切碎没有补救——在这一步就切对，宁少勿多。` : '本场镜头数不设配额，完全由任务边界决定：连续动作/情绪优先一镜到底（单镜 4-15s），只有新主体、新信息、新情绪收益时才切，宁少勿多。'}${sceneScope.prevFinalFrame ? `\n【跨场衔接】上一场最后一个镜头的最终画面：${sceneScope.prevFinalFrame}\n本场第一个镜头的 integratedMultimodalDescription 必须以 Airlock 开头（完整复刻上述 finalFrame 画面，2 秒内只允许呼吸/视线偏移/重心转移等微动作），保证跨场画面连续。` : ''}`
+: `整份剧本没有分场标记，已被自动切成 ${sceneScope.total} 个连续部分，你只负责第 ${sceneScope.index} 部分。输出的 scenes 数组必须包含且仅包含 1 个场次对象，title 请根据该部分剧情自行概括（2-8 个字）。`}${sceneScope.perSceneDuration ? `本场内容量参考约 ${sceneScope.perSceneDuration} 秒——★这是【长度参考】，不是镜头数目标：不要用"时长÷单镜"反推镜头数，镜头数完全由任务边界决定。单镜 4-15 秒。【镜头数纪律】默认一个连续任务只出一条镜头（8-15s，运镜承载过渡）；同一主体、同一空间、同一目的下的连续动作必须一镜到底，只有切镜能挣得新主体/新信息/新情绪收益时才切。切碎没有补救——在这一步就切对，宁少勿多。` : '本场镜头数不设配额，完全由任务边界决定：连续动作/情绪优先一镜到底（单镜 4-15s），只有新主体、新信息、新情绪收益时才切，宁少勿多。'}${sceneScope.prevFinalFrame ? `\n【跨场衔接】上一场最后一个镜头的最终画面：${sceneScope.prevFinalFrame}\n本场第一个镜头的开场构图以该最终画面为参考（人物姿态、位置、构图、光线延续），承接即刻完成，不设冻结期，动作与台词可从第 0 秒直接开始。` : ''}`
 : `${style && targetDuration ? `画风：${style}。【时长目标】整个分镜总时长控制在 ${targetDuration} 秒左右（允许 ±10% 浮动）。★这是【总长度参考】，不要用"时长÷单镜"反推镜头数——镜头数完全由任务边界决定。【镜头数纪律】默认一个连续任务只出一条镜头（8-15s，运镜承载过渡），同一主体/空间/目的下的连续动作必须一镜到底，只有新主体/新信息/新情绪收益才切镜。切碎没有补救，宁少勿多。注意：时长约束只能压缩每场的镜头数，【绝对不允许删减、合并或跳过任何场次】。` : `画风：${style}。镜头数不设每场配额，完全由任务边界决定：连续动作/情绪优先一镜到底（单镜 4-15s），只有新主体、新信息、新情绪收益时才切，宁少勿多。`}
 
 ${scriptSceneTitles.length ? `【场次结构硬约束】剧本共 ${scriptSceneTitles.length} 个场次，你的输出 scenes 数组必须与之【一一对应】：数量相同、顺序相同、标题对应。分镜场次清单（必须全部出现，一个都不能少，也不能新增）：
@@ -1783,10 +1728,10 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     }
     const parallelScenes = config.storyboard?.parallel !== false
 
-    // 镜头合并引擎入口（分场模式）：全部分场生成完毕后、Airlock 跨场修补前执行。
+    // 镜头合并引擎入口（分场模式）：全部分场生成完毕后执行。
     // 连续叙事默认合并（黑名单制）——同场景+主体连续+非对话反打的连续戏合成一条长镜；
-    // 合并后 QC 硬错误增加则整体回退。首镜不再设保护：合并首镜的跨场 Airlock 衔接改由
-    // 下方修补段按 mergedFrom 标记跳过（修补器按单镜语义改写，对合并镜会错位）。
+    // 合并后 QC 硬错误增加则整体回退。首镜参与合并扩展（跨场衔接由尾帧参考图承担，
+    // 出片侧 continuity 锚图 + "begins from <Picture N>" 承接句已覆盖，无需文本冻结段）。
     const mergeAllScenes = () => {
       if (config.storyboard?.shotMerge === false) return
       // 合并判定日志落盘（生产可观测性）：把每对的判定结果与字段快照写入 generated/logs/，
@@ -1833,6 +1778,7 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
         }
         const { storyboard: merged, mergedCount, mergeLog } = applyShotMergeToStoryboard({ scenes: allScenes }, {
           durationMax: config.storyboard?.durationMax ?? 15,
+          dialogueReverseBlock: config.storyboard?.dialogueReverseBlock === true,
         })
         if (mergedCount <= 0) {
           dumpMergeLog('nomerged', { tag: 'mergedCount=0', note: '判定无可合并对（全部被拒）', decisions: mergeLog, before: snapShots(allScenes) })
@@ -1868,6 +1814,37 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
       }
     }
 
+    // QC 修复链（定点修补 → 整场重跑）全部失败时的兜底标记：不再静默采纳带病分镜。
+    // 未解决错误写到镜头对象 qcStatus/qcReport，随保存落库（qc_status='fail'），QC 面板按镜号可见。
+    // 2026-09-24 前行为：console.warn 后原版直接落库，带病数据无声进库、带病出片。
+    function markSceneQcUnresolved(scene, qc) {
+      const now = new Date().toISOString()
+      const byShot = new Map()
+      for (const c of qc.codedErrors || []) {
+        const items = byShot.get(c.shot) || []
+        items.push({ code: c.code, level: 'error', title: qcMeta(c.code)?.title || c.code, message: c.message })
+        byShot.set(c.shot, items)
+      }
+      const shots = scene.shots || []
+      if (byShot.size === 0) {
+        // 无码硬错误（MUST_FIX：字段缺失等）：无法定位到具体镜，整场标记
+        const items = (qc.errors || []).map((message) => ({ code: 'MUST_FIX', level: 'error', title: qcMeta('MUST_FIX')?.title || '必须修', message }))
+        const report = JSON.stringify({ checkedAt: now, source: 'generate-unresolved', items })
+        for (const sh of shots) { sh.qcStatus = 'fail'; sh.qcReport = report }
+        return
+      }
+      let n = 0
+      for (const sh of shots) {
+        n++
+        const label = sh.shotNumber || sh.shot_number || `scene${scene.sceneNumber || scene.scene_number || ''}-shot${n}`
+        const items = byShot.get(label)
+        if (items) {
+          sh.qcStatus = 'fail'
+          sh.qcReport = JSON.stringify({ checkedAt: now, source: 'generate-unresolved', items })
+        }
+      }
+    }
+
     const generateSceneAt = async (i, prevFinalFrame) => {
       const scope = {
         title: sceneBlocks[i].title,
@@ -1892,8 +1869,9 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
       let scene = r.storyboard.scenes[0]
       let sceneSource = r
 
-      const sceneQc = validateStoryboard({ scenes: [scene] }, assets, { projectStyleText: styleForPoison })
-      if (sceneQc.errors.length) {
+      const sceneQc = validateStoryboard({ scenes: [scene] }, assets, { projectStyleText: styleForPoison, scriptText: scope.text })
+      let qcClean = sceneQc.errors.length === 0
+      if (!qcClean) {
         console.warn(`[generateStoryboard] 第 ${i + 1} 场 QC 发现 ${sceneQc.errors.length} 个硬错误:`, sceneQc.errors.join('; '))
         // 先试定点修补：只回炉报错的镜头，避免整场重发（整场输入约 2.2 万 tokens、单次 150s+）。
         // 修补内部已含整场复检；任一步不通过则 repaired 为 null，落到下面的整场重跑兜底。
@@ -1903,6 +1881,7 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
           if (repaired) {
             console.log(`[generateStoryboard] 第 ${i + 1} 场 QC 定点修补通过（镜头 ${repaired.labels.join('、')}）`)
             scene = repaired.scene
+            qcClean = true
           } else {
             console.warn(`[generateStoryboard] 第 ${i + 1} 场 QC 定点修补未通过，回退整场重跑`)
           }
@@ -1911,12 +1890,17 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
           const r2 = await buildAndRun(qcRetryNote(sceneQc), scope)
           if (!r2.parseError && r2.storyboard.scenes.length) {
             const scene2 = r2.storyboard.scenes[0]
-            if (!validateStoryboard({ scenes: [scene2] }, assets, { projectStyleText: styleForPoison }).errors.length) {
+            if (!validateStoryboard({ scenes: [scene2] }, assets, { projectStyleText: styleForPoison, scriptText: scope.text }).errors.length) {
               scene = scene2
               sceneSource = r2
+              qcClean = true
             }
           }
         }
+      }
+      if (!qcClean) {
+        console.warn(`[generateStoryboard] 第 ${i + 1} 场 QC 未解决（定点修补与整场重跑均未通过），已标记 QC 失败待人工确认:`, sceneQc.errors.join('; '))
+        markSceneQcUnresolved(scene, sceneQc)
       }
 
       if (scope.title) scene.title = scope.title 
@@ -1953,7 +1937,7 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
       }
       mergeAllScenes()
     } else {
-      console.log(`[generateStoryboard] 两阶段并行：${sceneBlocks.length} 场同时发起，完成后进入阶段 2（Airlock 衔接修补）`)
+      console.log(`[generateStoryboard] 两阶段并行：${sceneBlocks.length} 场同时发起，完成后进入归一化`)
       let doneCount = 0
       const results = await Promise.all(sceneBlocks.map(async (_, i) => {
         const r = await generateSceneAt(i, '')
@@ -1974,61 +1958,9 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
 
       mergeAllScenes()
 
-      const airlockTotal = Math.max(0, allScenes.length - 1)
-      let airlockDone = 0
-      report({ phase: PHASE.AIRLOCK, done: 0, total: airlockTotal, message: `全部分场已生成，正在做跨场画面衔接修补：0/${airlockTotal}` })
-      await Promise.all(allScenes.map(async (scene, i) => {
-        if (i === 0) return
-        const prevShots = allScenes[i - 1].shots || []
-        const prevFinal = prevShots.length ? prevShots[prevShots.length - 1].finalFrame : ''
-        const firstShot = (scene.shots || [])[0]
-        if (!prevFinal || !firstShot) {
-          airlockDone++
-          report({ phase: PHASE.AIRLOCK, done: airlockDone, total: airlockTotal, message: `跨场画面衔接修补中：${airlockDone}/${airlockTotal}` })
-          return
-        }
-        // 合并镜首镜跳过跨场 Airlock 修补：修补器按「前2秒复刻上场末帧、其后过渡到本镜原稿」的单镜语义改写，
-        // 对内容跨度=两镜的合并镜会错位。合并镜的跨场衔接缺口记为已知项（与合并镜 IMD 取后镜同源，出片不受影响）。
-        if (firstShot.mergedFrom) {
-          console.log(`[generateStoryboard] 第 ${i + 1} 场首镜为合并镜（${firstShot.mergedFrom}），跳过跨场 Airlock 修补`)
-          airlockDone++
-          report({ phase: PHASE.AIRLOCK, done: airlockDone, total: airlockTotal, message: `跨场画面衔接修补中：${airlockDone}/${airlockTotal}` })
-          return
-        }
-        try {
-          const AIRLOCK_HARD_CAP_MS = 240000
-          // 与 checkAirlockInheritance 同一口径：上一镜末帧里的登记角色必须全部出现在改写后 IMD
-          const airlockCharSet = new Set((assets?.characters || []).map((c) => c.name).filter(Boolean))
-          const requiredChars = extractMentions(prevFinal).filter((m) => airlockCharSet.has(m))
-          const repair = repairShotAirlock(firstShot, prevFinal, style, requiredChars)
-          repair.catch(() => {})
-          const rewritten = await Promise.race([
-            repair,
-            new Promise((resolve) => setTimeout(() => resolve(null), AIRLOCK_HARD_CAP_MS)),
-          ])
-          if (!rewritten) {
-            airlockDone++
-            report({ phase: PHASE.AIRLOCK, done: airlockDone, total: airlockTotal, message: `跨场画面衔接修补中：${airlockDone}/${airlockTotal}` })
-            return
-          }
-          const candidate = { ...firstShot, integratedMultimodalDescription: rewritten }
-          const qc = validateStoryboard(
-            { scenes: [{ ...scene, shots: [candidate, ...scene.shots.slice(1)] }] },
-            assets,
-            { projectStyleText: styleForPoison }
-          )
-          if (!qc.errors.length) {
-            scene.shots[0] = candidate
-            console.log(`[generateStoryboard] 第 ${i + 1} 场首镜 Airlock 衔接已修补`)
-          } else {
-            console.warn(`[generateStoryboard] 第 ${i + 1} 场 Airlock 修补未过 QC，保留原版首镜:`, qc.errors.join('; '))
-          }
-        } catch (e) {
-          console.warn(`[generateStoryboard] 第 ${i + 1} 场 Airlock 修补失败，保留原版首镜:`, e.message)
-        }
-        airlockDone++
-        report({ phase: PHASE.AIRLOCK, done: airlockDone, total: airlockTotal, message: `跨场画面衔接修补中：${airlockDone}/${airlockTotal}` })
-      }))
+      // 跨场衔接由「尾帧参考图 + 提示词承接句」承担，无跨场文本修补阶段
+      //（原 Airlock 跨场修补链已于 2026-09-24 事故整改中整体废除，不再有任何跨场文本改写/修补。）
+      console.log('[generateStoryboard] 跳过跨场文本修补：跨场衔接改由尾帧参考图 + 提示词承接句承担')
 
       if (config.storyboard?.fixAxis !== false) {
         const charNames = (assets?.characters || []).map((c) => c.name).filter(Boolean)
@@ -2071,6 +2003,7 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     try {
       const { storyboard: merged, mergedCount, mergeLog } = applyShotMergeToStoryboard(sb, {
         durationMax: config.storyboard?.durationMax ?? 15,
+        dialogueReverseBlock: config.storyboard?.dialogueReverseBlock === true,
       })
       if (mergedCount <= 0) return sb
       const beforeQc = runStoryboardQC(sb, assets, styleForPoison)
@@ -2384,7 +2317,7 @@ export async function regenerateShot(ctx, assets, style = '', opts = {}) {
   const durationLock = `【时长硬约束】本镜 duration 固定为 ${duration} 秒，禁止改变（时轴由系统管理，AI 只负责在此时长内完成调度）。本镜在全片时间轴上从第 ${baseStart} 秒开始、第 ${baseStart + duration} 秒结束；镜 startTime 输出 ${baseStart}，台词 startTime 用全片绝对秒（介于 ${baseStart} 与 ${baseStart + duration} 之间）。`
 
   const prevBlock = prev
-    ? regenCtxBlock(`上一镜（${prev.shotNumber || ''}）· 本镜开头必须 Airlock 复刻其最终画面`, [
+    ? regenCtxBlock(`上一镜（${prev.shotNumber || ''}）· 本镜开场构图承接其最终画面`, [
         ['最终画面 finalFrame', prev.finalFrame],
         ['出场状态 worldStateOut', prev.worldStateOut],
       ])
@@ -2426,7 +2359,6 @@ ${editRule()}
 ${cinematographyRule()}
 ${styleLockRule(style, opts.styleCategory || '')}
 ${durationLock}
-${prev ? airlockRule() : ''}
 
 【重写边界】
 - 保持本镜的叙事任务（purpose/goal/emotionTone/infoPoints）不变，除非用户指令明确要求调整；

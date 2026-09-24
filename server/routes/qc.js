@@ -19,7 +19,6 @@ import {
   estimateShotVideoPromptChars,
 } from '../ai/storyboardValidator.js'
 import {
-  repairShotAirlock,
   repairShotAxis,
   rewriteShotMusic,
   enrichShotIntegrated,
@@ -180,10 +179,13 @@ export function clearQcIgnores(episodeId) {
 function buildQcReport(episodeId, opts = {}) {
   const { scenes, sceneRows, shotIndex } = loadEpisodeShots(episodeId)
   const assetNames = loadAssetNames(episodeId)
+  // 台词逐字对账的原文真源：与本集剧本逐字比对（与生成管线同口径，见 validator.checkDialogueVerbatim）
+  const episodeRow = queryOne('SELECT script_content FROM episodes WHERE id = ?', [episodeId])
+  const scriptText = String(episodeRow?.script_content || '')
   const qc = validateStoryboard(
     { scenes },
     { characters: assetNames.characters, scenes: assetNames.scenes, props: assetNames.props },
-    { projectStyleText: assetNames.projectStyleText, projectStyleCategory: assetNames.projectStyleCategory, sceneRows }
+    { projectStyleText: assetNames.projectStyleText, projectStyleCategory: assetNames.projectStyleCategory, sceneRows, scriptText }
   )
   const continuity = collectContinuityWarnings(episodeId)
   qc.warnings.push(...continuity.warnings)
@@ -294,37 +296,6 @@ const REFRAME_ANGLES_ANY = ['正面', '侧面', '过肩', '背面', '俯拍', '�
 const REFRAME_ANGLES_DIALOGUE = ['正面', '侧面', '过肩']
 
 const FIX_HANDLERS = {
-  [QC_ACTION.AIRLOCK_LINK]: async (episodeId, items, ctx) => {
-    const details = []
-    let fixed = 0
-    let failed = 0
-    for (const it of items) {
-      const entry = findShotEntry(episodeId, ctx, it.shot)
-      if (!entry) { failed++; details.push({ shot: it.shot, ok: false, reason: '镜头不存在' }); continue }
-      const { sceneIdx, shot, raw } = entry
-      const prev = prevShotOf(episodeId, ctx, sceneIdx, shot)
-      if (!prev) { failed++; details.push({ shot: it.shot, ok: false, reason: '没有上一镜（本镜是全集首镜）' }); continue }
-      const prevFinal = prev.shot.finalFrame || ''
-      if (!prevFinal) { failed++; details.push({ shot: it.shot, ok: false, reason: '上一镜没有最终画面描述（final_frame 为空），无法复刻' }); continue }
-      // 与 checkAirlockInheritance 同一口径：上一镜末帧里的登记角色必须全部出现在改写后 IMD，
-      // 否则只验 "Airlock:" 开头会让丢角色的改写蒙混过关、复检照样告警。
-      const airlockCharSet = new Set((ctx.assetNames.characters || []).map((c) => c.name).filter(Boolean))
-      const requiredChars = extractMentions(prevFinal).filter((m) => airlockCharSet.has(m))
-      try {
-        const rewritten = await repairShotAirlock(shot, prevFinal, ctx.style, requiredChars)
-        if (!rewritten) { failed++; details.push({ shot: it.shot, ok: false, reason: 'AI 未产出有效的 Airlock 改写' }); continue }
-        execute('UPDATE shots SET integrated_multimodal_description = ? WHERE id = ?', [rewritten, raw.id])
-        shot.integratedMultimodalDescription = rewritten
-        fixed++
-        details.push({ shot: it.shot, ok: true })
-      } catch (e) {
-        failed++
-        details.push({ shot: it.shot, ok: false, reason: e.message })
-      }
-    }
-    return { fixed, failed, details }
-  },
-
   [QC_ACTION.AXIS_REPOSITION]: async (episodeId, items, ctx) => {
     const details = []
     let fixed = 0
@@ -447,7 +418,7 @@ const FIX_HANDLERS = {
       const shotEnd = Number(shot.endTime)
       if (!Number.isFinite(shotStart) || !Number.isFinite(shotEnd) || shotEnd <= shotStart) {
         failed++
-        details.push({ shot: it.shot, ok: false, reason: '镜头起止时间缺失或无效，无法计算禁语期' })
+        details.push({ shot: it.shot, ok: false, reason: '镜头起止时间缺失或无效，无法重排台词时间戳' })
         continue
       }
       const wasArray = Array.isArray(shot.dialogue)
@@ -459,14 +430,16 @@ const FIX_HANDLERS = {
         details.push({ shot: it.shot, ok: true, note: '本镜已无有效台词，问题已不存在' })
         continue
       }
-      const airlockEnd = round1(shotStart + AIRLOCK_SEC)
+      // 台词排序下界：默认 AIRLOCK_SEC=0 时退化为 shotStart（仅保证多句台词先后不重叠）；
+      // AIRLOCK_SEC>0 时等价旧 Airlock 禁语期起点（仅作旧行为对照）。
+      const speechFloor = round1(shotStart + AIRLOCK_SEC)
       const ordered = list
         .map((d, i) => ({ d, i, start: Number(d?.startTime) }))
         .filter((x) => Number.isFinite(x.start))
         .sort((a, b) => a.start - b.start || a.i - b.i)
       const out = list.slice()
       let changed = false
-      let prevEnd = airlockEnd
+      let prevEnd = speechFloor
       let overflowEnd = null
       for (const r of ordered) {
         let newStart = r.start
@@ -492,20 +465,20 @@ const FIX_HANDLERS = {
         details.push({
           shot: it.shot,
           ok: false,
-          reason: `台词移出禁语期后预计结束 ${overflowEnd.toFixed(1)}s，超过镜尾 ${shotEnd}s——镜头空间不足，请加长镜头或精简台词`,
+          reason: `台词重排后预计结束 ${overflowEnd.toFixed(1)}s，超过镜尾 ${shotEnd}s——镜头空间不足，请加长镜头或精简台词`,
         })
         continue
       }
       if (!changed) {
         fixed++
-        details.push({ shot: it.shot, ok: true, note: '台词已不在禁语期，问题已不存在' })
+        details.push({ shot: it.shot, ok: true, note: '台词时序已合规，问题已不存在' })
         continue
       }
       const payload = (!wasArray && out.length === 1) ? out[0] : out
       execute('UPDATE shots SET dialogue = ? WHERE id = ?', [JSON.stringify(payload), raw.id])
       shot.dialogue = payload
       fixed++
-      details.push({ shot: it.shot, ok: true, note: `台词已移出 ${shotStart}s–${airlockEnd}s 禁语期` })
+      details.push({ shot: it.shot, ok: true, note: `台词已重排到 ${speechFloor}s 之后` })
     }
     return { fixed, failed, details }
   },

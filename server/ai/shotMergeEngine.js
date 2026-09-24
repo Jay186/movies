@@ -95,7 +95,10 @@ function isDialogueReverse(prev, curr) {
 //   2. 场景不同（空间切换）
 //   3. 后镜引入新主体（新角色首次入画）
 //   4. 运镜对偶冲突（推近+拉远等方向相反组合，拼进一条语义矛盾）
-//   5. 对话反打（说话人切换）
+//   5. 对话反打（仅当 config.storyboard.dialogueReverseBlock=true；默认 false——
+//      对白驱动的连续戏若强制切镜，双主角对话场会被锁成 6-7s 短镜（2026-09-24 事故），
+//      H3 一镜多说话人由 v4Video 的 <d> 台词时间轴承载，合并收益远大于口型风险；
+//      且本引擎出口有 QC 前后对比守卫，合并引入的硬错误会整体回退）
 // 其余情况（景别变化、动作推进、结构词、单边台词、画面差异）一律默认合并——
 // 「运镜能带观众走到的，不用切镜去看」。
 export function canMergePair(prev, curr, opts = {}) {
@@ -108,7 +111,7 @@ export function canMergePair(prev, curr, opts = {}) {
   if (!sameScene(prev, curr)) return no('场景不同')
   if (!subjectsContinuous(prev, curr)) return no('后镜引入新主体')
   if (!movesCompatible(moveOf(prev), moveOf(curr))) return no(`运镜对偶冲突（${moveOf(prev)} + ${moveOf(curr)}）`)
-  if (isDialogueReverse(prev, curr)) return no('对话反打（说话人切换）')
+  if (opts.dialogueReverseBlock && isDialogueReverse(prev, curr)) return no('对话反打（说话人切换）')
   return { mergeable: true, why: '连续叙事默认合并', sim: 1 }
 }
 

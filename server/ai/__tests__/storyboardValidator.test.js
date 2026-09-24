@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
+import { config } from '../../config.js'
 import {
   validateShot,
   validateStoryboard,
@@ -181,16 +182,31 @@ describe('validateShot', () => {
     assert.ok(codes(r.warnings).includes('DURATION_OUT_OF_RANGE'))
   })
 
-  test('台词落在 Airlock 禁语期内判错并带 QC 码', () => {
+  // Airlock 开场冻结已整体废除，默认 AIRLOCK_SEC=0：不再有开场禁语期，台词从第 0 秒即可开说。
+  test('默认 AIRLOCK_SEC=0：台词不受开场禁语期约束，不再报 DIALOGUE_IN_AIRLOCK', () => {
     const r = validateShot(makeShot({ dialogue: { character: '角色甲', text: '快跑啊', startTime: 1 } }))
-    assert.ok(r.errors.some((e) => /Airlock 禁语期/.test(e)))
-    assert.ok(r.codedErrors.some((c) => c.code === 'DIALOGUE_IN_AIRLOCK'))
+    assert.ok(!r.errors.some((e) => /禁语期/.test(e)))
+    assert.ok(!r.codedErrors.some((c) => c.code === 'DIALOGUE_IN_AIRLOCK'))
   })
 
-  test('台词移到 Airlock 之后即放行', () => {
+  test('默认 AIRLOCK_SEC=0：开场即台词（startTime 靠前）也放行', () => {
     const r = validateShot(makeShot({ dialogue: { character: '角色甲', text: '快跑啊', startTime: 3 } }))
     assert.deepEqual(r.errors, [])
     assert.ok(!r.codedErrors.some((c) => c.code === 'DIALOGUE_IN_AIRLOCK'))
+  })
+
+  // 回退路径对照：AIRLOCK_SEC>0（旧 Airlock 冻结模式）时开场禁语期判定仍生效。
+  // validator 在判定时读取当前 config，故可在同进程内临时切换 config.storyboard.airlockSec 复现旧口径。
+  test('AIRLOCK_SEC>0 时台词落在开场禁语期仍判错（旧行为对照）', () => {
+    const original = config.storyboard.airlockSec
+    try {
+      config.storyboard.airlockSec = 2
+      const r = validateShot(makeShot({ dialogue: { character: '角色甲', text: '快跑啊', startTime: 1 } }))
+      assert.ok(r.errors.some((e) => /禁语期/.test(e)))
+      assert.ok(r.codedErrors.some((c) => c.code === 'DIALOGUE_IN_AIRLOCK'))
+    } finally {
+      config.storyboard.airlockSec = original
+    }
   })
 
   test('台词时间戳超出本镜范围给出 DIALOGUE_TIME_OUT_OF_RANGE', () => {
