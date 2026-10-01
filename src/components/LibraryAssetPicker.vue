@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { api } from '../services/api'
 import { toastError } from '../services/dialog'
 import UploadAssetDialog from './UploadAssetDialog.vue'
+import { assetLabel } from '../constants/assetTypes'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -25,7 +26,7 @@ const selectedId = ref(null)
 const showUploadDialog = ref(false)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
-const typeLabel = computed(() => ({ character: '角色', scene: '场景', prop: '道具' }[activeType.value]))
+const typeLabel = computed(() => assetLabel(activeType.value))
 
 function displayName(item) {
   const n = String(item.name || '').trim()

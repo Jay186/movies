@@ -1,6 +1,42 @@
 
 import { execute, query, queryOne } from '../db.js'
 
+// —— 出片 prompt 降级 → 告警载荷 ——
+// 背景（2026-09-27 实拍事故）：dashscope 额度耗尽时 translate 返回空，中文 description 被
+// pickEnglish 静默丢弃，镜内叙事从未送达模型（实测某镜成片角色只是原地走动、并未按剧本执行指定动作）。
+// 组装器 v4Video 是纯函数（被估算器与测试复用），只通过 ctx.onDegrade 上报事实；
+// 载荷组装与文案在此收口，路由只负责在「重生成功清旧告警」之后落库。
+// 同一镜的多项降级**聚合成一条**，避免前端告警面板被刷屏。
+const PROMPT_DEGRADE_LABEL = {
+  'narrative-fallback': '镜内叙事由 IMD M2 兜底（动作时间轴不受影响）',
+  'narrative-lost': '镜内叙事缺失（IMD 无可用 M2）',
+  'worldstate-in-lost': '开场 0.00s 构图约束缺失（world_state_in 需 LLM 翻译，库内无英文副本）',
+  'worldstate-out-lost': '收尾构图约束缺失（world_state_out 需 LLM 翻译，库内无英文副本）',
+  'soundscape-lost': '声景段缺失（overall_soundscape 需 LLM 翻译，库内无英文副本）',
+}
+
+export function buildPromptDegradeAlert(degrades = [], { episodeId = null, shotId = null, shotNumber = '' } = {}) {
+  const list = Array.isArray(degrades) ? degrades : []
+  const kinds = [...new Set(list.map((d) => String(d?.kind || '')).filter(Boolean))]
+  if (!kinds.length) return null
+  // 未登记的 kind 回退成原名：不丢信息、不崩，方便新降级项上线时先跑通再补文案
+  const items = kinds.map((k) => PROMPT_DEGRADE_LABEL[k] || k)
+  const rescued = list.find((d) => d?.kind === 'narrative-fallback')
+  return {
+    episodeId,
+    shotId,
+    shotNumber,
+    source: 'prompt-degrade',
+    level: 'warn',
+    message: `镜 ${shotNumber} 出片 prompt 降级（LLM 无产出）：${items.join('；')}。建议恢复 LLM 或跑离线代理后重出本镜。`,
+    // detail 只给「有 M2 兜底」的项：它是唯一有可核对内容（兜底文本）的降级，
+    // 其余（world_state 缺失）没有文本可摘，写了也是空壳。截到 300 免得撑爆告警面板。
+    detail: rescued
+      ? `兜底叙事来源：${String(rescued.source || 'unknown').toUpperCase()} —— ${String(rescued.text || '').slice(0, 300)}`
+      : '',
+  }
+}
+
 export function recordAlert(a = {}) {
   try {
     const detail = a.detail == null

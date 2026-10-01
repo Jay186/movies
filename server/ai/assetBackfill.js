@@ -100,3 +100,38 @@ export function backfillSceneByTitle(shot, sceneTitle, sceneNames) {
   }
   return shot
 }
+
+function sceneValue(scene, ...keys) {
+  for (const key of keys) {
+    if (scene?.[key] !== undefined && scene?.[key] !== null && String(scene[key]).trim()) {
+      return String(scene[key]).trim()
+    }
+  }
+  return ''
+}
+
+// 镜头级空间字段必须来自已登记的场景资产；这里不推断新的空间类型。
+export function backfillShotSpaceFromScene(shot, scene) {
+  if (!shot || !scene) return shot
+  const spaceType = sceneValue(scene, 'spaceType', 'space_type')
+  const spaceEvidence = sceneValue(scene, 'spaceEvidence', 'space_evidence')
+  if (!String(shot.spaceType || shot.space_type || '').trim() && spaceType) shot.spaceType = spaceType
+  if (!String(shot.spaceEvidence || shot.space_evidence || '').trim() && spaceEvidence) shot.spaceEvidence = spaceEvidence
+  return shot
+}
+
+// 生成结果没有稳定的数据库 ID，因此按场次序号/标题匹配场景资产。
+export function backfillStoryboardSpace(storyboard, scenes = []) {
+  const candidates = Array.isArray(scenes) ? scenes : []
+  for (const [sceneIndex, scene] of (storyboard?.scenes || []).entries()) {
+    const sceneNumber = Number(scene?.sceneNumber ?? scene?.scene_number ?? sceneIndex + 1)
+    const title = String(scene?.title || '').trim()
+    const context = candidates.find((item, index) => {
+      const itemNumber = Number(item?.sceneNumber ?? item?.scene_number ?? index + 1)
+      const itemTitle = String(item?.name || item?.title || '').trim()
+      return itemNumber === sceneNumber || (title && itemTitle && (title === itemTitle || title.includes(itemTitle) || itemTitle.includes(title)))
+    })
+    for (const shot of scene?.shots || []) backfillShotSpaceFromScene(shot, context)
+  }
+  return storyboard
+}

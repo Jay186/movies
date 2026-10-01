@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { uploadsUrl, uploadsDir } from '../paths.js'
 import path from 'node:path'
 import fs from 'node:fs'
 import { query, queryOne, execute } from '../db.js'
@@ -6,18 +7,14 @@ import { query, queryOne, execute } from '../db.js'
 import { extractBlockingForScene, assembleBlockingPlan } from '../ai/doubao.js'
 import { assertScriptConfirmed } from '../ai/guards.js'
 import { uploadsUrlToAbs } from '../ai/shared.js'
-import { checkSeam, checkOpenerTone } from '../ai/seamCheck.js'
 import { listAlerts, countUnresolved, resolveAlert, resolveAlertsByShot, resolveAlertsByScene } from '../ai/alerts.js'
 import { mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
 import { measureLoudness, loudnormFilter, normalizeFinalLoudness, PER_SHOT_TARGET, FINAL_TARGET } from '../audioLoudnorm.js'
 import { runFfmpeg } from '../ai/ffmpeg.js'
-import { uploadsDir } from '../paths.js'
 
 const router = Router()
 
 fs.mkdirSync(uploadsDir, { recursive: true })
-
-
 
 router.get('/bgm-list', (req, res) => {
   try {
@@ -63,8 +60,22 @@ router.post('/alerts/resolve', (req, res) => {
   }
 })
 
+router.get('/video/compositions', (req, res) => {
+  const episodeId = Number(req.query.episodeId)
+  if (!episodeId) return res.status(400).json({ error: 'episodeId 必填' })
+  try {
+    const rows = query(
+      'SELECT * FROM compose_outputs WHERE episode_id = ? ORDER BY id DESC LIMIT 50',
+      [episodeId]
+    )
+    res.json({ compositions: rows })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 router.post('/video/compose', async (req, res) => {
-  const { episodeId, fade = true, bgm = '', loudnorm = true } = req.body
+  const { episodeId, fade = true, bgm = '', loudnorm = true, smoothSameScene = false } = req.body
   if (!episodeId) return res.status(400).json({ error: 'episodeId 必填' })
 
   let bgmPath = ''
@@ -72,13 +83,13 @@ router.post('/video/compose', async (req, res) => {
     const bgmName = path.basename(String(bgm).trim())
     const cand = path.join(uploadsDir, 'bgm', bgmName)
     if (bgmName !== String(bgm).trim() || !/\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(bgmName) || !fs.existsSync(cand)) {
-      return res.status(400).json({ error: `BGM「${bgm}」不可用。请把音频文件（mp3/wav/m4a 等）放进 server/uploads/bgm/ 目录后刷新重试` })
+      return res.status(400).json({ error: `背景音乐「${bgm}」不可用，请重新选择一个有效的音频文件（mp3/wav/m4a 等）后重试` })
     }
     bgmPath = cand
   }
 
   const allShots = query(
-    `SELECT s.id, s.shot_number, s.duration, s.video_url, s.is_combat, ss.scene_number
+    `SELECT s.id, s.shot_number, s.duration, s.video_url, s.seam_check, s.is_combat, ss.scene_number
      FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
      WHERE ss.episode_id = ?
      ORDER BY ss.scene_number, s.start_time, s.id`,
@@ -104,6 +115,7 @@ router.post('/video/compose', async (req, res) => {
         duration: dm ? dm[1].split(':').reduce((a, p) => a * 60 + Number(p), 0) : 0,
         w: vm ? Number(vm[1]) : 0,
         h: vm ? Number(vm[2]) : 0,
+        hasAudio: /Audio:/.test(s),
       }
     }
 
@@ -120,53 +132,83 @@ router.post('/video/compose', async (req, res) => {
     if (!target.w) return res.status(400).json({ error: '无法读取镜头视频信息（分辨率探测失败）' })
 
     const perShotLoud = { applied: 0, skipped: 0 }
-    const normList = []
-    for (const p of probes) {
-      const normPath = path.join(tmpDir, `${p.s.id}.mp4`)
-      const normArgs = [
-        '-y',
-        '-i', p.absSrc,
-        '-f', 'lavfi', '-t', '600', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-        '-map', '0:v:0', '-map', '0:a:0?',
-        '-vf', `scale=${target.w}:${target.h}:flags=lanczos,setsar=1`,
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '24', '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
-        '-shortest',
-        '-movflags', '+faststart',
-      ]
-      if (loudnorm) {
-        const lm = await measureLoudness(p.absSrc)
-        if (lm) {
-          normArgs.push('-af', loudnormFilter(lm, PER_SHOT_TARGET))
-          perShotLoud.applied++
-        } else {
-          perShotLoud.skipped++
+    const normList = new Array(probes.length)
+    // 归一化并行化：每镜一次独立 ffmpeg 转码，串行跑长剧要按分钟计；3 路并发兼顾速度与本机负载。
+    const NORM_CONCURRENCY = 3
+    let normCursor = 0
+    const normalizeOne = async () => {
+      while (normCursor < probes.length) {
+        const i = normCursor++
+        const p = probes[i]
+        const normPath = path.join(tmpDir, `${p.s.id}.mp4`)
+        // 合成时间轴以分镜 duration 为准。H3 返回视频可能略长，若直接 concat
+        // 实际文件会把后续镜头切点整体向后漂移，破坏分镜的 start/end 关系。
+        const targetDuration = Math.max(0.1, Number(p.s.duration) || p.duration || 0.1)
+        // 无音轨镜头用 anullsrc 垫静音（输入1），保证下游 chain 的 [i:a] 引用与
+        // concat 流的音频结构一致，不会因为某镜无声而炸 filter_complex。
+        const audioMap = p.hasAudio
+          ? ['-map', '0:v:0', '-map', '0:a:0?']
+          : ['-map', '0:v:0', '-map', '1:a:0']
+        const normArgs = [
+          '-y',
+          '-i', p.absSrc,
+          '-f', 'lavfi', '-t', '600', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
+          ...audioMap,
+          '-vf', `scale=${target.w}:${target.h}:flags=lanczos,setsar=1`,
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-r', '24', '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac', '-b:a', '128k', '-ar', '44100',
+          '-t', String(targetDuration),
+          '-shortest',
+          '-movflags', '+faststart',
+        ]
+        if (loudnorm) {
+          const lm = await measureLoudness(p.absSrc)
+          if (lm) {
+            normArgs.push('-af', loudnormFilter(lm, PER_SHOT_TARGET))
+            perShotLoud.applied++
+          } else {
+            perShotLoud.skipped++
+          }
         }
+        await runFfmpeg([...normArgs, normPath])
+        normList[i] = normPath
       }
-      await runFfmpeg([...normArgs, normPath])
-      normList.push(normPath)
     }
+    await Promise.all(Array.from({ length: Math.min(NORM_CONCURRENCY, probes.length) }, normalizeOne))
 
     const outName = `compose_${episodeId}_${Date.now()}.mp4`
     const outPath = path.join(uploadsDir, outName)
-    const FADE = 0.5
+    const DEFAULT_FADE = 0.5
+    // 同场切镜短 dissolve（smoothSameScene 开启时生效，2026-09-26 落地）：
+    // 相邻镜案例：luma 跳变已从 9.1 改善到 2.9 但视觉仍闪（景别/姿态跳变），
+    // 0.3s 软接续能平滑掉所有同场硬切的视觉跳变（亮度/构图/景别/姿态）。
+    // 默认关，避免影响需要硬切效果的成片。
+    const SAME_SCENE_FADE = 0.3
 
-    const dissolveAt = []
+    // dissolvePlan：每个拼接处决定是否软接续 + 接续时长。
+    // smart 模式：跨场且非武戏 → 0.5s 交叉淡化；同场硬切仅在 smoothSameScene 开启时
+    // 用 0.3s 短 dissolve 平滑（见 SAME_SCENE_FADE 注释）。
+    const dissolvePlan = []
     for (let i = 1; i < probes.length; i++) {
       const prev = probes[i - 1].s
       const cur = probes[i].s
       let dis
+      let fadeSec = DEFAULT_FADE
       if (fade === false) dis = false
       else if (fade === 'all') dis = true
       else {
         const crossScene = Number(prev.scene_number) !== Number(cur.scene_number)
         const hasCombat = Number(prev.is_combat) === 1 || Number(cur.is_combat) === 1
         dis = crossScene && !hasCombat
+        if (!dis && smoothSameScene) {
+          dis = true
+          fadeSec = SAME_SCENE_FADE
+        }
       }
-      dissolveAt.push(dis)
+      dissolvePlan.push({ dissolve: dis, fade: fadeSec })
     }
-    const dissolveCount = dissolveAt.filter(Boolean).length
-    const cutCount = dissolveAt.length - dissolveCount
+    const dissolveCount = dissolvePlan.filter((p) => p.dissolve).length
+    const cutCount = dissolvePlan.length - dissolveCount
     const useChain = dissolveCount > 0
     let finalSeconds = 0
 
@@ -184,11 +226,13 @@ router.post('/video/compose', async (req, res) => {
       let acc = durations[0] || 0
       for (let i = 1; i < normList.length; i++) {
         const tag = `j${i}`
-        if (dissolveAt[i - 1]) {
-          const offset = Math.max(0, acc - FADE).toFixed(3)
-          vChain.push(`${vLast}[vi${i}]xfade=transition=fade:duration=${FADE}:offset=${offset}[v${tag}]`)
-          aChain.push(`${aLast}[ai${i}]acrossfade=d=${FADE}[a${tag}]`)
-          acc = acc + durations[i] - FADE
+        const plan = dissolvePlan[i - 1]
+        if (plan.dissolve) {
+          const fadeDur = plan.fade
+          const offset = Math.max(0, acc - fadeDur).toFixed(3)
+          vChain.push(`${vLast}[vi${i}]xfade=transition=fade:duration=${fadeDur}:offset=${offset}[v${tag}]`)
+          aChain.push(`${aLast}[ai${i}]acrossfade=d=${fadeDur}[a${tag}]`)
+          acc = acc + durations[i] - fadeDur
         } else {
           vChain.push(`${vLast}[vi${i}]concat=n=2:v=1:a=0[v${tag}]`)
           aChain.push(`${aLast}[ai${i}]concat=n=2:v=0:a=1[a${tag}]`)
@@ -249,9 +293,17 @@ router.post('/video/compose', async (req, res) => {
       loudFinal = await normalizeFinalLoudness(outPath, tmpDir)
     }
 
+    const composeRow = execute(
+      `INSERT INTO compose_outputs (episode_id, url, shot_count, total_seconds, params_json)
+       VALUES (?, ?, ?, ?, ?)`,
+      [Number(episodeId), `${uploadsUrl(outName)}`, normList.length, Math.round(finalSeconds * 10) / 10,
+        JSON.stringify({ fade, bgm: bgmUsed, loudnorm, smoothSameScene })]
+    )
+
     res.json({
       success: true,
-      url: `/uploads/${outName}`,
+      url: `${uploadsUrl(outName)}`,
+      composeId: Number(composeRow.lastInsertRowid),
       shotCount: normList.length,
       totalSeconds: Math.round(finalSeconds * 10) / 10,
       fade: dissolveCount > 0,
@@ -259,7 +311,7 @@ router.post('/video/compose', async (req, res) => {
         policy: fade === false ? 'hard-cut' : fade === 'all' ? 'all-dissolve' : 'smart',
         dissolveCount,
         cutCount,
-        dissolveSeconds: FADE,
+        dissolveSeconds: dissolvePlan.filter((p) => p.dissolve).map((p) => p.fade),
       },
       bgmUsed,
       loudnorm: loudnorm ? {
@@ -281,31 +333,12 @@ router.post('/video/compose', async (req, res) => {
 })
 
 router.post('/continuity-frame', async (req, res) => {
-  // 静态四锚方案（2026-09-21）已停用接力锚：出片参考只喂角色/场景/道具/分镜图，
-  // 不再消费 continuity_url，本写入接口一并停用。单镜动态接续由尾帧软接续 + V5 视频续写承担。
+  // 已停用接力锚：出片参考只喂角色/场景/道具/分镜图，不再消费 continuity_url，
+  // 本写入接口一并停用。镜头衔接由出片流程内部承担（尾帧软接续 / 视频续写）。
   return res.status(410).json({
-    error: '接力锚（continuity-frame）已按静态四锚方案停用：出片不再消费 continuity_url，写入无意义。'
-      + '同场景上一镜已出片时，下一镜出片会自动携带其尾帧锚；已配置 V5 工作流时自动升级为视频续写（video continuation）。',
+    error: '该接口已停用：镜头衔接由出片流程自动处理，无需单独提交衔接帧。',
     deprecated: true,
   })
-})
-
-router.post('/seam-check', async (req, res) => {
-  const { shotId } = req.body
-  if (!shotId) return res.status(400).json({ error: 'shotId 必填' })
-  try {
-    const shot = queryOne('SELECT * FROM shots WHERE id = ?', [Number(shotId)])
-    if (!shot) return res.status(404).json({ error: `镜头不存在 (shotId=${shotId})` })
-    const hasAnchor = !!String(shot.continuity_url || '').trim()
-    const r = hasAnchor ? await checkSeam(shot) : await checkOpenerTone(shot)
-    console.log(`[/generate/seam-check] shot ${shotId} ${hasAnchor ? `衔接检测: CCT差${r.cctDiffK ?? 'n/a'}K / 亮度差${r.lumaDiff} / 构图差${r.hashDist}/64` : `开场色向闸: R-B=${r.rb} 带宽[${r.band.rbMin},${r.band.rbMax}]`} ${r.alert ? '⚠️ 超阈值' : 'OK'}`)
-    res.json({ success: true, ...r })
-  } catch (e) {
-    const msg = String(e.message || e)
-    const status = /没有成片|没有 continuity|不存在|无法识别/.test(msg) ? 400 : 500
-    console.warn(`[/generate/seam-check] shot ${shotId} 检测失败:`, msg)
-    res.status(status).json({ error: msg })
-  }
 })
 
 router.post('/blocking', async (req, res) => {

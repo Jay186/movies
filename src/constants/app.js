@@ -39,8 +39,10 @@ export const BATCH_GEN = {
 
 export const DEFAULTS = {
   PROJECT_TITLE: '未命名项目',
-  EPISODE_THEME: '做美食',
-  ART_STYLE: '吉卜力风格',
+  // 题材、画风一律留空：平台不预设任何具体题材/画风，任何剧本都能进。
+  // 题材由项目 theme 决定，画风由画风库 / 项目 art_style 决定（与后端 config.defaultArtStyle 留空口径一致）。
+  EPISODE_THEME: '',
+  ART_STYLE: '',
   EMPTY_SUMMARY: '（暂无摘要）',
   AI_GREETING: '你可以先输入创作想法，我来生成剧本；也可以先导入剧本，再继续告诉我怎么修改。',
   ASPECT_RATIO: '9:16 (Portrait Widescreen)',
@@ -55,11 +57,14 @@ export const ASPECT_RATIO_OPTIONS = [
   { value: '3:4 (Portrait Standard)', label: '3:4', desc: '竖向' },
 ]
 
+// 兜底画风必须是【中性空值】：label/prompt 为空时 getStylePrompt() 返回空串，
+// 全链路退回中性画风表述，不会静默套用某个具体画风（吉卜力等）。
+// 任何具体画风只能来自画风库或项目配置，不得写死在代码里。
 export const FALLBACK_STYLE = {
-  key: 'ghibli',
-  label: '吉卜力风格',
-  labelEn: 'Studio Ghibli Style',
+  key: '',
+  label: '',
+  labelEn: '',
   emoji: '',
   prompt: '',
-  category: '2d',
+  category: '',
 }

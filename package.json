@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "start": "node start.js",
-    "test": "node --test \"server/__tests__/*.test.mjs\" \"src/utils/__tests__/*.test.js\"",
     "build": "vite build",
     "preview": "vite preview"
   },

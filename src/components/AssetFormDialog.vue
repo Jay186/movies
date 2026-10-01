@@ -36,7 +36,7 @@ const nameLabels = {
 }
 
 const namePlaceholders = {
-  character: '例如：夏离 / 张三（幼年）',
+  character: '例如：角色名 / 角色名（幼年）',
   scene: '例如：城市天台',
   prop: '例如：青铜钥匙',
 }
@@ -177,7 +177,7 @@ function close() {
                 <input
                   v-model="form.identity"
                   type="text"
-                  placeholder="例如：流浪幼猫，机灵淘气，非常粘人，懂得察觉主人的情绪"
+                  placeholder="例如：一句话写清身份与性格特征"
                   class="w-full rounded-lg border border-border bg-bg-primary px-3 py-2.5 text-sm text-white placeholder-text-muted outline-none focus:border-accent/50"
                 />
               </div>
@@ -188,7 +188,7 @@ function close() {
                 <textarea
                   v-model="form.appearance"
                   rows="3"
-                  placeholder="例如：一只幼年小橘猫，拥有一双湿漉漉的、琥珀色的大眼睛……"
+                  placeholder="例如：外貌的英文描述，体型 / 配色 / 五官 / 服饰……"
                   class="w-full resize-none rounded-lg border border-border bg-bg-primary px-3 py-2.5 text-sm text-white placeholder-text-muted outline-none focus:border-accent/50"
                 />
               </div>

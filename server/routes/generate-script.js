@@ -5,24 +5,22 @@ import fs from 'node:fs'
 import { query, queryOne, execute, transaction } from '../db.js'
 import { scriptHash } from '../scriptHash.js'
 
-import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, enrichShotIntegrated, fixAxisFlips, extractFinalFrameFromIntegrated } from '../ai/doubao.js'
+import { generateScript, classifyScriptIntent, reviseScriptEdits, applyScriptEdits, rewriteFullScript, rewriteScriptSegment, extractAssets, generateStoryboard, generateStoryboardFromFile, enrichShotIntegrated, extractFinalFrameFromIntegrated } from '../ai/doubao.js'
 import { ensureStandardScript } from '../ai/scriptFormat.js'
 import { assertScriptConfirmed, assertNotStale, assertAssetsExist } from '../ai/guards.js'
-import { clearQcIgnores } from './qc.js'
 import { recordAlert, clearAlertsByRef } from '../ai/alerts.js'
-import { backfillStoryboardAssets } from '../ai/assetBackfill.js'
-import { runLightingChecks } from '../ai/lightingCheckRuntime.js'
-import { snapshotBeforeExtract, computeExtractDiff } from '../ai/extractGuard.js'
+import { backfillStoryboardAssets, backfillStoryboardSpace } from '../ai/assetBackfill.js'
+import { normalizeExtractedAssets, persistAssets, stageAssets, takeStagedAssets, clearStagedAssets } from '../ai/assetPipeline.js'
 import { classifyShotCombat } from '../ai/shotClassifier.js'
 import { config } from '../config.js'
-import { CJK_DIRTY_RE } from '../ai/shared.js'
 import { parseDialogue, serializeDialogue } from '../ai/dialogue.js'
-import { buildAliasMap } from '../ai/storyboardValidator.js'
+import { validateStoryboardImport, formatStoryboardValidationError } from '../ai/storyboardContractValidator.js'
 import { reportProgress, finishProgress, makeReporter, getProgress, getActiveProgress, listProgress } from '../ai/progressBus.js'
 import { PHASE } from '../ai/progressPhases.js'
-import { replaceEpisodeCharacters, mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
+import { mergeMasterIntoEpisodeCharacters } from '../characterLibrary.js'
 import { routeIp, buildCharacterContext, resolveExplicitCharacters } from '../ai/ipRouter.js'
-import { remapSceneRefs } from '../ai/sceneIdRemap.js'
+import { finalFrameHasUndeclaredChinese } from '../ai/shotEnglish.js'
+import { cancelJobsForShots } from '../jobs/videoJobRunner.js'
 import { uploadsDir, tasksDir } from '../paths.js'
 
 // 项目画风的类别（realistic / 3d-special / 2d …），供毒词豁免分桶使用；查不到返回空（退回仅按画风名豁免）。
@@ -34,6 +32,16 @@ function styleCategoryOf(label) {
   } catch { return '' }
 }
 
+// 项目题材（projects.theme）：作为"题材定位"注入剧本生成与改稿，让同一套主流程服务任何剧本。
+// 平台本身不预设题材——theme 为空时不注入任何题材约束，完全由用户创作意图决定。
+function projectGenreOf(episodeId) {
+  try {
+    const ep = queryOne('SELECT project_id FROM episodes WHERE id = ?', [episodeId])
+    if (!ep) return ''
+    return String(queryOne('SELECT theme FROM projects WHERE id = ?', [ep.project_id])?.theme || '').trim()
+  } catch { return '' }
+}
+
 const SB_TASK = {
   GENERATE: 'storyboard',
   FROM_FILE: 'file',
@@ -41,31 +49,6 @@ const SB_TASK = {
 }
 
 const router = Router()
-
-function remapSceneReferencesAfterRebuild(episodeId, oldScenes) {
-  try {
-    const newScenes = query('SELECT id, title, scene_number FROM scenes WHERE episode_id = ?', [episodeId])
-    for (const table of ['scene_group_locks', 'scene_anchors']) {
-      const refs = query(`SELECT id, scene_id FROM ${table} WHERE episode_id = ?`, [episodeId])
-      const { updates, unmatched } = remapSceneRefs(oldScenes, newScenes, refs)
-      for (const u of updates) {
-        execute(`UPDATE ${table} SET scene_id = ? WHERE id = ?`, [u.to, u.id])
-      }
-      if (updates.length) {
-        console.log(`[sceneIdRemap] ${table}: ${updates.length} 行 scene_id 已按稳定键重挂到新场景 id（episode=${episodeId}）`)
-      }
-      if (unmatched.length) {
-        recordAlert({
-          level: 'warn', source: 'sceneIdRemap', episodeId,
-          message: `场景重建后有 ${unmatched.length} 条 ${table} 引用无法按标题/场次重挂（对应旧场景已不存在，行已保留待人工处置）`,
-          detail: JSON.stringify(unmatched).slice(0, 2000),
-        })
-      }
-    }
-  } catch (e) {
-    console.warn('[sceneIdRemap] 场景引用重挂失败（已忽略，不阻断资产提取）:', e.message)
-  }
-}
 
 async function buildAssetContextForPrompt(prompt, episodeId, characterIds = null) {
   try {
@@ -101,52 +84,6 @@ function updateTask(taskId, updates) {
   values.push(taskId)
   execute(`UPDATE tasks SET ${fields.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, values)
 }
-
-function dedupeAssets(list, keyFn) {
-  if (!Array.isArray(list)) return list || []
-  const seen = new Set()
-  const result = []
-  for (const item of list) {
-    const raw = keyFn(item)
-    if (!raw) continue
-    const norm = String(raw).replace(/[\s，。！？、,.\s]/g, '').toLowerCase()
-    if (!norm || seen.has(norm)) continue
-    seen.add(norm)
-    result.push(item)
-  }
-  return result
-}
-
-const FURNITURE_KEYWORDS = [
-  '沙发', '茶几', '电视', '柜子', '桌子', '椅子', '书架', '衣柜', '餐桌',
-  '地毯', '窗帘', '冰箱', '空调', '楼梯', '地板', '天花板', '台灯', '吊灯',
-  '凳子', '床头柜', '鞋柜', '橱柜', '灶台',
-]
-function isFurniture(name) {
-  const n = String(name || '').trim()
-  return FURNITURE_KEYWORDS.some((kw) => {
-    const k = kw.trim()
-    return k && n.includes(k) && n.length <= k.length + 2
-  })
-}
-
-function filterFurnitureProps(assets) {
-  if (Array.isArray(assets?.props)) {
-    assets.props = assets.props.filter((p) => {
-      const name = typeof p === 'string' ? p : p.name
-      return !isFurniture(name)
-    })
-  }
-  if (Array.isArray(assets?.scenes)) {
-    for (const s of assets.scenes) {
-      if (Array.isArray(s.props)) {
-        s.props = s.props.filter((n) => !isFurniture(n))
-      }
-    }
-  }
-  return assets
-}
-
 
 router.post('/ip-route', async (req, res) => {
   const { prompt, projectId, characterIds } = req.body
@@ -202,64 +139,12 @@ router.post('/full', async (req, res) => {
     })
 })
 
-function recordPipelineDiff(trigger, episodeId, table, oldMap, incoming) {
-  try {
-    const oldRows = [...oldMap.values()]
-    const incomingRows = (incoming || []).map((item) => {
-      const isStr = typeof item === 'string'
-      const name = isStr ? item : (item.name || '')
-      const old = oldMap.get(name)
-      if (table === 'props') {
-        return {
-          name,
-          description: isStr ? '' : (item.description || ''),
-          owner: old?.owner || (isStr ? '' : (item.owner || '')) || '',
-          image_url: old?.image_url || '',
-          name_en: old?.name_en || (isStr ? '' : (item.nameEn ?? item.name_en ?? '')) || '',
-        }
-      }
-      const oldScene = oldMap.get(name)
-      return {
-        title: name,
-        summary: isStr ? '' : (item.description || ''),
-        image_url: oldScene?.image_url || '',
-        prop_names: JSON.stringify(isStr ? [] : (item.props || item.propNames || [])),
-        title_en: oldScene?.title_en || '',
-        summary_en: oldScene?.summary_en || '',
-        lighting_en: oldScene?.lighting_en || '',
-      }
-    })
-    const report = computeExtractDiff({ table, oldRows, incoming: incomingRows })
-    if (report.hasRisk) {
-      const MAX_DETAIL = 5
-      const owDetail = (report.overwrites || []).map(
-        (o) => `${o.name}(${(o.fields || []).map((f) => f.field).join(',')})`
-      )
-      const delDetail = (report.deletions || []).map((d) => `${d.name}(整条删除)`)
-      const allDetail = [...owDetail, ...delDetail]
-      const shown = allDetail.slice(0, MAX_DETAIL).join('；')
-      const more = allDetail.length > MAX_DETAIL ? ` 等共 ${allDetail.length} 项` : ''
-      const detailText = allDetail.length ? `明细：${shown}${more}。` : ''
-      recordAlert({
-        level: 'warn',
-        source: 'extract-overwrite',
-        episodeId,
-        message: `一键全流程重建 ${table} 检测到覆盖风险（${trigger}，集 ${episodeId}）：`
-          + `字段覆盖 ${report.counts.overwrites} 项、条目删除 ${report.counts.deletions} 项。`
-          + `${detailText}已写入覆盖前快照，可在资产的「还原快照」里回退。`,
-      })
-    }
-  } catch (e) {
-    console.warn(`[extract-overwrite] ${trigger} 留证失败（已忽略）:`, e.message)
-  }
-}
-
 async function runFullPipeline(taskId, episodeId, prompt, options) {  const { generateImages = true } = options
 
   const assetContext = await buildAssetContextForPrompt(prompt, episodeId, options.characterIds)
 
   updateTask(taskId, { status: 'running', progress: 5, message: '正在生成剧本...' })
-  const rawScript = await generateScript(prompt, '', assetContext)
+  const rawScript = await generateScript(prompt, '', assetContext, { genre: projectGenreOf(episodeId) })
   const { text: script } = await ensureStandardScript(rawScript, { episodeId })
   execute('UPDATE episodes SET script_content = ?, script_confirmed = 1 WHERE id = ?', [script, episodeId])
   updateTask(taskId, { progress: 20, message: '剧本生成完成' })
@@ -269,120 +154,51 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
   const projectForStyle = episodeForStyle ? queryOne('SELECT art_style FROM projects WHERE id = ?', [episodeForStyle.project_id]) : null
   const artStyle = projectForStyle?.art_style || ''
   const assets = await extractAssets(script, artStyle)
-  assets.characters = Array.isArray(assets.characters) ? assets.characters : []
-  assets.props = Array.isArray(assets.props) ? assets.props : []
-  assets.scenes = Array.isArray(assets.scenes) ? assets.scenes : []
-  if (!assets.characters.length && !assets.props.length && !assets.scenes.length) {
-    throw new Error('AI 未提取到任何资产，请重试')
-  }
-  assets.characters = dedupeAssets(assets.characters, (c) => (typeof c === 'string' ? c : c.name))
-  assets.props = dedupeAssets(assets.props, (p) => (typeof p === 'string' ? p : p.name))
-  assets.scenes = dedupeAssets(assets.scenes, (s) => (typeof s === 'string' ? s : s.name))
-  filterFurnitureProps(assets)
-
-  const oldCharMap = new Map(
-    mergeMasterIntoEpisodeCharacters(
-      query('SELECT name, image_url, audio_url, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
-    ).map((c) => [c.name, c])
-  )
-  if (assets.characters?.length) {
-    replaceEpisodeCharacters(episodeId, episodeForStyle?.project_id || null, assets.characters, { source: 'extract' })
-  }
-  const oldPropMap = new Map(
-    query('SELECT name, image_url, owner, name_en, description_en FROM props WHERE episode_id = ?', [episodeId]).map((p) => [p.name, p])
-  )
-  if (assets.props?.length) {
-    snapshotBeforeExtract({ episodeId, trigger: 'pipeline-props', tables: ['props'] })
-    recordPipelineDiff('pipeline-props', episodeId, 'props', oldPropMap, assets.props)
-    execute('DELETE FROM props WHERE episode_id = ?', [episodeId])
-    for (const p of assets.props) {
-      const name = typeof p === 'string' ? p : (p.name || '')
-      const description = typeof p === 'string' ? '' : (p.description || '')
-      const llmOwner = typeof p === 'string' ? '' : (p.owner || '')
-      const old = oldPropMap.get(name)
-      const finalNameEn = old?.name_en || (typeof p === 'string' ? '' : (p.nameEn ?? p.name_en ?? '')) || ''
-      const finalDescriptionEn = old?.description_en ?? (typeof p === 'string' ? '' : (p.descriptionEn ?? p.description_en ?? '')) ?? ''
-      execute('INSERT INTO props (episode_id, name, description, owner, image_url, name_en, description_en) VALUES (?, ?, ?, ?, ?, ?, ?)', [episodeId, name, description, old?.owner || llmOwner || '', old?.image_url || '', finalNameEn, finalDescriptionEn])
-    }
-  }
-  const oldSceneMap = new Map(
-    query('SELECT title, image_url, title_en, summary_en, lighting_en, location FROM scenes WHERE episode_id = ?', [episodeId]).map((s) => [s.title, s])
-  )
-  if (assets.scenes?.length) {
-    snapshotBeforeExtract({ episodeId, trigger: 'pipeline-scenes', tables: ['scenes'] })
-    recordPipelineDiff('pipeline-scenes', episodeId, 'scenes', oldSceneMap, assets.scenes)
-    const oldSceneIdSnapshot = query('SELECT id, title, scene_number FROM scenes WHERE episode_id = ?', [episodeId])
-    execute('DELETE FROM scenes WHERE episode_id = ?', [episodeId])
-    let sceneNum = 0
-    const lightingQueue = []
-    for (const s of assets.scenes) {
-      sceneNum++
-      const name = typeof s === 'string' ? s : (s.name || `场景${sceneNum}`)
-      const description = typeof s === 'string' ? '' : (s.description || '')
-      const propNames = typeof s === 'string' ? [] : (s.props || s.propNames || [])
-      const old = oldSceneMap.get(name)
-      const llmLighting = typeof s === 'string' ? '' : String(s.lightingEn || '').trim()
-      const llmLightingEn = llmLighting && !CJK_DIRTY_RE.test(llmLighting) ? llmLighting : ''
-      const finalLightingEn = old?.lighting_en || llmLightingEn || ''
-      const finalLocation = old?.location ?? (typeof s === 'string' ? '' : (s.location ?? s.location_en ?? '')) ?? ''
-      const finalTitleEn = old?.title_en || (typeof s === 'string' ? '' : (s.titleEn || s.title_en)) || ''
-      const finalSummaryEn = old?.summary_en || (typeof s === 'string' ? '' : (s.summaryEn || s.summary_en)) || ''
-      const ins = execute(
-        'INSERT INTO scenes (episode_id, scene_number, title, summary, image_url, prop_names, title_en, summary_en, lighting_en, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [episodeId, sceneNum, name, description, old?.image_url || '', JSON.stringify(propNames), finalTitleEn, finalSummaryEn, finalLightingEn, finalLocation]
-      )
-      lightingQueue.push({
-        name,
-        sceneId: Number(ins.lastInsertRowid) || null,
-        sceneNumber: sceneNum,
-        summary: description,
-        lightingEn: finalLightingEn,
-      })
-    }
-    remapSceneReferencesAfterRebuild(episodeId, oldSceneIdSnapshot)
-    await runLightingChecks(lightingQueue, episodeId, recordAlert)
-  }
+  // 统一落库（assetPipeline）：归一化 → 快照 → 三表写入 → 场景引用重挂 → 指纹回写
+  const persisted = await persistAssets(episodeId, assets, {
+    trigger: 'pipeline',
+    recordAlerts: true,
+  })
   updateTask(taskId, { progress: 35, message: '资产提取完成' })
-  execute('UPDATE episodes SET assets_script_fp = ? WHERE id = ?', [scriptHash(script), episodeId])
 
   updateTask(taskId, { progress: 40, message: '正在生成分镜脚本...' })
   const episode = queryOne('SELECT * FROM episodes WHERE id = ?', [episodeId])
   const project = queryOne('SELECT * FROM projects WHERE id = ?', [episode.project_id])
-  const savedCharMap = new Map(
-    mergeMasterIntoEpisodeCharacters(
-      query('SELECT name, name_en, description, description_en, image_url, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
-    ).map((c) => [c.name, c])
-  )
+  const savedCharMap = new Map((persisted.saved.characters || []).map((c) => [c.name, c]))
   assets.characters = (assets.characters || []).map((c) => {
     const name = typeof c === 'string' ? c : (c.name || '')
-    const saved = savedCharMap.get(name) || oldCharMap.get(name)
-    const imageUrl = saved?.image_url || ''
-    const description = saved?.description || (typeof c === 'string' ? '' : c.description) || ''
-    const nameEn = saved?.name_en || (typeof c === 'string' ? '' : (c.nameEn || c.name_en)) || ''
-    const descriptionEn = saved?.description_en || (typeof c === 'string' ? '' : (c.descriptionEn || c.description_en)) || ''
+    const saved = savedCharMap.get(name) || {}
+    const imageUrl = saved.image_url || ''
+    const description = saved.description || (typeof c === 'string' ? '' : c.description) || ''
+    const nameEn = saved.name_en || (typeof c === 'string' ? '' : (c.nameEn || c.name_en)) || ''
+    const descriptionEn = saved.description_en || (typeof c === 'string' ? '' : (c.descriptionEn || c.description_en)) || ''
     return typeof c === 'string'
       ? { name: c, description, name_en: nameEn, description_en: descriptionEn, image_url: imageUrl }
       : { ...c, description, name_en: nameEn, description_en: descriptionEn, image_url: imageUrl }
   })
+  const finalSceneMap = new Map((persisted.saved.scenes || []).map((s) => [s.title, s]))
   assets.scenes = (assets.scenes || []).map((s) => {
     const name = typeof s === 'string' ? s : (s.name || '')
-    const old = oldSceneMap.get(name)
-    const titleEn = old?.title_en || (typeof s === 'string' ? '' : (s.titleEn || s.title_en)) || ''
-    const summaryEn = old?.summary_en || (typeof s === 'string' ? '' : (s.summaryEn || s.summary_en)) || ''
-    const lightingEn = old?.lighting_en || (typeof s === 'string' ? '' : (s.lightingEn || s.lighting_en)) || ''
+    const old = finalSceneMap.get(name) || {}
+    const titleEn = old.title_en || (typeof s === 'string' ? '' : (s.titleEn || s.title_en)) || ''
+    const summaryEn = old.summary_en || (typeof s === 'string' ? '' : (s.summaryEn || s.summary_en)) || ''
+    const lightingEn = old.lighting_en || (typeof s === 'string' ? '' : (s.lightingEn || s.lighting_en)) || ''
+    const spaceType = old.space_type || old.spaceType || (typeof s === 'string' ? '' : (s.spaceType || s.space_type)) || ''
+    const spaceEvidence = old.space_evidence || old.spaceEvidence || (typeof s === 'string' ? '' : (s.spaceEvidence || s.space_evidence)) || ''
     return typeof s === 'string'
-      ? { name: s, title_en: titleEn, summary_en: summaryEn, lighting_en: lightingEn, image_url: old?.image_url || '' }
-      : { ...s, title_en: titleEn, summary_en: summaryEn, lighting_en: lightingEn, image_url: old?.image_url || '' }
+      ? { name: s, title_en: titleEn, summary_en: summaryEn, lighting_en: lightingEn, space_type: spaceType, space_evidence: spaceEvidence, image_url: old.image_url || '' }
+      : { ...s, title_en: titleEn, summary_en: summaryEn, lighting_en: lightingEn, space_type: spaceType, space_evidence: spaceEvidence, image_url: old.image_url || '' }
   })
+  const finalPropMap = new Map((persisted.saved.props || []).map((p) => [p.name, p]))
   assets.props = (assets.props || []).map((p) => {
     const name = typeof p === 'string' ? p : (p.name || '')
-    const old = oldPropMap.get(name)
-    const nameEn = old?.name_en || (typeof p === 'string' ? '' : (p.nameEn || p.name_en)) || ''
-    const descriptionEn = old?.description_en || (typeof p === 'string' ? '' : (p.descriptionEn || p.description_en)) || ''
-    const owner = old?.owner || (typeof p === 'string' ? '' : p.owner) || ''
+    const old = finalPropMap.get(name) || {}
+    const nameEn = old.name_en || (typeof p === 'string' ? '' : (p.nameEn || p.name_en)) || ''
+    const descriptionEn = old.description_en || (typeof p === 'string' ? '' : (p.descriptionEn || p.description_en)) || ''
+    const owner = old.owner || (typeof p === 'string' ? '' : p.owner) || ''
     return typeof p === 'string'
-      ? { name: p, name_en: nameEn, description_en: descriptionEn, owner, image_url: old?.image_url || '' }
-      : { ...p, name_en: nameEn, description_en: descriptionEn, owner, image_url: old?.image_url || '' }
+      ? { name: p, name_en: nameEn, description_en: descriptionEn, owner, image_url: old.image_url || '' }
+      : { ...p, name_en: nameEn, description_en: descriptionEn, owner, image_url: old.image_url || '' }
   })
   const storyboard = await generateStoryboard(script, project?.art_style || config.defaultArtStyle, assets, {
     targetDuration: options.targetDuration,
@@ -391,6 +207,22 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
   })
 
   backfillStoryboardAssets(storyboard, assets)
+  // 场景空间约束属于已登记资产事实；一键生成也必须把它确定性继承到镜头，
+  // 否则同一套场景资产在保存/出片门禁处会被判定为空间字段缺失。
+  backfillStoryboardSpace(storyboard, assets.scenes)
+
+  const storyboardValidation = validateStoryboardImport(storyboard, {
+    characters: assets.characters,
+    scenes: assets.scenes,
+    props: assets.props,
+    requireReferenceImages: true,
+    // 综合描述尚未补全；画风声明由 enrichShotIntegrated 在最终 IMD 落库前确定性注入。
+    requireStyleDeclaration: false,
+    targetDuration: options.targetDuration,
+  })
+  if (!storyboardValidation.ok) {
+    throw new Error(`生成的分镜未通过 H3 契约校验：${formatStoryboardValidationError(storyboardValidation)}`)
+  }
 
   execute('UPDATE episodes SET storyboard_confirmed = 0 WHERE id = ?', [episodeId])
   execute('UPDATE episodes SET storyboard_script_fp = ? WHERE id = ?', [scriptHash(script), episodeId])
@@ -403,6 +235,7 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
       removedShotIds.push(...ids)
       execute('DELETE FROM shots WHERE storyboard_scene_id = ?', [s.id])
     }
+    cancelJobsForShots(removedShotIds)
     clearAlertsByRef('shot', removedShotIds)
     execute('DELETE FROM storyboard_scenes WHERE episode_id = ?', [episodeId])
     clearAlertsByRef('scene', oldScenes.map((s) => s.id))
@@ -419,12 +252,12 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
       for (let shi = 0; shi < (s.shots || []).length; shi++) {
         const shot = s.shots[shi]
         const shotResult = execute(
-          `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out, qc_status, qc_report)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out, world_state_out_en)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             sceneId,
             `${si + 1}-${shi + 1}`,
-            shot.duration || 8,
+            shot.duration || config.storyboard?.defaultDuration || 8,
             shot.description || '',
             JSON.stringify(shot.characters || []),
             JSON.stringify(shot.sceneAssets || []),
@@ -451,17 +284,27 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
             shot.infoPoints?.length ? JSON.stringify(shot.infoPoints)
               : (shot.info_points?.length ? JSON.stringify(shot.info_points) : null),
             shot.worldStateOut || shot.world_state_out || null,
-            // 生成管线 QC 兜底标记（qcClean=false / Airlock 失败时由 doubao.js 写入），无则默认空
-            shot.qcStatus || '',
-            shot.qcReport || '',
+            shot.worldStateOutEn || shot.world_state_out_en || null,
           ]
         )
+        // Skill 新字段（lens/colorLighting/cameraElevation）不在上方固定 INSERT 列内，
+        // 生成侧产出后经此 UPDATE 落库（与 model.js buildStructuralFieldsForInput 同口径）
+        const skillExtraLens = shot.lens || ''
+        const skillExtraColor = shot.colorLighting || shot.color_lighting || ''
+        const skillExtraElevation = shot.cameraElevation || shot.camera_elevation || ''
+        const skillExtraSpace = shot.spaceType || shot.space_type || ''
+        const skillExtraSpaceEvidence = shot.spaceEvidence || shot.space_evidence || ''
+        if (skillExtraLens || skillExtraColor || skillExtraElevation || skillExtraSpace || skillExtraSpaceEvidence) {
+          execute(
+            'UPDATE shots SET lens = COALESCE(NULLIF(?, \'\'), lens), color_lighting = COALESCE(NULLIF(?, \'\'), color_lighting), camera_elevation = COALESCE(NULLIF(?, \'\'), camera_elevation), space_type = COALESCE(NULLIF(?, \'\'), space_type), space_evidence = COALESCE(NULLIF(?, \'\'), space_evidence) WHERE id = ?',
+            [skillExtraLens, skillExtraColor, skillExtraElevation, skillExtraSpace, skillExtraSpaceEvidence, shotResult.lastInsertRowid]
+          )
+        }
         ids.push(shotResult.lastInsertRowid)
       }
     }
     return ids
   })
-  clearQcIgnores(episodeId)
   updateTask(taskId, { progress: 50, message: '分镜脚本生成完成' })
 
   const failedImageCount = 0
@@ -488,12 +331,14 @@ async function runFullPipeline(taskId, episodeId, prompt, options) {  const { ge
 }
 
 router.post('/script-rewrite', async (req, res) => {
-  const { instruction, selectedText, context = '' } = req.body
+  const { instruction, selectedText, context = '', episodeId } = req.body
   if (!instruction || !String(instruction).trim()) return res.status(400).json({ error: '改写要求必填' })
   if (!selectedText || !String(selectedText).trim()) return res.status(400).json({ error: '请先选中要改写的段落' })
 
   try {
-    const rewrittenText = await rewriteScriptSegment(String(selectedText), String(instruction), String(context))
+    const rewrittenText = await rewriteScriptSegment(String(selectedText), String(instruction), String(context), {
+      genre: projectGenreOf(episodeId),
+    })
     if (!rewrittenText) throw new Error('大模型返回空内容')
     res.json({ success: true, rewrittenText })
   } catch (err) {
@@ -571,7 +416,7 @@ router.post('/script', async (req, res) => {  const { episodeId, prompt, context
       script = await rewriteFullScript(baseText, prompt)
     } else {
       const assetContext = await buildAssetContextForPrompt(prompt, episodeId, req.body.characterIds)
-      const rawScript = await generateScript(prompt, context, assetContext)
+      const rawScript = await generateScript(prompt, context, assetContext, { genre: projectGenreOf(episodeId) })
       const { text } = await ensureStandardScript(rawScript, { episodeId })
       script = text
     }
@@ -593,7 +438,7 @@ router.post('/script', async (req, res) => {  const { episodeId, prompt, context
 })
 
 router.post('/assets', async (req, res) => {
-  const { episodeId, style } = req.body
+  const { episodeId, style, decision = '', mergeStrategy = 'preserve' } = req.body
   if (!episodeId) return res.status(400).json({ error: 'episodeId 必填' })
 
   try {
@@ -612,18 +457,31 @@ router.post('/assets', async (req, res) => {
   }
 
   try {
-    const assets = await extractAssets(episode.script_content, artStyle)
-    assets.characters = Array.isArray(assets.characters) ? assets.characters : []
-    assets.props = Array.isArray(assets.props) ? assets.props : []
-    assets.scenes = Array.isArray(assets.scenes) ? assets.scenes : []
-    if (!assets.characters.length && !assets.props.length && !assets.scenes.length) {
-      return res.status(500).json({ error: 'AI 未提取到任何资产，请重试' })
+    // 决策重试（risk 拍板后的二次调用）：优先消费服务端暂存的上次提取结果，不重复调用模型
+    let assets = decision ? takeStagedAssets(episodeId) : null
+    if (!assets) {
+      assets = await extractAssets(episode.script_content, artStyle)
+      normalizeExtractedAssets(assets)
+      if (!decision) stageAssets(episodeId, assets)
     }
-    assets.characters = dedupeAssets(assets.characters, (c) => (typeof c === 'string' ? c : c.name))
-    assets.props = dedupeAssets(assets.props, (p) => (typeof p === 'string' ? p : p.name))
-    assets.scenes = dedupeAssets(assets.scenes, (s) => (typeof s === 'string' ? s : s.name))
-    filterFurnitureProps(assets)
-    res.json({ success: true, assets, scriptFp: scriptHash(episode.script_content) })
+    // 统一落库：有风险未拍板 → 整体不写并返回三表合并报告；拍板/无风险 → 写入并回写指纹
+    const persisted = await persistAssets(episodeId, assets, {
+      guard: true,
+      decision,
+      mergeStrategy,
+      trigger: 'extract-assets',
+    })
+    if (persisted.risk) {
+      return res.json({ success: true, risk: persisted.reports, assets })
+    }
+    clearStagedAssets(episodeId)
+    res.json({
+      success: true,
+      persisted: true,
+      assets: persisted.saved,
+      staleAssets: persisted.staleAssets,
+      scriptFp: persisted.scriptFp,
+    })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -647,13 +505,23 @@ router.post('/enrich-storyboard', async (req, res) => {
   const characters = mergeMasterIntoEpisodeCharacters(
     query('SELECT name, name_en, description, description_en, image_url, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
   )
-  const scenes = query('SELECT title AS name, title_en, summary AS description, summary_en, image_url, prop_names, lighting_en FROM scenes WHERE episode_id = ?', [episodeId]).map((s) => {
+  const scenes = query('SELECT title AS name, title_en, summary AS description, summary_en, image_url, prop_names, lighting_en, space_type, space_evidence FROM scenes WHERE episode_id = ?', [episodeId]).map((s) => {
     let propNames = []
     try { propNames = JSON.parse(s.prop_names || '[]') } catch { propNames = [] }
     return { ...s, props: propNames }
   })
   const props = query('SELECT name, name_en, description, description_en, image_url, owner FROM props WHERE episode_id = ?', [episodeId])
   const assets = { characters, scenes, props }
+
+  // 既有镜头的空间字段只从场景资产继承；补全 IMD 前先完成确定性回填，
+  // 这样补全后的统一契约校验不会因为历史镜头缺字段而误报。
+  execute(
+    `UPDATE shots SET
+       space_type = COALESCE(NULLIF(space_type, ''), NULLIF((SELECT sc.space_type FROM scenes sc JOIN storyboard_scenes ss2 ON ss2.episode_id = sc.episode_id AND ss2.scene_number = sc.scene_number WHERE ss2.id = shots.storyboard_scene_id LIMIT 1), '')),
+       space_evidence = COALESCE(NULLIF(space_evidence, ''), NULLIF((SELECT sc.space_evidence FROM scenes sc JOIN storyboard_scenes ss2 ON ss2.episode_id = sc.episode_id AND ss2.scene_number = sc.scene_number WHERE ss2.id = shots.storyboard_scene_id LIMIT 1), ''))
+     WHERE storyboard_scene_id IN (SELECT id FROM storyboard_scenes WHERE episode_id = ?)`,
+    [episodeId]
+  )
 
   const shots = query(
     `SELECT s.* FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
@@ -687,6 +555,8 @@ router.post('/enrich-storyboard', async (req, res) => {
           message: `正在补全镜头提示词：${enrichDone}/${shots.length}`,
         })
       }
+      // 契约编译已退役（2026-10-01）：英文版是分镜数据列，由保存同步（scheduleEnglishSync）
+      // 与出片自愈（compileShotEnglish）负责，enrich 只补 IMD（图像提示词），跳过条件只看 IMD。
       if (onlyMissing && (shot.integrated_multimodal_description || '').trim()) {
         skipped++
         tick()
@@ -694,8 +564,8 @@ router.post('/enrich-storyboard', async (req, res) => {
       }
       const shotForAI = {
         description: shot.description || '',
-        duration: shot.duration || 8,
-        shotType: shot.shot_type || '中景',
+        duration: shot.duration || config.storyboard?.defaultDuration || 8,
+        shotType: shot.shot_type || config.storyboard?.defaultShotType || '中景',
         characters: JSON.parse(shot.characters || '[]'),
         sceneAssets: JSON.parse(shot.scene_assets || '[]'),
         propAssets: JSON.parse(shot.prop_assets || '[]'),
@@ -704,6 +574,8 @@ router.post('/enrich-storyboard', async (req, res) => {
           return lines.length ? lines : null
         })(),
         actionNote: shot.action_note || '',
+        worldStateIn: shot.world_state_in || '',
+        worldStateOut: shot.world_state_out || '',
       }
       let lastErr = null
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -711,9 +583,14 @@ router.post('/enrich-storyboard', async (req, res) => {
           if (attempt > 0) {
             await new Promise(r => setTimeout(r, 3000 * attempt))
           }
-          const integrated = await enrichShotIntegrated(shotForAI, assets, project?.art_style || config.defaultArtStyle, { directorNotes: episode.director_notes || '', styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle) })
+          const integrated = await enrichShotIntegrated(shotForAI, assets, project?.art_style || config.defaultArtStyle, { styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle) })
           if (integrated) {
-            const finalFrame = extractFinalFrameFromIntegrated(integrated)
+            const finalFrame = extractFinalFrameFromIntegrated(integrated, assets)
+            // 末帧校验与出片门禁同一口径：@角色名引用（角色名保留原文）合法，
+            // 只拦"空末帧 / 未声明主体的中文叙述"（2026-10-01 与 shotEnglish 对齐）
+            if (!finalFrame || finalFrameHasUndeclaredChinese(finalFrame, shot)) {
+              throw new Error('模型未产出可用末帧（末帧为空或含未声明主体的中文），本镜不落库')
+            }
             execute(
               `UPDATE shots SET integrated_multimodal_description = ?, final_frame = COALESCE(NULLIF(?, ''), final_frame) WHERE id = ?`,
               [integrated, finalFrame, shot.id]
@@ -740,61 +617,29 @@ router.post('/enrich-storyboard', async (req, res) => {
     phase: PHASE.AXIS,
     done: shots.length,
     total: shots.length,
-    message: '补全完成，正在做越轴巡检…',
+    message: '补全完成，正在做结构检查…',
   })
 
+  // 越轴是否成立取决于 Skill 的镜头设计和实际调度。补全接口只补齐缺失的
+  // 图像提示词，不再调用另一个模型改写已定稿镜头或自动落越轴告警。
   let axisFixed = 0
   let axisFailed = 0
   let axisUnresolved = []
-  try {
-    const rows = query(
-      `SELECT s.id, s.shot_number, s.final_frame, s.integrated_multimodal_description, s.storyboard_scene_id
-       FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
-       WHERE ss.episode_id = ?
-       ORDER BY ss.scene_number, s.start_time, s.id`,
-      [episodeId]
-    )
-    const byScene = new Map()
-    for (const r of rows) {
-      const list = byScene.get(r.storyboard_scene_id) || []
-      list.push({
-        id: r.id,
-        shotNumber: r.shot_number,
-        finalFrame: r.final_frame || '',
-        integratedMultimodalDescription: r.integrated_multimodal_description || '',
-      })
-      byScene.set(r.storyboard_scene_id, list)
-    }
-    const sceneList = [...byScene.values()].map((shots) => ({ shots }))
-    const charNames = characters.map((c) => c.name).filter(Boolean)
-    const aliasMap = buildAliasMap(characters)
-    const axisRes = await fixAxisFlips(sceneList, charNames, project?.art_style || config.defaultArtStyle, aliasMap)
-    for (const sh of axisRes.repairedShots || []) {
-      execute('UPDATE shots SET integrated_multimodal_description = ? WHERE id = ?', [sh.integratedMultimodalDescription, sh.id])
-      axisFixed++
-    }
-    axisFailed = axisRes.failed || 0
-    axisUnresolved = axisRes.unresolved || []
-    for (const u of axisUnresolved) {
-      const row = rows.find((r) => (r.shot_number || r.id) === u.shot)
-      recordAlert({
-        source: 'axis',
-        level: 'warn',
-        episodeId,
-        shotId: row?.id ?? null,
-        shotNumber: u.shot,
-        message: `越轴未修复：@${u.name} ${u.reason}。请人工检查本镜模块4 是否需补走位，或确认该翻转是合法调度。`,
-        detail: u.reason,
-      })
-    }
-    if (axisFixed || axisFailed) {
-      console.log(`[enrich] 越轴巡检：${axisFixed} 个镜头已自动补走位${axisFailed ? `，${axisFailed} 处未修复（已落告警）` : ''}`)
-    }
-  } catch (e) {
-    console.warn('[enrich] 越轴巡检失败（不影响补全结果）:', e.message)
-  }
-
-  res.json({ success: true, enriched, failed, skipped, total: shots.length, axisFixed, axisFailed, errors: errors.length ? errors : undefined })
+  const postEnrichRows = query(
+    `SELECT s.*, ss.scene_number, ss.title AS scene_title
+     FROM shots s JOIN storyboard_scenes ss ON ss.id = s.storyboard_scene_id
+     WHERE ss.episode_id = ? ORDER BY ss.scene_number, s.start_time, s.id`,
+    [episodeId]
+  )
+  const postEnrichValidation = validateStoryboardImport({ scenes: [{ shots: postEnrichRows }] }, {
+    characters: query('SELECT name, image_url FROM characters WHERE episode_id = ?', [episodeId]),
+    scenes: query('SELECT title, image_url FROM scenes WHERE episode_id = ?', [episodeId]),
+    props: query('SELECT name, image_url FROM props WHERE episode_id = ?', [episodeId]),
+    requireReferenceImages: true,
+    requireStyleDeclaration: true,
+  })
+  const enrichSuccess = failed === 0 && postEnrichValidation.ok
+  res.status(enrichSuccess ? 200 : 422).json({ success: enrichSuccess, enriched, failed, skipped, total: shots.length, axisFixed, axisFailed, errors: errors.length ? errors : undefined, validation: postEnrichValidation })
   finishProgress(episodeId, SB_TASK.ENRICH, {
     phase: PHASE.DONE,
     done: shots.length,
@@ -840,7 +685,7 @@ router.post('/storyboard', async (req, res) => {
     query('SELECT name, name_en, description, description_en, image_url, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
   )
   const props = query('SELECT name, name_en, description, description_en, image_url, owner FROM props WHERE episode_id = ?', [episodeId])
-  const scenes = query('SELECT title AS name, title_en, summary AS description, summary_en, image_url, prop_names, lighting_en FROM scenes WHERE episode_id = ?', [episodeId]).map((s) => {
+  const scenes = query('SELECT title AS name, title_en, summary AS description, summary_en, image_url, prop_names, lighting_en, space_type, space_evidence FROM scenes WHERE episode_id = ?', [episodeId]).map((s) => {
     let propNames = []
     try { propNames = JSON.parse(s.prop_names || '[]') } catch { propNames = [] }
     return { ...s, props: propNames }
@@ -852,12 +697,30 @@ router.post('/storyboard', async (req, res) => {
   try {
     const storyboard = await generateStoryboard(episode.script_content, project?.art_style || config.defaultArtStyle, assets, {
       targetDuration,
-      directorNotes: episode.director_notes || '',
       onProgress: makeReporter(episodeId, SB_TASK.GENERATE),
       styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle),
     })
     backfillStoryboardAssets(storyboard, assets)
-    res.json({ success: true, storyboard, unmatched: storyboard.unmatched || [] })
+    backfillStoryboardSpace(storyboard, scenes)
+    const validation = validateStoryboardImport(storyboard, {
+      characters,
+      scenes,
+      props,
+      targetDuration,
+      requireReferenceImages: true,
+      // 原始分镜阶段没有最终 IMD，画风门禁在补全后执行。
+      requireStyleDeclaration: false,
+    })
+    if (!validation.ok) {
+      return res.status(422).json({
+        error: formatStoryboardValidationError(validation),
+        code: 'STORYBOARD_CONTRACT_INVALID',
+        errors: validation.errors,
+        warnings: validation.warnings,
+        storyboard,
+      })
+    }
+    res.json({ success: true, storyboard, unmatched: storyboard.unmatched || [], validation })
     ok = true
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -892,7 +755,7 @@ router.post('/storyboard-from-file', async (req, res) => {
     query('SELECT name, name_en, description, description_en, image_url, project_character_id FROM characters WHERE episode_id = ?', [episodeId])
   )
   const props = query('SELECT name, name_en, description, description_en, image_url, owner FROM props WHERE episode_id = ?', [episodeId])
-  const scenes = query('SELECT title AS name, title_en, summary AS description, summary_en, image_url, prop_names, lighting_en FROM scenes WHERE episode_id = ?', [episodeId]).map((s) => {
+  const scenes = query('SELECT title AS name, title_en, summary AS description, summary_en, image_url, prop_names, lighting_en, space_type, space_evidence FROM scenes WHERE episode_id = ?', [episodeId]).map((s) => {
     let propNames = []
     try { propNames = JSON.parse(s.prop_names || '[]') } catch { propNames = [] }
     return { ...s, props: propNames }
@@ -910,12 +773,27 @@ router.post('/storyboard-from-file', async (req, res) => {
   let ok = false
   try {
     const storyboard = await generateStoryboardFromFile(fileContent, project?.art_style || config.defaultArtStyle, assets, {
-      directorNotes: episode.director_notes || '',
       onProgress: makeReporter(episodeId, SB_TASK.FROM_FILE),
       styleCategory: styleCategoryOf(project?.art_style || config.defaultArtStyle),
     })
     backfillStoryboardAssets(storyboard, assets)
-    res.json({ success: true, storyboard, unmatched: storyboard.unmatched || [] })
+    backfillStoryboardSpace(storyboard, scenes)
+    const validation = validateStoryboardImport(storyboard, {
+      characters, scenes, props,
+      requireReferenceImages: true,
+      // 文件规整阶段只产出镜头结构；综合描述补全后才检查画风锚点。
+      requireStyleDeclaration: false,
+    })
+    if (!validation.ok) {
+      return res.status(422).json({
+        error: formatStoryboardValidationError(validation),
+        code: 'STORYBOARD_CONTRACT_INVALID',
+        errors: validation.errors,
+        warnings: validation.warnings,
+        storyboard,
+      })
+    }
+    res.json({ success: true, storyboard, unmatched: storyboard.unmatched || [], validation })
     ok = true
   } catch (err) {
     res.status(500).json({ error: err.message })

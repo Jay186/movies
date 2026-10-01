@@ -1,22 +1,24 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { config } from '../config.js'
+import { getEffectiveLlm } from '../modelConfig.js'
+import { openaiChatUrl } from './openaiUrl.js'
 import { logAiCall, classifyError } from './aiLog.js'
-import { compileIntegratedModules } from './imdCompiler.js'
-import { validateStoryboard, extractScreenSides, hasExplicitReposition, buildAliasMap, findMusicMoodWords, findStylePoison, stylePoisonText, CAMERA_MOVE_LEXICON, extractLightCues, estimateShotVideoPromptChars } from './storyboardValidator.js'
+import { compileIntegratedModules, canonicalizeImdCharacterNames } from './imdCompiler.js'
+import { extractScreenSides, hasExplicitReposition } from './storyboardValidator.js'
+import { estimateH3ShotVideoPromptChars as estimateShotVideoPromptChars, h3ProviderProfile } from '../storyboard/providers/h3.js'
 import { PHASE } from './progressPhases.js'
 import { pickContainmentCandidate } from './propNameMatch.js'
 import {
-  dialogueRule, assetNameRule, characterCoverageRule, integratedModulesRule,
-  timelineRule, directorNotesPrompt, llmBoundaryRule, episodeStructureRule,
-  actionDensityRule, beatLayerRule, cameraAngleRule, cameraBeatRule, cinematographyRule,
-  holdRule, genreTemplateRule, editRule,
-  frameGeographyRule, cinematicGrammarRule, styleLockRule,
-  stagingRule, pointOfViewRule, emotionArcRule, cameraCraftRule,
+  assetNameRule, characterCoverageRule, integratedModulesRule,
+  beatLayerRule, cameraBeatRule, cinematographyRule,
+  holdRule, editRule,
+  frameGeographyRule, styleLockRule,
+  stagingRule, pointOfViewRule, cameraCraftRule,
 } from './storyboardRules.js'
-import { applyShotMergeToStoryboard } from './shotMergeEngine.js'
-import { backfillShotAssets, backfillSceneByTitle } from './assetBackfill.js'
-import { qcMeta } from './qcCodes.js'
+import { loadSkillRules } from './skillRules.js'
+import { buildStoryboardContract, buildH3PhysicsBlock, buildSpaceTypeTable } from './skillContract.js'
+import { validateStoryboardImport, formatStoryboardValidationError } from './storyboardContractValidator.js'
 
 
 
@@ -37,28 +39,87 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const thinkingLockedModels = new Set()
 
-export async function chatCompletion(messages, options = {}) {
-  if (!config.llm.apiKey) {
-    throw new Error('大模型 API Key 未配置，请设置 DASHSCOPE_API_KEY 环境变量')
+async function readChatResponse(res, stream) {
+  if (!stream || !String(res.headers.get('content-type') || '').includes('text/event-stream')) {
+    const data = await res.json()
+    return {
+      message: data.choices?.[0]?.message,
+      finishReason: String(data.choices?.[0]?.finish_reason || ''),
+      usage: data.usage || {},
+    }
   }
 
-  const LIGHT_TASKS = new Set(config.storyboard?.lightTasks || [])
-  const lightModel = config.llm.lightModel
-  const model = options.model
-    || (LIGHT_TASKS.has(options.usageContext?.task) && lightModel ? lightModel : config.llm.model)
+  const reader = res.body?.getReader()
+  if (!reader) throw Object.assign(new Error('模型流式响应没有可读取的正文'), { code: 'content' })
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let reasoning = ''
+  let finishReason = ''
+  let usage = {}
+  const consume = (event) => {
+    const payload = event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).replace(/^ /, ''))
+      .join('\n')
+    if (!payload || payload === '[DONE]') return
+    let data
+    try { data = JSON.parse(payload) } catch { return }
+    const choice = data.choices?.[0]
+    const delta = choice?.delta || choice?.message || {}
+    const deltaContent = delta.content
+    if (Array.isArray(deltaContent)) {
+      content += deltaContent.map((part) => typeof part === 'string' ? part : (part?.text || part?.content || '')).join('')
+    } else if (typeof deltaContent === 'string') {
+      content += deltaContent
+    }
+    if (typeof delta.reasoning_content === 'string') reasoning += delta.reasoning_content
+    if (choice?.finish_reason) finishReason = String(choice.finish_reason)
+    if (data.usage) usage = data.usage
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+      const events = buffer.split(/\r?\n\r?\n/)
+      buffer = events.pop() || ''
+      for (const event of events) consume(event)
+      if (done) break
+    }
+    if (buffer) consume(buffer)
+  } finally {
+    reader.releaseLock()
+  }
+  return { message: { content, reasoning_content: reasoning }, finishReason, usage }
+}
+
+export async function chatCompletion(messages, options = {}) {
+  // 运行时读取（AI 模型配置热生效）：Key / baseURL / 模型均不再走 config 快照
+  const { apiKey, baseURL, model: effectiveModel, configured } = getEffectiveLlm()
+  if (!configured) {
+    throw Object.assign(new Error('文本大模型未配置：请在「AI 模型配置」里为「文本通道」填写 API Key'), { status: 400 })
+  }
+
+  const model = options.model || effectiveModel
   const body = {
     model,
     messages,
     temperature: options.temperature ?? 0.7,
     max_tokens: options.maxTokens ?? 4000,
   }
+  if (options.stream) body.stream = true
   if (options.responseFormat) body.response_format = options.responseFormat
   if ((options.responseFormat?.type === 'json_object' || options.disableThinking) && !thinkingLockedModels.has(model)) {
     body.enable_thinking = false
   }
 
-  const timeoutMs = options.timeoutMs ?? 120000
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs) || 120000)
   const maxAttempts = Math.max(1, Number(options.maxAttempts) || 3)
+  // 重试总预算必须独立于单次超时，否则一次分场请求可能连续挂起数次。
+  const retryBudgetMs = Math.max(timeoutMs, Number(options.retryBudgetMs) || timeoutMs * maxAttempts)
+  const deadline = Date.now() + retryBudgetMs
   const task = options.usageContext?.task || ''
   const episodeId = options.usageContext?.episodeId
   const startedAt = Date.now()
@@ -67,21 +128,27 @@ export async function chatCompletion(messages, options = {}) {
   await acquireLlm()
   try {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        lastErr = Object.assign(new Error(`AI 请求超过重试总时长（${Math.round(retryBudgetMs / 1000)} 秒）`), { code: 'timeout' })
+        break
+      }
       const controller = new AbortController()
-      const timeoutTimer = setTimeout(() => controller.abort(), timeoutMs)
+      const timeoutTimer = setTimeout(() => controller.abort(), Math.min(timeoutMs, remainingMs))
       let res, httpStatus
       try {
-        res = await fetch(`${config.llm.baseURL}/chat/completions`, {
+        res = await fetch(openaiChatUrl(baseURL), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${config.llm.apiKey}`,
+            'Authorization': `Bearer ${apiKey}`,
           },
           body: JSON.stringify(body),
           signal: controller.signal,
         })
         httpStatus = res.status
       } catch (e) {
+        clearTimeout(timeoutTimer)
         const { family, message } = classifyError(e)
         lastErr = Object.assign(new Error(message), { code: family, status: 0 })
         if (family !== 'timeout' && family !== 'rate_limit' && family !== 'server') break
@@ -90,12 +157,11 @@ export async function chatCompletion(messages, options = {}) {
           continue
         }
         break
-      } finally {
-        clearTimeout(timeoutTimer)
       }
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '')
+        clearTimeout(timeoutTimer)
         if (httpStatus === 400 && body.enable_thinking === false
           && /enable_thinking parameter is restricted to True/i.test(errText)) {
           thinkingLockedModels.add(model)
@@ -108,18 +174,31 @@ export async function chatCompletion(messages, options = {}) {
         lastErr = Object.assign(new Error(`${message} (${httpStatus})`), {
           code: family, status: httpStatus, raw: String(errText).slice(0, 500),
         })
-        if ((family === 'rate_limit' || family === 'server') && attempt < maxAttempts) {
+        // timeout 也要重试：上游网关超时（如 Cloudflare 524，100s 内源站未响应）
+        // 与本地 AbortError 同属偶发可重试错误；网络层超时已重试，HTTP 层保持一致。
+        if ((family === 'rate_limit' || family === 'server' || family === 'timeout') && attempt < maxAttempts) {
           await sleep(1000 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 300))
           continue
         }
         break
       }
 
-      const data = await res.json()
-      const message = data.choices?.[0]?.message
+      let responseData
+      try {
+        responseData = await readChatResponse(res, options.stream === true)
+      } catch (e) {
+        const { family, message } = classifyError(e)
+        lastErr = Object.assign(new Error(message), { code: family, status: 0 })
+        if ((family === 'timeout' || family === 'server') && attempt < maxAttempts) {
+          await sleep(1000 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 300))
+          continue
+        }
+        break
+      } finally {
+        clearTimeout(timeoutTimer)
+      }
+      const { message, finishReason, usage } = responseData
       const content = message?.content
-      const finishReason = String(data.choices?.[0]?.finish_reason || '')
-      const usage = data.usage || {}
 
       let text = ''
       if (Array.isArray(content)) {
@@ -130,17 +209,14 @@ export async function chatCompletion(messages, options = {}) {
       } else if (typeof content === 'string' && content.trim()) {
         text = content.trim()
       } else if (typeof message?.reasoning_content === 'string' && message.reasoning_content.trim()) {
-        if (finishReason === 'length') {
-          lastErr = Object.assign(
-            new Error('大模型思考内容被 max_tokens 截断且未输出正文，请增大 maxTokens 或关闭思考'),
-            { code: 'content', status: 0 }
-          )
-          break
-        }
-        text = message.reasoning_content.trim()
+        // reasoning_content 不是业务正文，不能拿来当分镜 JSON 解析。
+        const detail = finishReason === 'length'
+          ? '大模型思考阶段耗尽输出预算，未返回正文，请确认已关闭思考或提高输出预算'
+          : '大模型只返回了思考内容，未返回正文，请检查模型的思考参数'
+        lastErr = Object.assign(new Error(detail), { code: 'content', status: 0 })
+        break
       } else {
-        const { family, message: msg } = classifyError(new Error('大模型返回了空内容'))
-        lastErr = Object.assign(new Error(msg), { code: family })
+        lastErr = Object.assign(new Error('大模型未返回正文内容'), { code: 'content', status: 0 })
         break 
       }
 
@@ -159,31 +235,40 @@ export async function chatCompletion(messages, options = {}) {
       latencyMs: Date.now() - startedAt, success: false,
       errorFamily: fam, errorMsg: lastErr?.raw ? `${lastErr.message} | 服务端原文: ${lastErr.raw}` : lastErr?.message,
     })
-    if (model === lightModel && lightModel && config.llm.model && lightModel !== config.llm.model) {
-      console.warn(`[chatCompletion] 轻量模型 ${lightModel} 失败（${fam}），自动回退主模型 ${config.llm.model} 重试`)
-      return chatCompletion(messages, { ...options, model: config.llm.model })
-    }
+    // 单档模型：不再区分主/轻/视觉，失败后不再回退到其他模型
     throw lastErr || new Error('大模型调用失败')
   } finally {
     releaseLlm()
   }
 }
 
-export async function generateScript(prompt, context = '', assetContext = '') {
+export async function generateScript(prompt, context = '', assetContext = '', options = {}) {
   const assetBlock = assetContext
     ? `\n\n【角色资产设定】\n本剧本使用下列已有角色。写作时必须严格沿用这些角色的名字与外貌设定，不得改动、不得新增形象冲突的描述，戏份围绕他们展开：\n${assetContext}`
     : ''
 
+  // 题材 / 受众定位由调用方（项目配置）注入。平台本身不预设任何具体题材，
+  // 任何剧本（古装 / 都市 / 悬疑 / 科幻 / 儿童 / 纪录向……）都走同一条主流程。
+  const genre = String(options.genre || '').trim()
+  const genreBlock = genre
+    ? `\n- 本剧题材与受众定位：${genre}。必须严格贴合该题材创作，不得偏离，也不得套用与本项目无关的其他题材`
+    : ''
+  const scriptCfg = config.script || {}
+  const minChars = scriptCfg.minChars ?? 800
+  const maxChars = scriptCfg.maxChars ?? 1500
+  const sceneCountMin = scriptCfg.sceneCountMin ?? 3
+  const sceneCountMax = scriptCfg.sceneCountMax ?? 5
+
   const messages = [
     {
       role: 'system',
-      content: `你是一个专业的儿童动画编剧。请根据用户的创作意图，编写一个结构化的短剧剧本。
+      content: `你是一名专业短剧编剧。请根据用户的创作意图，编写一个结构化的短剧剧本。
 
 格式要求：
 - 每个场次以"场次X：标题"开头
 - 每场包含：场景（外景/内景·地点·时间·天气）、人物、对白、舞台指示（用括号括起来）
-- 语言生动，适合儿童动画，画面感强
-- 总长度 800-1500 字，3-5 个场次
+- 语言生动，画面感强
+- 总长度 ${minChars}-${maxChars} 字，${sceneCountMin}-${sceneCountMax} 个场次${genreBlock}
 - 场次编号必须从 1 开始连续递增，修改或续写时保持已有场次编号不变，新场次接着最后一场往后编，禁止重复或重排编号${assetBlock}
 
 直接输出剧本内容，不要额外解释。`,
@@ -197,8 +282,8 @@ export async function generateScript(prompt, context = '', assetContext = '') {
   }
 
   const { text, finishReason } = await chatCompletion(messages, {
-    temperature: 0.8,
-    maxTokens: 6000,
+    temperature: scriptCfg.temperature ?? 0.8,
+    maxTokens: scriptCfg.maxTokens ?? 6000,
     returnMeta: true,
     usageContext: { task: 'script' },
   })
@@ -208,17 +293,20 @@ export async function generateScript(prompt, context = '', assetContext = '') {
   return text
 }
 
-export async function rewriteScriptSegment(selectedText, instruction, context = '') {
+export async function rewriteScriptSegment(selectedText, instruction, context = '', options = {}) {
+  // 题材 / 受众定位由调用方注入，平台不预设具体题材（原"儿童动画"假设已移除）。
+  const genre = String(options.genre || '').trim()
+  const genreBlock = genre ? `\n- 本剧题材与受众定位：${genre}。改写后必须仍贴合该题材` : ''
   const messages = [
     {
       role: 'system',
-      content: `你是一个专业的儿童动画编剧，负责改稿。下面给你【原段落】和【整篇上下文】，请根据【改写要求】改写原段落。
+      content: `你是一名专业短剧编剧，负责改稿。下面给你【原段落】和【整篇上下文】，请根据【改写要求】改写原段落。
 
 【硬性约束】
 - 只输出改写后的段落本身，直接可替换原段落。
 - 严禁输出整篇剧本、严禁输出任何解释、前言、标题或 markdown 标记。
 - 只改选中段落，不得改动上下文中的其他场次、对白或内容。
-- 保持短剧格式：场景/人物/对白/舞台指示（括号）结构清晰，语言生动适合儿童动画。
+- 保持短剧格式：场景/人物/对白/舞台指示（括号）结构清晰，语言生动、画面感强。${genreBlock}
 - 如果改写要求只是微调，尽量保留原段落风格与细节，不要无谓扩写。
 - 直接输出结果文本，不要任何多余文字。`,
     },
@@ -362,6 +450,9 @@ export async function rewriteFullScript(script, instruction) {
 
 import { escapeRegExp, CJK_DIRTY_RE, extractFirstJson } from './shared.js'
 import { tasksDir } from '../paths.js'
+import { normalizeShotType, shotTypeTermsText } from './shotTypes.js'
+// 兼容历史调用方：景别归一原本在 doubao.js 导出，现转由 shotTypes.js 提供
+export { normalizeShotType } from './shotTypes.js'
 
 function normalizeForMatch(s) {
   return String(s)
@@ -477,74 +568,34 @@ export function applyScriptEdits(script, edits) {
 }
 
 export async function extractAssets(script, style = '') {
+  const skillRules = loadSkillRules()
   const styleInstruction = style
     ? `\n\n【画风参考】本项目整体视觉风格参考「${style}」。description 中**严禁**直接出现画风词、渲染词、背景词（如"${style}"、"纯白背景"、"2D/3D"、"手绘"、"写实"等），只描述资产本身的视觉内容。`
     : ''
 
   const messages = [
     {
-      role: 'system',
-      content: `你是一个专业的剧本美术设定分析师。请从给定的剧本中严格提取角色、场景、道具三类资产，输出严格的 JSON 格式。${styleInstruction}
+      role: 'system',      content: `你是一名影视美术指导（角色/道具/场景概念设计）。你的资产提取方法论以【Skill 资产规则】为唯一权威来源（xiaomo-film-studio 模块A），下方规则全文必须先通读、全部硬性约束严格遵守（人·物·场分离、六要素整段文字、场景正面全景微俯视大白话、编号闭环、服化道场自洽、原文优先推导必标）。
+【冲突仲裁】Skill 规则教你输出三份 Markdown 文档；本平台是生产管线——【提取方法论服从 Skill 规则，输出格式服从平台 JSON 契约】。${styleInstruction}
+【重要】立刻输出 JSON，禁止任何其他文字、解释或 markdown 标记。
 
-【核心原则】
-- 所有资产必须独立拆分：角色、场景、道具之间互不影响。
-- description 必须是一段连贯的纯文本，**禁止使用列表符号、JSON、键值对、换行**。
-- 描述要**简洁具体**，控制在 60-120 个汉字，避免冗长和模糊形容词（如"可爱的""漂亮的"）。
-- 描述中只写资产本身在剧本里真实出现的视觉信息，不要编造剧本没有的细节。
+<skill_asset_rules>
+${skillRules.asset}
+</skill_asset_rules>
 
-═══════════════════════════════════════
-【角色资产提取要求】
-═══════════════════════════════════════
-- 只提取角色本身，不包含任何场景、背景、道具。
-- description 聚焦：物种/性别/年龄感、外貌特征、发型发色、服装款式与颜色、标志性配饰、性格气质。
-- description **只写静态视觉特征（定妆照视角）**：严禁写入动作、姿态、剧情瞬态（如"奔跑时身体前倾""被撞击后沾满尘土""浑身湿透""气喘吁吁"）——这些是镜头内的临时状态，不是角色固定外貌；设定图按此描述生成，瞬态会污染所有镜头的参考图。
-- 禁止出现：树木、房屋、天空、地面、家具、其他物品等场景元素；禁止出现画风词或"纯白背景"等工程词。
-- 【相似角色硬特征区分】多个角色属于同一物种/相似体型时（如两个同物种幼崽、两个小孩），每只的 description 必须用**至少两个硬视觉特征**明确区分（毛色/肤色、脸型、耳形、脸部配色、体型比例），**严禁只靠配饰（围巾/帽子/领结）颜色区分**——中远景镜头里配饰只占几个像素，视频模型会认错人（历史实锤：同物种角色只差配饰色，出片选角错配两轮未被任何闸门发现）。物种必须写实：同一物种的不同个体要写出可区分的具体特征（毛色/体型/纹路），不许两只都写笼统的同一句。
-- 【英文字段必填】每个角色必须同时输出 nameEn（英文名，音译或意译，单词首字母大写）和 descriptionEn（英文外貌描述，与中文 description 同信息量）。descriptionEn 同样受上述硬特征区分规则约束，且**必须包含物种与毛色**（如 a small brown bear cub / a white panda-like cub with black ear patches）——它是 H3 全英文出片 prompt 的角色锁定文本，缺失会让角色只剩名字锁定，选角错配风险直线上升。nameEn/descriptionEn 出现任何中文字符即违规。
-
-═══════════════════════════════════════
-【场景资产提取要求】
-═══════════════════════════════════════
-- 【命名规则】使用剧本中实际提到的具体场景名（如"家中客厅"、"庭院"、"小河边"），禁止使用"场景1"、"第一场"等序号。
-- 【去重规则】同一具体场景出现多次只提取一次。
-- 场景为无人物、无动物环境；description 只写固定建筑结构、大型家具、绿化、光源方向、天气时间、整体氛围。
-- 【环境材质与气候必须保真·硬约束】剧本明确写到的环境关键特征必须**原词保留**，严禁泛化或省略，重点覆盖四类：
-  ① 水体状态（河流/浮冰/急流/浅滩/湖面/瀑布）② 气候与季节（积雪/薄冰/霜/梅雨/闷热/落叶）
-  ③ 地表材质（碎石/冰面/草坡/泥泞/沙地）④ 大气现象（浓雾/水汽/风沙/烟尘）。
-  反例（违规）：剧本写"河面有浮冰漂来"，description 却只写"河水湍急、河面宽阔"——**丢失剧本写到的关键特征即违规**。
-  正例：以剧本原词组合，如"水面宽阔、水流湍急，河心有浮冰顺流而下"。
-  剧本没有明确写到气候线索时，按场景类型推断一个合理值，但不得与剧本已写的特征冲突。
-- 【光影常量 lightingEn】每个场景必须输出 lightingEn 字段：用**英文**描述该场景固定不变的光照——光源从哪个方向来（如 low sun from the left）、色温冷暖（cold blue daylight / warm golden light）、时间氛围，25 词以内。这是跨镜头不变量：同场景所有镜头共用这一句，出片与生图逐字复制；剧本没写光照线索就按场景类型推断一个合理值。**lightingEn 必须全英文，出现任何中文字符即违规。** 若剧本写明冰雪/寒冷环境，色温必须体现冷调（cold blue-grey / icy highlights / biting air），**不得写成暖调或夏日明亮调**。
-- **严禁在 description 中出现任何可移动道具**（如手机、书本、食物、零食、瓜子、奶茶、铅笔、笔记本、杯子、盘子、小物件、装饰品等），这些物品由独立道具设定统一提供；示例："茶几上堆满零食"属于违规描述，应改为"客厅中央摆放着木质茶几和柔软沙发"。
-- 严禁出现：角色、动物、人物、画风词或"空旷无人物"等工程词；场景本身即可作为独立背景。
-- 【道具关联】每个场景必须带 props 字段：字符串数组，列出该场景中剧本实际出现的道具名。只能使用本次提取结果中的道具名，禁止凭空创造；该场景没有道具则为空数组。
-
-═══════════════════════════════════════
-【道具资产提取要求】
-═══════════════════════════════════════
-- 【去重规则】同一件道具即使出现多次也只提取一次，禁止重复/近似重复。
-- 【范围约束】只提取**可交互、小型、推动剧情**的物件——即角色能拿在手里、使用或操作的物件（如手机、书本、钥匙、药瓶、火把）。不可移动的大型物体（建筑结构、地形、大型植物、固定设施如桥、门、石碑、古树、井台）和固定家具陈设（沙发、茶几、电视、床、柜子）属于场景本身的组成部分，不作为独立道具提取（除非该物件是剧情核心物件，如角色要搬走的宝箱）。
-- 只提取无生命道具或动物伙伴等非主角物体，绝对不包含人物、场景、环境。
-- **严禁把道具拟人化**：不要给道具添加人脸、眼睛、表情、肢体、情绪、站姿或拟人动作。
-- description **只写道具本身的静态视觉特征**：整体形状、尺寸参照、材质纹理、颜色细节、表面图案、开合/摆放状态。
-- **禁止写入**：功能用途、使用方式、使用场景、与角色的关系、角色手持/使用动作、周围环境、画风词或"纯白背景"等工程词。
-- 【专属角色 owner】每个道具必须标注 owner 字段：该道具在剧本中主要持有或使用的角色名（必须来自本次提取的角色清单）。多人共用时填主要持有者；无明确专属角色则填空字符串""。owner 是独立字段，description 仍不写角色关系。
-- 例如：手机只写"一部智能手机，外壳光滑，屏幕明亮"，不要写"用来拍摄短视频"；瓜子只写"一小袋散装瓜子，颗粒饱满，外壳浅褐色"，不要写"角色随手取用嗑食"。
-
-═══════════════════════════════════════
-【输出格式】
-═══════════════════════════════════════
-【英文字段·出片 prompt 直接消费】nameEn / descriptionEn（角色与道具）、titleEn / summaryEn（场景）、
-lightingEn（场景）是 H3 全英文出片 prompt 的**权威英文常量**，会被逐字复制进英文正文——
-**必须全英文，出现任何中文字符即违规**（汉字会被模型当台词念出来，本项目踩过多次事故）。
-summaryEn / descriptionEn 必须与对应中文 description 同信息量（分别是场景英文摘要、道具英文外形）。
+【平台 JSON 输出契约】
 {
-  "characters": [{"name": "角色名", "role": "主角/配角", "description": "简洁连贯的角色外貌与穿着描述", "nameEn": "English Name", "descriptionEn": "A small brown bear cub with round ears and a blue scarf... (must include species and fur color)"}],
-  "scenes": [{"name": "家中客厅", "description": "简洁连贯的场景环境、光照与氛围描述", "titleEn": "Living Room at Home", "summaryEn": "A compact living room with wooden furniture, soft natural light and a warm atmosphere... (English, matches description)", "lightingEn": "low slanting sunlight from the left, cold clear daylight, faint glints on the snow", "props": ["该场景中出现的道具名"]}],
-  "props": [{"name": "道具名", "description": "简洁连贯的道具外形、材质与状态描述（不含用途）", "nameEn": "English Prop Name", "descriptionEn": "A small worn wooden bowl with rough bark texture and chipped edges... (English, matches description)", "owner": "专属角色名"}]
-}
-
-只输出 JSON，不要任何其他文字、解释或 markdown 标记。`,
+  "characters": [{"name": "角色名", "role": "主角/配角", "description": "六要素一整段连贯文字（年龄/性别/肤色/发型发色/五官特征/服装），抓辨识度特征不过度展开；只写静态特征，严禁动作/姿态/剧情瞬态；饰品可随服装带出，武器装备一律不写在此", "nameEn": "English Name", "descriptionEn": "与中文同信息量的英文外貌（必须含物种与毛色/肤色；同物种多角色用≥2个硬视觉特征区分，严禁只靠配饰颜色）"}],
+  "scenes": [{"name": "场景名（必须逐字取自剧本原文的地点词，禁止添加形容/后缀/分隔符——剧本写「旧仓库」就只能写「旧仓库」，不得写成「废弃·旧仓库」）", "description": "正面全景微俯视大白话一整段：站位→近景地面→左到右中景→纵深远景→光线氛围；搬不走的固定环境才写在此，能搬走的物件一律不写；禁文学意境词", "spaceType": "S1/S2/S3/S4/O1/O2/X【尽力标注，不确定就填空字符串】——分镜侧会依据本场景的空间结构复核判定，错误标注反而有害，宁可留空", "spaceEvidence": "判定依据（面积/层高/开敞度一句话）；spaceType 留空时本项一并留空", "spatialGroup": "本场归属的物理空间组名：与同一物理空间的其它场景逐字同名（2-6字中文或snake_case英文）；独立空间写「独立空间」；不确定留空——同组各场的 spatialRole 必须互不相同", "spatialRole": "本场在组内的站位视角一句话（如「崖顶平台远望谷底」「窄道中段贴壁前行」），与同组其它场景不得重复", "sharedLandmarks": ["与同组其它场景共同出现的、搬不走的固定大型地标名（2-6字中文，如「断裂的古桥」「谷底河道」）——判定同人·物·场分离：能搬走的归 props，严禁列入；独立空间或无共享地标时省略本字段"], "titleEn": "English Title", "summaryEn": "与中文同信息量的英文环境摘要（光线氛围句同样翻译进英文摘要）", "props": ["该场景实际出现的道具名（须在本结果 props 里有同名条目）"]}],
+  "props": [{"name": "道具名", "description": "外形/材质/配色/细节/尺寸参照一整段；只写静态视觉特征，不写用途/使用方式/与角色的关系", "nameEn": "English Name", "descriptionEn": "与中文同信息量的英文外形", "owner": "主要持有者角色名（无则空字符串）", "states": [{"stateKey": "intact", "labelZh": "完整", "description": "该阶段中文形态", "descriptionEn": "该阶段英文形态"}]}]
+契约补充硬约束（平台出片实测教训，与 Skill 规则同级）：
+- ${buildSpaceTypeTable()}
+- 同一件道具/同一场景出现多次只提取一次；同一道具被多角色共用标全部持有者。
+- 场景 description 严禁出现可移动道具（手机/书本/食物/家具陈设），那些归 props。
+- 环境材质与气候保真：剧本写到的水体状态/气候季节/地表材质/大气现象必须原词保留，禁泛化；光照按剧本该时刻的原文写实（阳光照到哪、背光面是什么状态就写什么），禁止按环境类型一刀切色调（如"冰雪必须冷调"——剧本写了对岸有暖金阳光就必须写出来）。
+- nameEn/titleEn/summaryEn/descriptionEn 必须全英文（官方 ref-en 要求六个 section 用英文撰写；防汉字被模型误读为台词属平台实测考虑）。
+- states 仅在本集有可见状态变化（损毁/断裂/消耗/浸泡/易主损坏）时输出，首项 stateKey 固定 "intact"；无变化整个省略。
+- 只输出 JSON，不要任何其他文字、解释或 markdown 标记。`,
     },
     { role: 'user', content: `剧本内容：\n${script}` },
   ]
@@ -683,24 +734,30 @@ function normalizeShotAssets(shot, assetMaps) {
   }
 }
 
-function parseScriptSceneTitles(script) {
+// 场次标题解析（2026-09-26 修复）：原正则有两处失配——① 要求行首即「场次」，遇 Markdown
+// 标题（`### 场次 1：...`）全灭；② 要求「场次」与数字紧邻，遇「场次 1」（中间有空格）失配。
+// 两者叠加导致 8 场剧本被判为"无分场标记"→ 退化成按段落瞎切块，场次一一对应约束整体失效。
+const SCENE_TITLE_RE = /^#{0,6}\s*场次\s*[一二三四五六七八九十\d]+\s*[：:]\s*(.+?)\s*#*\s*$/
+
+export function parseScriptSceneTitles(script) {
   const titles = []
   for (const line of String(script || '').split('\n')) {
-    const m = line.match(/^场次[一二三四五六七八九十\d]+[：:\s]\s*(.+)/)
+    const m = line.match(SCENE_TITLE_RE)
     if (m) titles.push(m[1].trim())
   }
   return titles
 }
 
-function parseScriptSceneBlocks(script) {
+export function parseScriptSceneBlocks(script) {
   const lines = String(script || '').split('\n')
   const blocks = []
   let current = null
   for (const line of lines) {
-    const m = line.match(/^(场次[一二三四五六七八九十\d]+[：:\s]\s*(.+))$/)
+    const m = line.match(SCENE_TITLE_RE)
     if (m) {
       if (current) blocks.push(current)
-      current = { title: m[2].trim(), text: m[1] + '\n' }
+      // 块文本保留完整的场次标题行，供生成侧识别场次边界
+      current = { title: m[1].trim(), text: line.trim() + '\n' }
     } else if (current) {
       current.text += line + '\n'
     }
@@ -711,6 +768,10 @@ function parseScriptSceneBlocks(script) {
 
 const AUTO_CHUNK_MIN_CHARS = 2400
 const AUTO_CHUNK_MAX_CHARS = 2000
+// 文件规整的单批上限必须低于上游网关常见等待窗口；规整输出字段多，
+// 比剧本生成使用更保守的输入批次，避免 524 后整份文件重跑。
+const FILE_NORMALIZE_CHUNK_MIN_CHARS = 5200
+const FILE_NORMALIZE_CHUNK_MAX_CHARS = 7000
 
 function countNonSpace(text) {
   return String(text || '').replace(/\s/g, '').length
@@ -768,6 +829,52 @@ function chunkScriptByParagraphs(text, maxChars = AUTO_CHUNK_MAX_CHARS) {
   return chunks
 }
 
+function splitStoryboardFileIntoChunks(text, maxChars = FILE_NORMALIZE_CHUNK_MAX_CHARS) {
+  const source = String(text || '').replace(/\r\n/g, '\n').trim()
+  if (!source) return []
+  const headerRe = /^\s*(?:#{0,6}\s*)?(?:镜头|shot)\s*\d+\b.*$/i
+  const sceneRe = /^\s*(?:#{0,6}\s*)?(?:场次|第\s*[一二三四五六七八九十\d]+场)\s*\d*[：:]?.*$/
+  const lines = source.split('\n')
+  const shots = []
+  let preamble = []
+  let current = []
+  for (const line of lines) {
+    if ((headerRe.test(line) || sceneRe.test(line)) && current.length) {
+      shots.push(current.join('\n').trim())
+      current = []
+    }
+    if ((headerRe.test(line) || sceneRe.test(line)) && !shots.length && preamble.length) {
+      current.push(...preamble)
+      preamble = []
+    }
+    if (current.length || headerRe.test(line) || sceneRe.test(line)) current.push(line)
+    else preamble.push(line)
+  }
+  if (current.length) shots.push(current.join('\n').trim())
+  if (!shots.length) return chunkScriptByParagraphs(source, maxChars)
+  const chunks = []
+  let bucket = []
+  let length = 0
+  for (const shot of shots) {
+    if (bucket.length && length + shot.length + 2 > maxChars) {
+      chunks.push(bucket.join('\n\n'))
+      bucket = []
+      length = 0
+    }
+    bucket.push(shot)
+    length += shot.length + 2
+  }
+  if (bucket.length) chunks.push(bucket.join('\n\n'))
+  return chunks
+}
+
+function reportProgressForFileChunks(onProgress, total) {
+  if (typeof onProgress !== 'function') return
+  try {
+    onProgress({ phase: PHASE.NORMALIZE, done: 0, total, message: `文件较大，已拆为 ${total} 批规整，避免上游网关超时…` })
+  } catch { }
+}
+
 function buildAssetListPrompt(assets) {
   if (!assets) return ''
   const enCn = (en, cn) => {
@@ -791,6 +898,10 @@ function buildAssetListPrompt(assets) {
     const hasRef = typeof s !== 'string' && (s.image_url || s.imageUrl)
     const label = nameEn ? `${name} / ${nameEn}` : name
     let line = desc ? `- ${label}：${desc}` : `- ${label}`
+    const spaceTypeRaw = typeof s === 'string' ? '' : String(s.space_type || s.spaceType || '').trim()
+    if (spaceTypeRaw) {
+      line += `【空间类型：${spaceTypeRaw}——本场景所有镜头的景别上限与运镜禁令按 Skill 规则 §9 的 ${spaceTypeRaw} 条款执行】`
+    }
     const sceneProps = typeof s === 'string' ? [] : (s.props || s.propNames || [])
     if (Array.isArray(sceneProps) && sceneProps.length) {
       line += `（该场景关联道具：${sceneProps.map(String).join('、')}）`
@@ -906,72 +1017,6 @@ export async function repairShotAxis(shot, charName, prevSide, currSide, style =
   return raw
 }
 
-const MUSIC_REWRITE_MAX_CHARS = 200
-
-function sanitizeMusicText(raw) {
-  let s = String(raw || '').trim()
-  s = s.replace(/^```[a-zA-Z]*\s*/i, '').replace(/\s*```\s*$/i, '')
-  s = s.replace(/^(?:配乐|音乐)\s*[:：]\s*/, '')
-  return s.trim()
-}
-
-export async function rewriteShotMusic(shot) {
-  const original = String(shot?.nonDiegeticMusic || shot?.non_diegetic_music || '').trim()
-  if (!original) return null
-  const hits = findMusicMoodWords(original)
-  if (!hits.length) return original
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频配乐提示词工程师，精通 MiniMax H3 的 non_diegetic_music 写法。立刻输出改写后的配乐文本，不要任何思考、分析、解释或前言。
-
-【任务】原稿配乐文本里出现了 H3 规范禁止的情绪/氛围形容词：${hits.join('、')}。这类词描述的是"观众听了该有什么感受"，直接写给配乐模型反而与画面内容冲突。请把它们改写为可听的声音属性描述：
-- 配器：用什么乐器（如弦乐、钢琴、鼓、木管、合成器）；
-- 速度与节奏：慢速/中速/快速、节拍松紧、碎弓/连奏/切分；
-- 动态与技法：轻柔、渐强、渐弱、骤停、低音区持续、拨奏。
-例如"紧张"可写成"低音区弦乐碎弓，快节奏，短弓拉奏"——不出现"紧张"二字，但听感紧张。
-
-要求：
-- 保持原稿语言与声弧意图（该安静处仍安静，该渐强处仍渐强）；
-- 长度与原稿相当，一句话即可，禁止扩写；
-- 只输出改写后的配乐文本本身，不要 JSON、不要标题、不要解释。`,
-    },
-    { role: 'user', content: `【配乐原稿】\n${original}` },
-  ]
-  const text = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.2 : 0.1,
-      maxTokens: 400,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      usageContext: { task: 'storyboard-music', attempt },
-    }),
-    (raw) => {
-      const rewritten = sanitizeMusicText(raw)
-      if (!rewritten || findMusicMoodWords(rewritten).length) return null
-      if (rewritten.length > MUSIC_REWRITE_MAX_CHARS) return null
-      return rewritten
-    },
-    { attempts: 2, label: 'rewriteShotMusic' }
-  )
-  if (!text) {
-    console.warn('[rewriteShotMusic] 重试后仍含情绪词或超长，按修复失败处理')
-    return null
-  }
-  return text
-}
-
-const DYNAMIC_CAMERA_WORDS = Object.entries(CAMERA_MOVE_LEXICON)
-  .filter(([k]) => k !== 'static')
-  .flatMap(([, v]) => v)
-
-// H3 prompt 上限出处：MiniMax 官方 API 文档 platform.minimax.io "Prompt length limit ≤ 7000 characters"
-//（非 base-en/ref-en prompt 指南——指南里无此数字）。官方未说明超限行为，"静默截断"是本项目经验推断。
-const H3_PROMPT_LIMIT = 7000
-const CONDENSE_TARGET = 6900
-const LONG_SHOT_MIN_PROMPT_CHARS = 180
-
 function stripCodeFence(raw) {
   let s = String(raw || '').trim()
   s = s.replace(/^```[a-zA-Z]*\s*/i, '').replace(/\s*```\s*$/i, '')
@@ -982,449 +1027,6 @@ function tryParseJson(raw) {
   const s = stripCodeFence(raw)
   if (!s) return null
   try { return JSON.parse(s) } catch { return null }
-}
-
-// 质检修复：画风毒词改写——删去写实/CGI/照片级等风格切换词，把演出意图改写成画面语言。
-// 字段集与 validator stylePoisonScanTexts 对齐（含 blocking_plan / video_prompt_override）：
-// video_prompt_override 会直接顶替出片提示词开头、blocking_plan 会进导演请求，漏在这两处等于没修。
-// 返回键为 snake_case（即 shots 表列名），调用方可直接拼 SQL。
-export async function stripStylePoison(shot, styleTexts = '', style = '') {
-  const rawBp = shot?.blockingPlan || shot?.blocking_plan
-  const bpText = rawBp ? (typeof rawBp === 'object' ? JSON.stringify(rawBp) : String(rawBp)).trim() : ''
-  const fields = [
-    ['integrated_multimodal_description', String(shot?.integratedMultimodalDescription || '').trim()],
-    ['description', String(shot?.description || '').trim()],
-    ['final_frame', String(shot?.finalFrame || '').trim()],
-    ['action_note', String(shot?.actionNote || '').trim()],
-    ['blocking_plan', bpText],
-    ['video_prompt_override', String(shot?.videoPromptOverride || shot?.video_prompt_override || '').trim()],
-  ].filter(([, v]) => v)
-  if (!fields.length) return null
-  if (!findStylePoison(fields.map(([, v]) => v), styleTexts).length) return null
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师。立刻输出改写结果，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
-
-【任务】本镜文本含风格切换毒词——全片画风统一是铁律，"变强/异变/变身"只能用画面内容表达（体型/毛发/红眼/蒸汽/特效），不能切换画风。请删除这些风格切换词并把演出意图改写成画面语言。
-要求：
-- 保持原稿 6 模块结构、英文语言、@中文资产名、角色外貌锁定文字不变；
-- 只删毒词并改写演出意图，不增删角色、不改时长、不改景别与台词；
-- blocking_plan 是 JSON 调度方案：保持 JSON 结构与全部键名可解析，只改写文本值里的毒词；
-- 没有改动的字段原样回传，不要省略任何字段；
-- 输出严格 JSON：{${fields.map(([k]) => `"${k}":"..."`).join(', ')}}，不要 JSON 外的任何文字。`,
-    },
-    {
-      role: 'user',
-      content: `【本镜原稿】\n${fields.map(([k, v]) => `【${k}】\n${v}`).join('\n\n')}`,
-    },
-  ]
-  const raw = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.3 : 0.1,
-      maxTokens: 4000,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      responseFormat: { type: 'json_object' },
-      usageContext: { task: 'qc-style-poison', attempt },
-    }),
-    (r) => {
-      const parsed = tryParseJson(r)
-      if (!parsed) return null
-      const out = {}
-      for (const [k] of fields) {
-        const v = String(parsed[k] || '').trim()
-        if (!v) return null
-        out[k] = v
-      }
-      if (findStylePoison(Object.values(out), styleTexts).length) return null
-      // blocking_plan 原本是可解析 JSON 对象时，改写后必须仍是可解析 JSON（否则下游导演请求读不了）
-      if (bpText && typeof rawBp === 'object') {
-        try { JSON.parse(out.blocking_plan) } catch { return null }
-      }
-      return out
-    },
-    { attempts: 2, label: 'stripStylePoison' }
-  )
-  if (!raw) {
-    console.warn('[stripStylePoison] 重试后仍含毒词或解析失败，按修复失败处理')
-    return null
-  }
-  return raw
-}
-
-// 字段归一：camera_movement 是单值字段，模块1 只保留表现力最强的一个动态运镜
-// 注意：MiniMax H3 官方未规定"一镜一运镜"，此处归一仅因本项目的 camera_movement 字段为单值存储
-export async function unifyCameraMove(shot, style = '') {
-  const original = String(shot?.integratedMultimodalDescription || '').trim()
-  if (!original) return null
-  const firstLine = original.split('\n')[0].toLowerCase()
-  const found = DYNAMIC_CAMERA_WORDS.filter((w) => firstLine.includes(w))
-  if (found.length <= 1) return original
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 AI 视频控制式 prompt 写法（用于本项目的画面描述字段，按其六模块结构书写）。立刻输出改写后的正文，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
-
-【任务】原稿模块1 声明了 ${found.length} 个动态运镜（${found.join(',')}），超出本镜 camera_movement 单值字段的承载范围。请只保留其中表现力最强的一个运镜，删去其余运镜表述；选择标准：优先保留与主体动作最匹配、最能强化本镜叙事张力的那个。
-要求：
-- 只改模块1 的运镜表述，其余模块（画面/景别/台词/动作时间轴/声音/最终画面）原样保留；
-- 保持原稿 6 模块结构、英文语言、@中文资产名、角色外貌锁定不变；
-- 只输出改写后的 integrated_multimodal_description 正文，不要 JSON、不要标题、不要解释。`,
-    },
-    { role: 'user', content: `【本镜原稿】\n${original}` },
-  ]
-  const text = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.3 : 0.1,
-      maxTokens: 3000,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      usageContext: { task: 'qc-camera-unify', attempt },
-    }),
-    (r) => {
-      const rewritten = sanitizeIntegrated(r)
-      if (!rewritten) return null
-      const fl = rewritten.split('\n')[0].toLowerCase()
-      return DYNAMIC_CAMERA_WORDS.filter((w) => fl.includes(w)).length <= 1 ? rewritten : null
-    },
-    { attempts: 2, label: 'unifyCameraMove' }
-  )
-  if (!text) {
-    console.warn('[unifyCameraMove] 重试后仍含多个动态运镜，按修复失败处理')
-    return null
-  }
-  return text
-}
-
-// 质检修复：动作运镜失配——把固定机位改为与主体动作匹配的动态运镜
-export async function fixActionCameraMismatch(shot, style = '') {
-  const original = String(shot?.integratedMultimodalDescription || '').trim()
-  if (!original) return null
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 AI 视频控制式 prompt 写法（用于本项目的画面描述字段，按其六模块结构书写）。立刻输出改写结果，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
-
-【任务】本镜描述含主体强发力动作，但运镜是"固定"——大动作在静止画框里会死（动作即运镜被违反）。请把运镜改为与主体动作匹配的动态运镜（跟拍/环绕/手持晃动/推拉等，按动作类型择优）。
-要求：
-- 同时改写模块1 的运镜表述与本镜 camera_movement 字段值；
-- 其余模块原样保留，不增删角色、不改时长、不改景别与台词；
-- 保持原稿 6 模块结构、英文语言、@中文资产名、角色外貌锁定不变；
-- 输出严格 JSON：{"integrated_multimodal_description":"...","camera_movement":"..."}，camera_movement 用中文（如 跟拍/环绕/手持晃动/推近），不要 JSON 外的任何文字。`,
-    },
-    { role: 'user', content: `【本镜原稿】\n${original}` },
-  ]
-  const raw = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.3 : 0.1,
-      maxTokens: 3000,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      responseFormat: { type: 'json_object' },
-      usageContext: { task: 'qc-action-camera', attempt },
-    }),
-    (r) => {
-      const parsed = tryParseJson(r)
-      if (!parsed) return null
-      const imd = sanitizeIntegrated(String(parsed.integrated_multimodal_description || ''))
-      const cam = String(parsed.camera_movement || '').trim()
-      if (!imd || !cam || cam === '固定') return null
-      const fl = imd.split('\n')[0].toLowerCase()
-      if (!DYNAMIC_CAMERA_WORDS.some((w) => fl.includes(w))) return null
-      return { integratedMultimodalDescription: imd, cameraMovement: cam }
-    },
-    { attempts: 2, label: 'fixActionCameraMismatch' }
-  )
-  if (!raw) {
-    console.warn('[fixActionCameraMismatch] 重试后运镜仍非动态，按修复失败处理')
-    return null
-  }
-  return raw
-}
-
-// 质检修复：音乐语言漂移——把配乐翻译改写为全片主流语言
-export async function translateMusicLanguage(shot, targetLang = '', style = '') {
-  const original = String(shot?.nonDiegeticMusic || shot?.non_diegetic_music || '').trim()
-  if (!original) return null
-  const langDesc = targetLang === 'zh' ? '中文' : '英文'
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频配乐提示词工程师，精通 MiniMax H3 的 non_diegetic_music 写法。立刻输出改写后的配乐文本，不要任何思考、分析、解释或前言。
-
-【任务】原稿配乐文本语言与全片主流不一致。请把它翻译改写为${langDesc}，保持原稿的配器、速度、节奏、动态与声弧意图不变（该安静处仍安静、该渐强处仍渐强）。
-要求：
-- 只改语言，不增减音乐信息，一句话即可，禁止扩写；
-- 不出现抽象情绪词（如"紧张/悲伤"），只写可听的声音属性；
-- 只输出改写后的配乐文本本身，不要 JSON、不要标题、不要解释。`,
-    },
-    { role: 'user', content: `【配乐原稿】\n${original}` },
-  ]
-  const text = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.2 : 0.1,
-      maxTokens: 400,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      usageContext: { task: 'qc-music-translate', attempt },
-    }),
-    (r) => {
-      const rewritten = sanitizeMusicText(r)
-      if (!rewritten) return null
-      if (findMusicMoodWords(rewritten).length) return null
-      if (rewritten.length > MUSIC_REWRITE_MAX_CHARS) return null
-      // 收敛校验：改写后语言必须与目标一致，否则复检照样告警（检测按全片多数语言逐镜比对）。
-      // 口径与 validator isMostlyChinese 相同：中文表意字计数 vs 英文字母计数，无字素时不判。
-      if (targetLang === 'zh' || targetLang === 'en') {
-        const zh = (rewritten.match(/[一-龥]/g) || []).length
-        const en = (rewritten.match(/[A-Za-z]/g) || []).length
-        if (zh + en > 0 && (zh >= en ? 'zh' : 'en') !== targetLang) return null
-      }
-      return rewritten
-    },
-    { attempts: 2, label: 'translateMusicLanguage' }
-  )
-  if (!text) {
-    console.warn('[translateMusicLanguage] 重试后仍含情绪词或超长，按修复失败处理')
-    return null
-  }
-  return text
-}
-
-// 质检修复：提示词超限精简——压缩到 H3 单条上限以内
-export async function condensePrompt(shot, style = '') {
-  // H3 出片提示词由 description/action_note/final_frame 等结构化字段重建（不含 IMD——IMD 是出图提示词）。
-  // 超限应压缩这些出片源字段，而非 IMD。dialogue/运镜/景别是短字段或不可改（台词文本/侧位铁律），不动。
-  const origDesc = String(shot?.description || '').trim()
-  const origNote = String(shot?.actionNote || shot?.action_note || '').trim()
-  const origFf = String(shot?.finalFrame || shot?.final_frame || '').trim()
-  const origTotal = origDesc.length + origNote.length + origFf.length
-  if (!origTotal || origTotal <= CONDENSE_TARGET) return { description: origDesc, actionNote: origNote, finalFrame: origFf }
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师。立刻输出精简结果，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
-
-【任务】本镜出片提示词源字段（description + action_note + final_frame）总长 ${origTotal} 字符，接近/超出 H3 单条 ${H3_PROMPT_LIMIT} 字符硬上限（官方 API 文档明文），超限可能被静默截断丢内容。请把这三个字段精简到合计 ${CONDENSE_TARGET} 字符以内。
-精简策略（按优先级）：
-1. 压缩 action_note 动作时间轴的冗余过程描写（保留动作起点、转折、终点与拍点时间码，删去中间过渡的形容词铺陈）；
-2. 压缩 description 的冗余环境/氛围铺陈（保留角色站位、关键道具、空间关系）；
-3. 压缩 final_frame 的冗余描写（保留关键姿态、侧位 frame left/right、光位方向与色温）。
-要求：
-- 绝不删改：角色名、台词文本、景别、运镜、时长、关键姿态与侧位、光位方向；
-- action_note 保持「At X.Xs，动作」拍点格式；description/final_frame 保持原语言；
-- 输出严格 JSON：{"description":"...","action_note":"...","final_frame":"..."}，没有改动的字段原样回传，不要省略任何字段，不要 JSON 外的任何文字。`,
-    },
-    {
-      role: 'user',
-      content: `【原稿合计 ${origTotal} 字符】\ndescription:\n${origDesc}\n\naction_note:\n${origNote || '（空）'}\n\nfinal_frame:\n${origFf}`,
-    },
-  ]
-  const raw = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.3 : 0.1,
-      maxTokens: 4000,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      responseFormat: { type: 'json_object' },
-      usageContext: { task: 'qc-prompt-condense', attempt },
-    }),
-    (r) => {
-      const parsed = tryParseJson(r)
-      if (!parsed) return null
-      const desc = String(parsed.description || '').trim()
-      const note = String(parsed.action_note || '').trim()
-      const ff = String(parsed.final_frame || '').trim()
-      if (!desc || !ff) return null
-      const newTotal = desc.length + note.length + ff.length
-      if (newTotal >= H3_PROMPT_LIMIT) return null
-      if (newTotal < origTotal * 0.3) return null
-      return { description: desc, actionNote: note, finalFrame: ff }
-    },
-    { attempts: 2, label: 'condensePrompt' }
-  )
-  if (!raw) {
-    console.warn('[condensePrompt] 重试后仍超限或精简过度，按修复失败处理')
-    return null
-  }
-  return raw
-}
-
-// 质检修复：长镜薄提示词扩写——补过程性动作描写撑住时长
-export async function expandThinPrompt(shot, style = '') {
-  const original = String(shot?.integratedMultimodalDescription || '').trim()
-  const origNote = String(shot?.actionNote || shot?.action_note || '').trim()
-  if (!original) return null
-  // action_note 空时即使 IMD 够长也要继续扩——出片时间轴来源是 action_note，空则出片死气。
-  if (original.length >= LONG_SHOT_MIN_PROMPT_CHARS && origNote) return { integratedMultimodalDescription: original, actionNote: origNote }
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 AI 视频控制式 prompt 写法（用于本项目的画面描述字段，按其六模块结构书写）。立刻输出扩写结果，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
-
-【任务】本镜是长镜但提示词过短——长镜更需要过程性描述撑住时长，否则出片画面死气或模型自由发挥跑偏。请在不改变原稿核心动作、角色、台词、景别、运镜的前提下，【同时扩写两处】：
-① 模块4（英文动作时间轴）：补充过程性动作描写（动作的起势、进行、收势与身体细节），让画面有内容可演——出图通道读这里；
-② action_note（中文镜内时间轴，按拍点写「At X.Xs，动作」）：为本镜的过程动作补拍点描述（如「At 1.0s，…起势；At 2.5s，…进行；末 1.0s …收势」）——出片提示词只读 action_note，不写则出片模型看不到这些过程。
-要求：
-- 两处都要扩写，过程描写内容对应一致（模块4 英文版与 action_note 中文版描述同一组动作）；绝不新增剧情事件、不增删角色、不改台词与时长；
-- 保持原稿 6 模块结构、英文语言、@中文资产名、角色外貌锁定不变；
-- 输出严格 JSON：{"integrated_multimodal_description":"...","action_note":"..."}，action_note 用中文，不要省略任何字段，不要 JSON 外的任何文字。`,
-    },
-    {
-      role: 'user',
-      content: `【本镜原稿长度 ${original.length} 字符】\nintegrated_multimodal_description:\n${original}\n\naction_note:\n${origNote || '（空）'}`,
-    },
-  ]
-  const raw = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.4 : 0.2,
-      maxTokens: 4000,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      responseFormat: { type: 'json_object' },
-      usageContext: { task: 'qc-prompt-expand', attempt },
-    }),
-    (r) => {
-      const parsed = tryParseJson(r)
-      if (!parsed) return null
-      const imd = sanitizeIntegrated(String(parsed.integrated_multimodal_description || ''))
-      const note = String(parsed.action_note || '').trim()
-      if (!imd || !note) return null
-      if (imd.length <= original.length * 1.3) return null
-      if (imd.length >= H3_PROMPT_LIMIT) return null
-      return { integratedMultimodalDescription: imd, actionNote: note }
-    },
-    { attempts: 2, label: 'expandThinPrompt' }
-  )
-  if (!raw) {
-    console.warn('[expandThinPrompt] 重试后扩写不足或超限，按修复失败处理')
-    return null
-  }
-  return raw
-}
-
-// 质检修复：光线跳变对齐——把本镜光线对齐到同场上一镜
-// 质检修复：同场相邻镜光线方向/色温对齐。
-// 收敛口径与 validator checkLightFlip 完全对齐（同一 extractLightCues 提取器）：
-// - 基准 = prev finalFrame + prev IMD 首行（检出端两个都读，缺一个就会误导模型）；
-// - 双落点改写：模块2 与 final_frame 一起改——检出端读 curr(finalFrame + IMD 首行)，
-//   只改 IMD 会把跳变 cue 留在末帧里，复检照样告警、修复死循环。
-export async function alignLighting(shot, prevShot, style = '') {
-  const original = String(shot?.integratedMultimodalDescription || '').trim()
-  const origFf = String(shot?.finalFrame || shot?.final_frame || '').trim()
-  if (!original) return null
-  const prevBaseline = [
-    String(prevShot?.finalFrame || prevShot?.final_frame || '').trim(),
-    String(prevShot?.integratedMultimodalDescription || prevShot?.integrated_multimodal_description || '').split('\n')[0].trim(),
-  ].filter(Boolean).join(' ')
-  if (!prevBaseline) return null
-  const baselineCues = extractLightCues(prevBaseline)
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 AI 视频控制式 prompt 写法（用于本项目的画面描述字段，按其六模块结构书写）。立刻输出改写结果，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
-
-【任务】本镜与同场上一镜的光线方向/色温跳变，违反"同一场戏光线一致"。请把本镜模块2 环境描写的光线方向与色温、以及 final_frame（最终画面描述）里的光线描写，都对齐到【光线基准】，让两镜光线连贯。
-要求：
-- 只改模块2 与 final_frame 里的光线相关描写，其余模块原样保留，不增删角色、不改时长、不改景别与台词；
-- final_frame 若没有光线描写，保持其内容原样回传，不强行新增；
-- 保持原稿 6 模块结构、英文语言、@中文资产名、角色外貌锁定不变；
-- 输出严格 JSON：{"integrated_multimodal_description":"...","final_frame":"..."}，两字段都必须回传（没改动的原样回传），不要 JSON 外的任何文字。`,
-    },
-    {
-      role: 'user',
-      content: `【光线基准（上一镜最终画面 + 模块1）】\n${prevBaseline}\n\n【本镜原稿】\nintegrated_multimodal_description:\n${original}\n\nfinal_frame:\n${origFf || '（空）'}`,
-    },
-  ]
-  const raw = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.3 : 0.1,
-      maxTokens: 3500,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      responseFormat: { type: 'json_object' },
-      usageContext: { task: 'qc-lighting-align', attempt },
-    }),
-    (r) => {
-      const parsed = tryParseJson(r)
-      if (!parsed) return null
-      const imd = sanitizeIntegrated(String(parsed.integrated_multimodal_description || ''))
-      const ff = String(parsed.final_frame || '').trim()
-      if (!imd) return null
-      if (origFf && !ff) return null
-      if (imd.length < original.length * 0.5) return null
-      // 收敛校验：改写后 (IMD 首行 + final_frame) 的光线 cue 不得再与基准冲突
-      const newCues = extractLightCues([imd.split('\n')[0], ff].filter(Boolean).join(' '))
-      if (baselineCues.direction && newCues.direction && baselineCues.direction !== newCues.direction) return null
-      if (baselineCues.warmth && newCues.warmth && baselineCues.warmth !== newCues.warmth) return null
-      return { integratedMultimodalDescription: imd, finalFrame: ff }
-    },
-    { attempts: 2, label: 'alignLighting' }
-  )
-  if (!raw) {
-    console.warn('[alignLighting] 改写失败，按修复失败处理')
-    return null
-  }
-  return raw
-}
-
-// 质检修复：切点动作重复去重——删去本镜开头与上镜末帧重复的动作
-export async function dedupeActionOverlap(shot, prevShot, style = '') {
-  const desc = String(shot?.description || '').trim()
-  const imd = String(shot?.integratedMultimodalDescription || '').trim()
-  const prevFinal = String(prevShot?.finalFrame || prevShot?.final_frame || '').trim()
-  if ((!desc && !imd) || !prevFinal) return null
-  const messages = [
-    {
-      role: 'system',
-      content: `你是专业的 AI 视频提示词工程师。立刻输出改写结果，不要任何思考、分析、解释或前言。画风：${style || config.defaultArtStyle}（与原稿一致，禁止偏离）。
-
-【任务】上一镜最终画面停在某个动作上，本镜开头又把它从零做了一遍——同一动作被陈述两遍，叙事原地倒带。请把本镜开头的重复动作描述删去，让动作整段归本镜（即本镜从该动作的"进行/收势"开始，不从"起势"重做），或把重复动作收束为"承接上一镜末态继续"的衔接表述。
-要求：
-- 只删去与本镜开头重复的那段动作，绝不新增剧情、不增删角色、不改台词与时长、不改景别与运镜；
-- description 与 integrated_multimodal_description 都要改写（保持二者一致）；
-- 保持原稿 6 模块结构、英文语言、@中文资产名、角色外貌锁定不变；
-- 输出严格 JSON：{"description":"...","integrated_multimodal_description":"..."}，不要 JSON 外的任何文字。`,
-    },
-    {
-      role: 'user',
-      content: `【上一镜最终画面（动作末态）】\n${prevFinal}\n\n【本镜原稿】\ndescription:\n${desc}\n\nintegrated_multimodal_description:\n${imd}`,
-    },
-  ]
-  const raw = await generateWithVerify(
-    (attempt) => chatCompletion(messages, {
-      temperature: attempt === 1 ? 0.3 : 0.1,
-      maxTokens: 3500,
-      timeoutMs: config.timeouts.llm.repair,
-      maxAttempts: 2,
-      disableThinking: true,
-      responseFormat: { type: 'json_object' },
-      usageContext: { task: 'qc-action-dedupe', attempt },
-    }),
-    (r) => {
-      const parsed = tryParseJson(r)
-      if (!parsed) return null
-      const newDesc = String(parsed.description || '').trim()
-      const newImd = sanitizeIntegrated(String(parsed.integrated_multimodal_description || ''))
-      if (!newDesc || !newImd) return null
-      if (newDesc === desc && newImd === imd) return null
-      return { description: newDesc, integratedMultimodalDescription: newImd }
-    },
-    { attempts: 2, label: 'dedupeActionOverlap' }
-  )
-  if (!raw) {
-    console.warn('[dedupeActionOverlap] 重试后未有效去重，按修复失败处理')
-    return null
-  }
-  return raw
 }
 
 export async function fixAxisFlips(scenes, charNames, style = '', aliasMap = null, onProgress = null) {
@@ -1503,134 +1105,182 @@ export async function fixAxisFlips(scenes, charNames, style = '', aliasMap = nul
   return { pending: pending.length, fixed, failed, unresolved, repairedShots }
 }
 
-export function extractFinalFrameFromIntegrated(imd) {
-  const text = String(imd || '')
-  const idx = text.lastIndexOf('The final frame:')
-  if (idx < 0) return ''
-  return text.slice(idx).trim().slice(0, 1500)
+function buildAssetEnglishNameMap(assets) {
+  const map = new Map()
+  for (const group of ['characters', 'scenes', 'props']) {
+    for (const asset of Array.isArray(assets?.[group]) ? assets[group] : []) {
+      const name = String(asset?.name || asset?.title || '').trim()
+      const nameEn = String(asset?.name_en || asset?.title_en || '').trim()
+      if (name && nameEn) map.set(name, nameEn)
+    }
+  }
+  return map
 }
 
-// 景别归一化：产线只认 4 个值（全景/中景/近景/特写，见 shotType 提示词与 h3PromptTranslator.SHOT_SIZE_MAP）。
-// 旧实现在白名单未命中时一律兜底成「中景」，会把 LLM 偶尔自由发挥的「大远景/远景/中全景」静默压成中景（跨度 3 档）；
-// 现改为按语义取最近档归并，只有真正无法判断的值才落中景。
-const SHOT_TYPE_FALLBACK = {
-  '大远景': '全景', '远景': '全景', '大全景': '全景', '中全景': '全景', '远全': '全景', '广角': '全景',
-  '中近景': '近景', '中近': '近景', '半身': '近景',
-  '大特写': '特写', '极特': '特写', '微距': '特写',
+// The IMD intentionally uses @ChineseName for deterministic asset binding. H3's
+// final-frame field is a separate English-only contract, so translate only known
+// asset placeholders from the asset registry and leave unknown CJK text invalid.
+export function extractFinalFrameFromIntegrated(imd, assets = null) {
+  const text = String(imd || '')
+  const matches = [...text.matchAll(/the\s+final\s+frame\s*:/gi)]
+  if (!matches.length) return ''
+  let frame = text.slice(matches[matches.length - 1].index).trim().slice(0, 1500)
+  const names = buildAssetEnglishNameMap(assets)
+  if (names.size) {
+    for (const [name, nameEn] of [...names.entries()].sort((a, b) => b[0].length - a[0].length)) {
+      frame = frame.replaceAll(`@${name}`, nameEn)
+    }
+  }
+  return frame
 }
-export function normalizeShotType(raw) {
-  const t = String(raw || '').trim()
-  if (['全景', '中景', '近景', '特写'].includes(t)) return t
-  if (SHOT_TYPE_FALLBACK[t]) return SHOT_TYPE_FALLBACK[t]
-  // 子串兜底：优先匹配更长/更具体的档位语义
-  if (t.includes('特写')) return '特写'
-  if (t.includes('近')) return '近景'
-  if (t.includes('远') || t.includes('全')) return '全景'
-  return '中景'
+
+function replaceKnownAssetNamesInEnglish(text, assets) {
+  let value = String(text || '').trim()
+  if (!value) return value
+  const entries = []
+  for (const group of ['characters', 'scenes', 'props']) {
+    for (const asset of Array.isArray(assets?.[group]) ? assets[group] : []) {
+      const name = String(asset?.name || asset?.title || '').trim()
+      const nameEn = String(asset?.name_en || asset?.title_en || '').trim()
+      if (name && nameEn) entries.push([name, nameEn])
+    }
+  }
+  for (const [name, nameEn] of entries.sort((a, b) => b[0].length - a[0].length)) {
+    value = value.replaceAll(`@${name}`, nameEn)
+    value = value.replaceAll(name, nameEn)
+  }
+  return value.trim()
 }
+
+const FINAL_FRAME_CJK_RE = /[\u3400-\u9fff]/
+const FINAL_FRAME_FACING_RE = /\bfacing\b|gazing\s+toward|looking\s+toward|turned\s+toward/i
+const FINAL_FRAME_BACK_RE = /back\s+to\s+(?:the\s+)?camera|facing\s+away|with\s+their\s+back\s+to/i
+const FINAL_FRAME_SEATED_RE = /\b(?:sit(?:s|ting)?|seated|crouch(?:es|ing)?)\b/i
+const FINAL_FRAME_STANDING_RE = /\bstand(?:s|ing)?\b|\bon\s+(?:their|her|his)\s+feet\b/i
+const FINAL_FRAME_KNEELING_RE = /\bkneel(?:s|ing)?\b/i
+
+// Repair only the fields that are mechanically derivable from the contract. The
+// source finalFrame remains preferred; IMD/worldStateOutEn are fallbacks when a
+// model accidentally emits CJK text or drops the orientation anchor.
+export function repairFinalFrameForContract(shot, assets = null) {
+  if (!shot || typeof shot !== 'object') return false
+  const original = String(shot.finalFrame || shot.final_frame || '').trim()
+  const candidates = [
+    original,
+    extractFinalFrameFromIntegrated(shot.integratedMultimodalDescription, assets),
+    String(shot.worldStateOutEn || shot.world_state_out_en || '').trim(),
+  ].map((value) => replaceKnownAssetNamesInEnglish(value, assets)).filter(Boolean)
+  let frame = candidates.find((value) => !FINAL_FRAME_CJK_RE.test(value)) || candidates[0] || ''
+  const state = String(shot.worldStateOut || shot.world_state_out || '')
+  const stateEn = replaceKnownAssetNamesInEnglish(String(shot.worldStateOutEn || shot.world_state_out_en || ''), assets)
+
+  if (/(背对|背向)/.test(state) && !FINAL_FRAME_BACK_RE.test(frame)) {
+    frame = `${frame.replace(/[.!?\s]+$/, '')}, with their back to the camera.`
+  }
+  if (/(坐|蹲)/.test(state) && !FINAL_FRAME_SEATED_RE.test(frame)) {
+    const clause = stateEn.match(/\b(?:sit(?:s|ting)?|seated|crouch(?:es|ing)?)\b[^.;,]*/i)?.[0]
+    frame = `${frame.replace(/[.!?\s]+$/, '')}, ${clause || 'seated'}.`
+  }
+  if (/(站|立)/.test(state) && !FINAL_FRAME_STANDING_RE.test(frame)) {
+    const clause = stateEn.match(/\b(?:stand(?:s|ing)?|on\s+(?:their|her|his)\s+feet)\b[^.;,]*/i)?.[0]
+    frame = `${frame.replace(/[.!?\s]+$/, '')}, ${clause || 'standing'}.`
+  }
+  if (/(跪)/.test(state) && !FINAL_FRAME_KNEELING_RE.test(frame)) {
+    const clause = stateEn.match(/\bkneel(?:s|ing)?\b[^.;,]*/i)?.[0]
+    frame = `${frame.replace(/[.!?\s]+$/, '')}, ${clause || 'kneeling'}.`
+  }
+  if (/(面向|朝向|朝着)/.test(state) && !FINAL_FRAME_FACING_RE.test(frame)) {
+    const clause = stateEn.match(/(?:facing|gazing\s+toward|looking\s+toward|turned\s+toward)\b[^.;,]*/i)?.[0]
+    frame = `${frame.replace(/[.!?\s]+$/, '')}, ${clause || 'facing forward'}.`
+  }
+  if (!frame) return false
+  const changed = String(shot.finalFrame || '').trim() !== frame
+  shot.finalFrame = frame
+  return changed
+}
+
+// 景别归一已抽到 ai/shotTypes.js（档位表 / 归并表 / 英文映射三处共用同一份数据）
 
 
 export async function generateStoryboard(script, style = config.defaultArtStyle, assets = null, options = {}) {
-  // 画风毒词豁免文本：画风名 + 类别桶词（realistic / 3d-special 等）。realistic 类项目
-  // 写「照片级/真实感」属描述自己的画风，不应判定为切画风。
-  const styleForPoison = stylePoisonText(style, options.styleCategory)
   const targetDuration = Number(options.targetDuration) || 0
   const assetMaps = assets ? buildAssetMaps(assets) : null
   const scriptSceneTitles = parseScriptSceneTitles(script)
   const assetListPrompt = assets ? buildAssetListPrompt(assets) : ''
-  const directorNotesPromptText = directorNotesPrompt(options?.directorNotes || '')
+  // Skill 规则（唯一事实源）+ 平台契约适配段：方法论服从 Skill，格式/物理边界服从契约
+  const skillRules = loadSkillRules()
+  const contractBlock = buildStoryboardContract()
+  const physicsBlock = buildH3PhysicsBlock()
 
   const buildAndRun = async (retryNote, sceneScope = null) => {
     const messages = [
       {
         role: 'system',
-        content: `你是一个专业的分镜师，精通 AI 视频生成的"控制式 prompt"写法，同时是一名有强烈导演意识的镜头设计者。请根据剧本和画风，生成详细的分镜脚本，输出严格的 JSON 格式。【重要】立刻输出 JSON，禁止任何思考、分析、解释或前言。回复必须以一个左大括号 { 开头，以一个右大括号 } 结尾，中间是合法 JSON。${assetListPrompt}
-【最高优先级 · 切镜总纲（压过后文一切规则）】默认长镜，例外才切。同一主体、同一空间、同一目的下的连续动作，优先用一条 8-15s 长镜完成——"运镜能带观众走到的，不用切镜去看"。只有切镜能挣得下列收益时才切：①新主体登场 ②时空跳变（换场景/换时间）③新危险或新发现且同一机位无法完整表达 ④独立情绪反应需独立承接 ⑤关系或决定改变 ⑥台词信息推进（说话对象切换）。景别变化用推近/拉远完成、不切；无新增信息的连续对白同镜闭合；无明确收益就【不切】。后文所有规则的解读，以本条总纲为准。
-【剧本格式说明·必读】剧本的每一行/每一段是一个叙事信息点，【不是镜头】——严禁把剧本的换行、空行或分行当作镜头切点。请按任务边界重新组织：同一主体、同一空间、同一目的下的多个连续信息点必须合成一条 8-15s 长镜；一场戏的镜头数由【任务边界的数量】决定，与剧本的行数/段落数无关。${directorNotesPromptText}${episodeStructureRule()}${genreTemplateRule()}${actionDensityRule()}${beatLayerRule()}${cinematicGrammarRule()}${stagingRule()}${pointOfViewRule()}${emotionArcRule()}${cameraCraftRule()}${cameraBeatRule()}${holdRule()}${editRule()}${cameraAngleRule()}${cinematographyRule()}${frameGeographyRule()}${styleLockRule(style, options.styleCategory || '')}${llmBoundaryRule()}${retryNote}
+        content: `你是一名电影分镜导演。你的镜头设计方法论以【Skill 分镜规则】为唯一权威来源（xiaomo-film-studio 小墨影视工作室），下方规则全文必须先通读、全部硬性约束严格遵守（场景空间适配 S1-S4/O1/O2/X、侧45度默认机位体系、情绪匹配、180°轴线与30°规则、站桩说话禁令与长镜头拆分、表演克制三通道、五层色彩、光源动机与物理雾双检、全程无背景音乐）。
+【冲突仲裁】Skill 规则教你输出 Markdown 文档；本平台是生产管线——【镜头设计方法论服从 Skill 规则，输出格式服从平台 JSON 契约】（时长/字段/BGM 等冲突处一律服从契约）。【重要】立刻输出 JSON，禁止任何思考、分析、解释或前言。回复必须以一个左大括号 { 开头，以一个右大括号 } 结尾，中间是合法 JSON。
 
-【核心原则】AI 视频生成不是描述氛围，而是用文字在 AI 潜在空间里建立一个搬不走的三维空间。必须遵循六大铁律：
-1. 时间切片与切镜准则——【总纲：默认长镜，例外才切】
-   【第一原则·压过一切】运镜能带观众走到的，不用切镜去看。同一主体、同一空间、同一目的下的连续动作，优先用一条 8-15s 长镜完成——"跟拍主体移动→主体停驻→环视揭示新方位"、"听见声音→判断方向→循声走去"、"跳上岸→拍掉身上的水→抬头看四周"、"落地→站稳→抬头发现目标"，都是一条镜头的事。动作多不等于必须切镜。
-   【切镜是例外，必须挣得收益】只有切镜能获得下列至少一项真实收益时才切：① 新主体登场（新角色首次入画）；② 时空跳变（换场景/换时间）；③ 新危险或新发现（且同一机位无法完整表达"发生+反应"）；④ 独立情绪反应需要独立承接；⑤ 关系或决定发生改变；⑥ 台词信息推进（说话对象切换、信息需要独立承接）。
-   【明确不要切】景别变化（全景→中景→特写）用推近/拉远完成，不切；单纯动作推进用一镜到底；无新增信息的连续对白同镜闭合（台词不得为凑切点被拆散）；"缩手→压低肩背"这类同一反应任务不切；危险与反应可由同一机位表达时优先一镜到底。无明确收益就【不切】。
-   【时长预算用长镜消化】在满足本场时长目标的前提下，优先通过加长单镜（8-15s 一镜到底的连续任务/连续运镜）来消化时长，而不是增加镜头数——如"跟拍主体移动→停驻→环视揭示"应写成一条 10-14s 长镜，而非拆成 3 条短镜。4-6s 短镜仅用于：对话反打、独立反应承接、危险瞬间的节奏断点。
-   【一个镜头一个任务句】若发现需要塞入第二个【独立任务】（新主体登场 / 时空跳变 / 新危险爆发 / 关系或决定改变）才必须拆成两镜；同一连续任务内的动作推进与运镜揭示（跟拍走近→停驻→环视看到新景物）仍属一条镜头，不拆。禁止多任务挤一镜。
-   【拆后复核】如果确实拆了，逐对检查后镜是否新增主体/空间/视角/状态/信息/危险/情绪/关系——没有新增就撤销切镜、合回一条。
-   【若确实要切：跳切预防】相邻两镜的景别与机位必须至少拉开一项（景别不同；本项目景别只有 全景/中景/近景/特写 四档，全景→中景 跨一档、全景→近景 跨两档；或机位朝向换档满足 30° 法则：正面→侧面→背面）。景别相同且机位相同的硬切 = 跳切，禁止（前后镜动作连续的动作匹配剪辑除外）。
-   【节奏】连续动作段落可用跟拍、推拉、环绕和时长变化制造速度，不得为了"快"机械切碎；只有对抗双方独立发力、视角反打或危险升级需要分别承接时才缩短镜头。安静与抒情段落允许 7-15 秒长镜，用时长和运镜完成余韵。
-   【时间切片基础】每镜 4-15 秒（H3 模型官方上限 15s；实际成片会对齐 17 帧网格档位，如请求 15s 出 15.08s，属正常）；镜头边界按"任务完成或任务转向"划分，不按逗号、动作动词数量或剧本句号机械切片。
-2. 状态继承：非首镜开头承接上一镜最终画面（人物姿态、位置、构图、光线延续），承接即刻完成、不设冻结期，本镜动作与台词可从第 0 秒直接开始
-3. 视觉锁定：角色必须用 "exactly as shown" + 完整外貌（物种/颜色/耳朵/眼睛/腮红/鼻子/嘴巴/轮廓/服装逐部位描写）。【外貌内容硬约束】描写内容必须【逐字复制】资产清单中该角色的 description（有参考图的角色同样如此：文字特征与参考图互为双重锚定，参考图本身也从该 description 生成）——它是角色唯一权威外貌；清单里没有的特征（帽子、服装、性别、年龄、体型等）绝对禁止自行添加，禁止为了让画面更"有趣"而改编角色形象
-4. 道具专属：每个道具声明 "belongs exclusively to @XX"，其他角色 "paws/hands remain empty"。【有参考图的道具】外观以参考图为准，不要描写外观细节
-5. 动作微分解：道具动作必须拆成 动作方式(gently/slowly) → 最终状态(rests upright/stands steady) → 材质确认(weave/color unchanged) → 否定约束(does not fall/disappear/change hands) 四段
-6. 多模态分离：画面/声景/音乐/台词分模块独立书写
-7. 场景锁定：环境描写内容必须【逐字复制】资产清单中该场景的 description（有参考图的场景同样如此：文字与参考图互为双重锚定），禁止编造清单外的环境元素（植被/建筑/光线等）
+<skill_storyboard_rules>
+${skillRules.storyboard}
+</skill_storyboard_rules>
 
-每个镜头必须输出以下字段：
-- shotType: 景别 全景/中景/近景/特写
-- startTime/endTime: 时间轴（秒，整数），duration = endTime - startTime，范围 4-15 秒
-- description: 中文画面描述。【硬约束·必读】必须是一句连贯叙事，【40-80 字】，不能短于 30 字也不能超 100 字；用 @角色名 / @道具名 / @场景名 标记每一个出现的资产；严禁：换行/分段/列表/项目符号/JSON 风格、"音效：..."/"角色：..."/"场景：..."/"BGM：..."/"画面：..." 等任何带冒号的段落小标题、"（无 BGM 配乐）"这类元注释、英文 AI prompt 词汇（Audio/Visual/Camera/Characters 等）、【结构性标记，会原样泄漏进出片提示词】"模块1~6"/"Module 1~6"/"At 00:02.000"这类时间戳/结构名/字段名（shotType/finalFrame/cameraMovement 等）、把 integratedMultimodalDescription 的内容塞进来。正确示例："@角色乙 踩着 @道具丙 沿 @地点丙 滑行，@角色甲 从后面跃上 @角色乙 的背。"；错误示例（绝不能这样写）："音效：海浪、海风、海鸥"（这是 overallSoundscape）、"角色甲：浅棕色幼犬团子..."（这是 integratedMultimodalDescription 模块2）、"模块1 [Shot 1] 全景..."（结构标记，出片时会被翻译成噪音）。【摄影落点】景深/影调/光质/焦段质感写进本字段（10-15 字，如"侧逆光勾出轮廓，背景虚化"），不要只写进模块3——出片提示词不读模块3
-- purpose: 【必填】本镜叙事任务（中文一句话，10-30字）：这个镜头承担的叙事功能、"为什么切这一刀"，如"建立空间关系""危机升级推动逃跑决定""反应镜头承接发现"
-- goal: 【必填】观众任务（中文一句话，10-30字）：本镜结束时观众应获得的信息增量或情绪变化，如"知道篮里装的是过冬食物""为角色乙的安危担忧"
-- emotionTone: 【必填】本镜情绪基调（中文2-6字），如"克制不安""明快温暖""压抑紧绷""释然"
-- infoPoints: 【必填】本镜必须让观众看清的关键信息点（中文短语数组，0-3个；纯氛围镜可为空数组）。【硬约束】每个信息点都必须织入 description 或 actionNote 的可见描写中——出片提示词只从这两个字段取料，信息点只写在本字段而不进画面描写，等于没写
-- worldStateOut: 【必填】本镜结束瞬间的实体状态快照（中文，分号分隔的紧凑格式）：列出每个出场角色的"画面位置·手持·朝向"和每个关键道具的"位置·状态"。这是镜间一致性校验与下一镜画面承接的结构化依据，必须与 finalFrame 完全一致。示例："@角色甲：画面左·右手持@道具甲·面向右；@角色乙：画面右·手空·面向左；@道具甲：@角色甲右手·直立"
-- actionNote: 【必填·本镜镜内时间轴】动作说明，按拍点写（中文）：「At X.Xs，动作」。例「0-2s 保持静止；At 2.0s 攥紧信纸；At 4.5s 抬头看向门口；末 0.8s 静止无动作」。本字段是【出片提示词的时间轴来源】——拍点、运镜三段式起止时刻、留白秒数都写在这里。（写进 integratedMultimodalDescription 模块4 对出片无效：出片提示词不读模块4。）
-- cameraMovement: 固定/推近/拉远/变焦推近/变焦拉远/左摇/右摇/左移/右移/摇上/摇下/升高/降低/环绕/跟拍/手持跟拍/主观/滚转【运镜规则】本字段为单值，只填一个运镜（H3 官方运镜规范 base-en.txt §4.3：运动类型 + 幅度 small/large + 速度 slow/fast 三维，出片时写成画面描述的自然英文句，禁止句尾堆标签）。情绪升级/震惊发现/危机逼近用快速变体（急推/快推/急拉/快甩/快摇左/快摇右/急移左/急移右/急摇上/急升/急降/急环绕/急跟）；安静抒情/情绪沉淀段落用缓慢变体（缓推/缓拉/缓摇左/缓摇右/缓移左/缓移右/缓摇上/缓升/缓降/缓环绕/缓跟/缓变焦）；移动段落用跟拍或手持跟拍。俯拍/仰拍是机位朝向不是运镜，写进 camera_angle，不要写在这里
-- camera_angle: 机位朝向，六选一：正面/侧面/背面/过肩/俯拍/仰拍（必须与运镜语义一致，见上方【机位朝向硬约束】；出片靠这个字段锚定首帧朝向，缺失会导致朝向被参考图带偏）
-- soundEffects: 画内音效描述，没有则为空字符串
-- overallSoundscape: 环境声和空间氛围，没有则为空字符串
-- nonDiegeticMusic: 非画内音乐建议，没有则为空字符串
-- isCombat: 【必填】本镜戏型布尔值。true=武戏（有肢体冲突/物理撞击/打斗/变身/狂暴/追击/破坏等动作对抗），false=文戏（对话、情绪、观望、行走、静态展示等无对抗动作）。判定看【本镜自身内容】，不要看场次号或它在剧本里的位置。出片时武戏会加载打斗 LoRA，文戏不加载，判错会直接毁掉画面调性，务必准确。
-- dialogue: ${dialogueRule()}
-- characters/sceneAssets/propAssets: 资产名数组。${assetNameRule()}${characterCoverageRule()}无法确定某个名字是否在清单里时，宁可不列也不要猜
-- finalFrame: 【必填】本镜最终画面精确描述（英文）：每个角色的精确位置和朝向、每个道具的精确位置和状态、环境光照氛围、角色表情。这是下一镜画面承接的依据。【摄影落点】光位 + 绝对方向 + 色温必须同时写全（如 "warm golden light from frame left"）——只写色温不写方向等于没声明，出图时光源位置会随参考图漂移。【画面地理硬约束】每个可见角色必须带画面侧位（at frame left / at frame right / at center frame）与视线锚物（gazes toward @角色/具体物体），并至少声明一个不动环境锚点的画面位置，详见上方【画面地理硬约束（Frame Geography）】。
-- integratedMultimodalDescription: 【必填】给 AI **图像**模型使用的完整多模态提示词（用途：生成分镜图 / 首帧 / 尾帧锚），必须严格按以下 6 模块结构书写（英文，用换行分隔）。【重要·落点】出片（视频）提示词**不读本字段**——它是按 shot_type / description / action_note / camera_movement / camera_angle / finalFrame 重建的。因此：留白、镜内拍点、运镜三段式起止时刻写入 actionNote；景深/影调/光质/焦段质感写入 description；光位+方向+色温写入 finalFrame。只写在本字段里的时间维度内容对出片无效。【篇幅硬约束】每个模块 1-2 句，整段不超过 220 词——超长会被输出截断导致整体失败，精炼比详尽更重要：
+<skill_visual_quality>
+${skillRules.visualQuality}
+</skill_visual_quality>
 
-  ${integratedModulesRule()}
+${contractBlock}
+${physicsBlock}
+${assetListPrompt}
+【剧本格式说明·必读】剧本的每一行/每一段是一个叙事信息点，【不是镜头】——严禁把剧本的换行、空行或分行当作镜头切点；一场戏的镜头数由剧本情形与 Skill 规则裁决。${styleLockRule(style, options.styleCategory || '')}${retryNote}
 
-${timelineRule()}
+每个镜头必须输出以下字段（JSON 键名严格如下，定义见上方【平台 JSON 输出契约】）：
 
-输出格式：
+输出格式（严格合法 JSON，以 { 开头 } 结尾，字段名与契约一致）：
 {
   "scenes": [
     {
       "title": "场次标题",
       "shots": [
         {
-          "shotType": "全景",
+          "shotType": "中景",
+          "spaceType": "O2",
+          "spaceEvidence": "两侧高墙夹持的窄巷，只容一人通过，左侧高墙右侧临空",
+          "lens": "标准 35mm",
+          "cameraAngle": "侧45度",
+          "cameraElevation": "微俯",
+          "cameraMovement": "跟拍",
           "startTime": 0,
-          "endTime": 6,
-          "duration": 6,
-          "description": "@角色甲抱着@道具甲走到@地点乙旁...",
-          "actionNote": "角色入画，道具就位",
-          "cameraMovement": "固定",
-          "soundEffects": "脚步声、道具轻放声",
-          "overallSoundscape": "微风拂过树叶沙沙声，远处鸟鸣",
-          "nonDiegeticMusic": "木吉他慢板琶音",
-          "isCombat": false,
-          "purpose": "建立野餐场景的空间与角色站位关系",
-          "goal": "观众知道两人已就位、即将开始野餐",
-          "emotionTone": "明快温暖",
-          "infoPoints": ["野餐垫与食物篮的位置", "两人并肩的站位关系"],
-          "worldStateOut": "@角色甲：画面左·右手挎篮·面向镜头；@角色乙：画面右·手空·面向镜头；篮子：毯子近左角·直立；烤炉：右侧草地·立稳",
+          "endTime": 8,
+          "duration": 8,
+          "description": "画面内容 3-6 句：覆盖关键人物位置与动作、声明视觉中心；光影叙事直接写在本字段（光源方向/光位/色温/明暗交界线）；情绪用可见动作与微表情外化，禁形容词直给",
+          "colorLighting": "按本集视觉基调填写：主色调定性+高光/阴影参考色值+色温数值+五层参数（palette主色调/saturation饱和度/film_stock胶片感/grain颗粒/halation光晕），全部从剧本视觉基调推导，不得自造基调",
+          "actionNote": "0-1s 保持静止；At 1.5s 抬头看向目标；末 1s 静止无动作",
           "dialogue": null,
-          "characters": ["角色甲","角色乙"],
-          "sceneAssets": ["地点甲"],
-          "propAssets": ["道具甲","道具乙"],
-          "finalFrame": "The final frame: @角色甲 stands at frame left and @角色乙 at frame right, side by side at the near edge of the blanket facing the camera, @角色甲's basket resting upright on the blanket's left corner, @角色乙's grill standing on the grass at frame right, the picnic tree standing at frame right behind them, both characters smiling softly under the dappled tree shade, their gazes toward the camera.",
-          "integratedMultimodalDescription": "[Shot 1] the project's declared art style, warm late-morning sunlight. Wide establishing shot, 中距离, 正前方平视, static then slow push in.\\n@角色甲, exactly as shown, a white panda dumpling with two solid dark-brown round ears, small black dot eyes, pink blush cheeks, a dark-brown bow tie, dark-brown paw pads, clean dark-brown outlines. @角色乙, exactly as shown, a light-brown bear dumpling with small round brown ears, small black dot eyes, creamy-yellow blush cheeks, a pink nose and mouth, clean dark-brown outlines. 本片段无台词，两角色 lips remain completely closed.\\nThe blanket, tree, stream, meadow, hills, and clouds remain completely unchanged in structure, color, and arrangement throughout the entire segment — no flower shifts, no cloud disappears.\\nAt 00:00.000, @角色甲 holds the bamboo basket gently in her right hand; at 00:03.000, @角色甲 lowers the bamboo basket gently onto the corner of the blanket; the basket rests upright on the blanket's near-left corner, its light tan cross-hatched bamboo weave unchanged, it does not fall, does not disappear. @角色乙 sets the charcoal grill down on the grass; the grill rests on the grass, its matte black cast-iron body unchanged.\\nThe bamboo basket belongs exclusively to @角色甲, and @角色乙 does not hold or carry the bamboo basket at any point, his paws remain empty. The charcoal grill belongs exclusively to @角色乙, and @角色甲 does not hold or carry the charcoal grill at any point.\\nThe final frame: @角色甲 stands at frame left and @角色乙 at frame right, side by side at the near edge of the blanket facing the camera, @角色甲's basket resting upright on the blanket's left corner, @角色乙's grill standing on the grass at frame right, the picnic tree standing at frame right behind them, both characters smiling softly under the dappled tree shade, their gazes toward the camera."
+          "soundEffects": "环境风声、衣料摩擦的细响",
+          "overallSoundscape": "本场景的环境底噪（按剧本环境描述写，如风声/雨声/街市人声/虫鸣）",
+          "nonDiegeticMusic": "",
+          "humanVoice": "",
+          "finalFrame": "The final frame: X stands at frame left facing frame right, gazing toward the target, key light from frame left, shadows cast on the ground.",
+          "integratedMultimodalDescription": "[Shot 1] [本项目画风的英文风格声明，按 styleLockRule 指定的画风填写，不得套用其他画风]. Medium shot, medium distance, 45-degree side angle slightly from above, the camera tracks forward at slow speed. Module 2 [Style & Character Lock]: @角色甲, exactly as shown, [资产清单该角色 description_en 原句]. Speaking rule for this segment: no character speaks, all lips remain completely closed. Module 3 [Environment Freeze]: The [场景甲 summary_en 原句] remains completely unchanged in structure, color, and arrangement throughout the entire segment. Module 4 [Timeline Action]: At 00:01.500, @角色甲 [动作+最终状态+否定约束]. Module 5 [Prop Declaration]: no prop appears in this frame. Module 6 [Final Frame]: The final frame: [与 finalFrame 字段逐字一致].（完整英文 6 模块，规范见上方 integratedMultimodalDescription 字段说明，整段 220 词内）",
+          "isCombat": false,
+          "purpose": "建立空间与行进状态",
+          "emotionTone": "克制不安",
+          "worldStateOut": "@角色甲：画面左·手空·面向右",
+          "worldStateOutEn": "Character A is at frame left, both hands empty, facing frame right.",
+          "characters": ["角色甲"],
+          "sceneAssets": ["场景甲"],
+          "propAssets": []
         }
       ]
     }
   ]
 }
+}
 
 ${sceneScope
 ? `${style ? `画风：${style}。` : ''}【本场范围】${sceneScope.title
 ? `整个剧本共 ${sceneScope.total} 个场次，你只负责第 ${sceneScope.index} 场「${sceneScope.title}」。输出的 scenes 数组必须包含且仅包含 1 个场次对象，其 title 必须是「${sceneScope.title}」。`
-: `整份剧本没有分场标记，已被自动切成 ${sceneScope.total} 个连续部分，你只负责第 ${sceneScope.index} 部分。输出的 scenes 数组必须包含且仅包含 1 个场次对象，title 请根据该部分剧情自行概括（2-8 个字）。`}${sceneScope.perSceneDuration ? `本场内容量参考约 ${sceneScope.perSceneDuration} 秒——★这是【长度参考】，不是镜头数目标：不要用"时长÷单镜"反推镜头数，镜头数完全由任务边界决定。单镜 4-15 秒。【镜头数纪律】默认一个连续任务只出一条镜头（8-15s，运镜承载过渡）；同一主体、同一空间、同一目的下的连续动作必须一镜到底，只有切镜能挣得新主体/新信息/新情绪收益时才切。切碎没有补救——在这一步就切对，宁少勿多。` : '本场镜头数不设配额，完全由任务边界决定：连续动作/情绪优先一镜到底（单镜 4-15s），只有新主体、新信息、新情绪收益时才切，宁少勿多。'}${sceneScope.prevFinalFrame ? `\n【跨场衔接】上一场最后一个镜头的最终画面：${sceneScope.prevFinalFrame}\n本场第一个镜头的开场构图以该最终画面为参考（人物姿态、位置、构图、光线延续），承接即刻完成，不设冻结期，动作与台词可从第 0 秒直接开始。` : ''}`
-: `${style && targetDuration ? `画风：${style}。【时长目标】整个分镜总时长控制在 ${targetDuration} 秒左右（允许 ±10% 浮动）。★这是【总长度参考】，不要用"时长÷单镜"反推镜头数——镜头数完全由任务边界决定。【镜头数纪律】默认一个连续任务只出一条镜头（8-15s，运镜承载过渡），同一主体/空间/目的下的连续动作必须一镜到底，只有新主体/新信息/新情绪收益才切镜。切碎没有补救，宁少勿多。注意：时长约束只能压缩每场的镜头数，【绝对不允许删减、合并或跳过任何场次】。` : `画风：${style}。镜头数不设每场配额，完全由任务边界决定：连续动作/情绪优先一镜到底（单镜 4-15s），只有新主体、新信息、新情绪收益时才切，宁少勿多。`}
+: `整份剧本没有分场标记，已被自动切成 ${sceneScope.total} 个连续部分，你只负责第 ${sceneScope.index} 部分。输出的 scenes 数组必须包含且仅包含 1 个场次对象，title 请根据该部分剧情自行概括（2-8 个字）。`}${sceneScope.perSceneDuration ? `本场内容量参考约 ${sceneScope.perSceneDuration} 秒——★这是【长度参考】，不是镜头数目标：不要用"时长÷单镜"反推镜头数，镜头数完全由剧本情形决定。单镜 4-15 秒（物理兜底）。【拆分与流动（Skill §17/§19）】连续情形靠微运镜+镜内动作调度保持画面流动（不做一镜到底），突变情形果断碎切（切镜即节奏），空间与注意力移动用运镜；慢节奏段允许少数内部有持续动作/光影变化的长镜。` : '本场镜头数不设配额，完全由剧本情形决定：连续情形靠微运镜+镜内调度保持流动（不做一镜到底）、突变情形果断碎切、空间与注意力移动用运镜；慢节奏段允许少数内部有持续动作的长镜（单镜 4-15s 物理兜底）。'}${sceneScope.prevFinalFrame ? `\n【跨场衔接】上一场最后一个镜头的最终画面：${sceneScope.prevFinalFrame}\n本场第一个镜头的开场构图以该最终画面为参考（人物姿态、位置、构图、光线延续），承接即刻完成，不设冻结期，动作与台词可从第 0 秒直接开始。` : ''}`
+: `${style && targetDuration ? `画风：${style}。【时长目标】整个分镜总时长控制在 ${targetDuration} 秒左右（允许 ±10% 浮动）。★这是【总长度参考】，不要用"时长÷单镜"反推镜头数——镜头数完全由剧本情形决定。【拆分与流动（Skill §17/§19）】连续情形靠微运镜+镜内动作调度保持画面流动（不做一镜到底），突变情形果断碎切，空间与注意力移动用运镜；慢节奏段允许少数内部有持续动作/光影变化的长镜。注意：时长约束只能压缩每场的镜头数，【绝对不允许删减、合并或跳过任何场次】。` : `画风：${style}。镜头数不设每场配额，完全由剧本情形决定：连续情形靠微运镜+镜内调度保持流动（不做一镜到底）、突变情形果断碎切、空间与注意力移动用运镜；慢节奏段允许少数内部有持续动作的长镜（单镜 4-15s 物理兜底）。`}
 
 ${scriptSceneTitles.length ? `【场次结构硬约束】剧本共 ${scriptSceneTitles.length} 个场次，你的输出 scenes 数组必须与之【一一对应】：数量相同、顺序相同、标题对应。分镜场次清单（必须全部出现，一个都不能少，也不能新增）：
 ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 语法要求】所有字符串值（description/finalFrame/integratedMultimodalDescription 等）内部禁止出现未转义的双引号（用单引号替代）和裸换行符；数组元素之间必须有逗号；输出必须是一次性可解析的完整合法 JSON。只输出 JSON，不要其他文字。`,
@@ -1646,9 +1296,13 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     const normTarget = sceneScope ? (sceneScope.perSceneDuration || 0) : targetDuration
     const text = await chatCompletion(messages, {
       temperature: 0.5,
-      maxTokens: 30000,
+      maxTokens: config.storyboard.maxOutputTokens,
       responseFormat: { type: 'json_object' },
       timeoutMs: config.timeouts.llm.longScript, 
+      maxAttempts: 1,
+      retryBudgetMs: config.timeouts.llm.longScript,
+      disableThinking: true,
+      stream: true,
       usageContext: { task: 'storyboard' },
     })
 
@@ -1706,6 +1360,24 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     return { storyboard, rawText: text, parseError: null, unmatched: [] }
   }
 
+  // 只对生成结果做结构层检查。来源文档没有授权的平台语义规则不得触发模型重写。
+  const contractCheck = (storyboard) => {
+    if (!assets || !storyboard?.scenes?.length) return null
+    try { return validateStoryboardImport(storyboard) } catch { return null }
+  }
+  const repairNoteFor = (validation) => `\n\n【平台结构修复重试】上一次输出的 JSON 存在平台字段结构问题：\n${formatStoryboardValidationError(validation)}\n请只修复 JSON 语法、场次/镜头容器和字段类型，完整保留原镜头数量、时长、动作、角色、台词、声音与画面语义。不要根据未在输入文件或来源文档中出现的规则新增、删除或改写内容。`
+  const repairOnContract = async (r, scope = null) => {
+    if (!r?.storyboard) return r
+    const first = contractCheck(r.storyboard)
+    if (!first || first.ok) return r
+    console.warn(`[generateStoryboard] 契约校验未过（${first.errors.length} 项：${first.errors.slice(0, 3).map((e) => e.code).join(', ')}${first.errors.length > 3 ? '…' : ''}），带错误清单修复重试一次`)
+    const repaired = await buildAndRun(repairNoteFor(first), scope)
+    if (repaired.parseError || !repaired.storyboard) return r
+    const second = contractCheck(repaired.storyboard)
+    if (!second || second.errors.length < first.errors.length) return repaired
+    return r
+  }
+
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
   const report = (payload) => {
     if (!onProgress) return
@@ -1728,131 +1400,13 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     }
     const parallelScenes = config.storyboard?.parallel !== false
 
-    // 镜头合并引擎入口（分场模式）：全部分场生成完毕后执行。
-    // 连续叙事默认合并（黑名单制）——同场景+主体连续+非对话反打的连续戏合成一条长镜；
-    // 合并后 QC 硬错误增加则整体回退。首镜参与合并扩展（跨场衔接由尾帧参考图承担，
-    // 出片侧 continuity 锚图 + "begins from <Picture N>" 承接句已覆盖，无需文本冻结段）。
-    const mergeAllScenes = () => {
-      if (config.storyboard?.shotMerge === false) return
-      // 合并判定日志落盘（生产可观测性）：把每对的判定结果与字段快照写入 generated/logs/，
-      // 便于在无法实时读取 stdout 时定位"为什么没合 / 合了什么 / 判定被什么条件挡住"。
-      const dumpMergeLog = (tag, payload) => {
-        try {
-          const logDir = path.resolve(process.cwd(), '..', 'generated', 'logs')
-          fs.mkdirSync(logDir, { recursive: true })
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-          fs.writeFileSync(path.join(logDir, `merge-${stamp}-${tag}.json`), JSON.stringify(payload, null, 1), 'utf8')
-        } catch (e) {
-          console.warn('[generateStoryboard] 合并日志落盘失败:', e.message)
-        }
-      }
-      const snapShots = (scenes) => scenes.map((sc, i) => ({
-        sceneIndex: i + 1,
-        title: sc.title,
-        shotCount: (sc.shots || []).length,
-        shots: (sc.shots || []).map((sh) => {
-          const dlg = Array.isArray(sh.dialogue) ? sh.dialogue : []
-          const withText = dlg.filter((d) => String(d?.text || '').trim())
-          return {
-            n: sh.shotNumber || sh.shot_number,
-            dur: sh.duration,
-            sceneAssets: sh.sceneAssets || sh.scene_assets,
-            characters: sh.characters,
-            hasTextDlg: withText.length > 0,
-            speakers: [...new Set(withText.map((d) => d?.character))],
-            move: sh.cameraMovement || sh.camera_movement,
-          }
-        }),
-      }))
-      try {
-        // 合并判定前的字段对齐（关键）：AI 输出常漏登记资产（sceneAssets/characters 为空或不全），
-        // 而资产回填原本在路由层、合并【之后】才执行——若不先对齐，sameScene/subjectsContinuous
-        // 会把"空 vs 有值"误判为场景/主体不同，导致合并大面积失败。此处先对齐再判定。
-        if (assets) {
-          for (const scene of allScenes) {
-            for (const shot of (scene.shots || [])) {
-              backfillShotAssets(shot, assets)
-              backfillSceneByTitle(shot, scene.title, assets.scenes)
-            }
-          }
-        }
-        const { storyboard: merged, mergedCount, mergeLog } = applyShotMergeToStoryboard({ scenes: allScenes }, {
-          durationMax: config.storyboard?.durationMax ?? 15,
-          dialogueReverseBlock: config.storyboard?.dialogueReverseBlock === true,
-        })
-        if (mergedCount <= 0) {
-          dumpMergeLog('nomerged', { tag: 'mergedCount=0', note: '判定无可合并对（全部被拒）', decisions: mergeLog, before: snapShots(allScenes) })
-          return
-        }
-        const beforeQc = runStoryboardQC({ scenes: allScenes }, assets, styleForPoison)
-        const afterQc = runStoryboardQC(merged, assets, styleForPoison)
-        // 守卫：只对比「实质性」硬错误（剔除素材超长类——它是参考素材挂载量的固有属性，与合并无关；
-        // 若纳入对比，素材偏重的集会让合并被整体误判回退）
-        const qualityBefore = countQualityErrors(beforeQc)
-        const qualityAfter = countQualityErrors(afterQc)
-        if (qualityAfter > qualityBefore) {
-          console.warn(`[generateStoryboard] 镜头合并后实质性 QC 硬错误 ${qualityAfter} > 合并前 ${qualityBefore}（已剔除素材超长类），放弃合并保留原稿`)
-          dumpMergeLog('guardblocked', { tag: 'QC守卫回退', qualityBefore, qualityAfter, mergedCount, decisions: mergeLog })
-          return
-        }
-        dumpMergeLog('ok', {
-          tag: 'merged',
-          mergedCount,
-          beforeShotCounts: allScenes.map((s) => (s.shots || []).length),
-          afterShotCounts: merged.scenes.map((s) => (s.shots || []).length),
-          mergedPairs: mergeLog.filter((m) => m.merged),
-          blockedPairs: mergeLog.filter((m) => !m.merged),
-          before: snapShots(allScenes),
-        })
-        const detail = mergeLog.filter((m) => m.merged).map((m) => `${m.from}+${m.to}`).join('、')
-        console.log(`[generateStoryboard] 镜头合并引擎：${mergedCount} 处无收益切镜已合并（${detail || '详见日志'}）`)
-        allScenes.length = 0
-        allScenes.push(...merged.scenes)
-      } catch (e) {
-        dumpMergeLog('error', { tag: 'exception', error: e.message, stack: String(e.stack || '').split('\n').slice(0, 6) })
-        console.warn('[generateStoryboard] 镜头合并执行失败，保留原稿:', e.message)
-      }
-    }
-
-    // QC 修复链（定点修补 → 整场重跑）全部失败时的兜底标记：不再静默采纳带病分镜。
-    // 未解决错误写到镜头对象 qcStatus/qcReport，随保存落库（qc_status='fail'），QC 面板按镜号可见。
-    // 2026-09-24 前行为：console.warn 后原版直接落库，带病数据无声进库、带病出片。
-    function markSceneQcUnresolved(scene, qc) {
-      const now = new Date().toISOString()
-      const byShot = new Map()
-      for (const c of qc.codedErrors || []) {
-        const items = byShot.get(c.shot) || []
-        items.push({ code: c.code, level: 'error', title: qcMeta(c.code)?.title || c.code, message: c.message })
-        byShot.set(c.shot, items)
-      }
-      const shots = scene.shots || []
-      if (byShot.size === 0) {
-        // 无码硬错误（MUST_FIX：字段缺失等）：无法定位到具体镜，整场标记
-        const items = (qc.errors || []).map((message) => ({ code: 'MUST_FIX', level: 'error', title: qcMeta('MUST_FIX')?.title || '必须修', message }))
-        const report = JSON.stringify({ checkedAt: now, source: 'generate-unresolved', items })
-        for (const sh of shots) { sh.qcStatus = 'fail'; sh.qcReport = report }
-        return
-      }
-      let n = 0
-      for (const sh of shots) {
-        n++
-        const label = sh.shotNumber || sh.shot_number || `scene${scene.sceneNumber || scene.scene_number || ''}-shot${n}`
-        const items = byShot.get(label)
-        if (items) {
-          sh.qcStatus = 'fail'
-          sh.qcReport = JSON.stringify({ checkedAt: now, source: 'generate-unresolved', items })
-        }
-      }
-    }
-
-    const generateSceneAt = async (i, prevFinalFrame) => {
+    const generateSceneAt = async (i) => {
       const scope = {
         title: sceneBlocks[i].title,
         text: sceneBlocks[i].text,
         index: i + 1,
         total: sceneBlocks.length,
         perSceneDuration: perSceneDurations[i] || 0,
-        prevFinalFrame,
       }
       console.log(`[generateStoryboard] 分场生成 第 ${i + 1}/${sceneBlocks.length} ${scope.title ? `场「${scope.title}」` : '块（自动分块）'}`)
       let r = await buildAndRun('', scope)
@@ -1862,46 +1416,13 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
         r = await buildAndRun(retryNote, scope)
         if (r.parseError) throw r.parseError
       }
+      r = await repairOnContract(r, scope)
       if (!r.storyboard.scenes.length) throw new Error(`第 ${i + 1} 块（${scope.title || '自动分块'}）未返回分镜`)
       if (r.storyboard.scenes.length > 1) {
         console.warn(`[generateStoryboard] 第 ${i + 1}/${sceneBlocks.length} 场「${scope.title || '自动分块'}」要求仅返回 1 个场次，模型返回了 ${r.storyboard.scenes.length} 个，已取第 1 个，其余场次的镜头被丢弃`)
       }
-      let scene = r.storyboard.scenes[0]
-      let sceneSource = r
-
-      const sceneQc = validateStoryboard({ scenes: [scene] }, assets, { projectStyleText: styleForPoison, scriptText: scope.text })
-      let qcClean = sceneQc.errors.length === 0
-      if (!qcClean) {
-        console.warn(`[generateStoryboard] 第 ${i + 1} 场 QC 发现 ${sceneQc.errors.length} 个硬错误:`, sceneQc.errors.join('; '))
-        // 先试定点修补：只回炉报错的镜头，避免整场重发（整场输入约 2.2 万 tokens、单次 150s+）。
-        // 修补内部已含整场复检；任一步不通过则 repaired 为 null，落到下面的整场重跑兜底。
-        let repaired = null
-        if (config.storyboard?.shotRepair !== false) {
-          repaired = await applyQcShotRepair(scene, sceneQc.errors, assets, style, i, options.styleCategory)
-          if (repaired) {
-            console.log(`[generateStoryboard] 第 ${i + 1} 场 QC 定点修补通过（镜头 ${repaired.labels.join('、')}）`)
-            scene = repaired.scene
-            qcClean = true
-          } else {
-            console.warn(`[generateStoryboard] 第 ${i + 1} 场 QC 定点修补未通过，回退整场重跑`)
-          }
-        }
-        if (!repaired) {
-          const r2 = await buildAndRun(qcRetryNote(sceneQc), scope)
-          if (!r2.parseError && r2.storyboard.scenes.length) {
-            const scene2 = r2.storyboard.scenes[0]
-            if (!validateStoryboard({ scenes: [scene2] }, assets, { projectStyleText: styleForPoison, scriptText: scope.text }).errors.length) {
-              scene = scene2
-              sceneSource = r2
-              qcClean = true
-            }
-          }
-        }
-      }
-      if (!qcClean) {
-        console.warn(`[generateStoryboard] 第 ${i + 1} 场 QC 未解决（定点修补与整场重跑均未通过），已标记 QC 失败待人工确认:`, sceneQc.errors.join('; '))
-        markSceneQcUnresolved(scene, sceneQc)
-      }
+      const scene = r.storyboard.scenes[0]
+      const sceneSource = r
 
       if (scope.title) scene.title = scope.title 
       console.log(`[generateStoryboard] 第 ${i + 1}/${sceneBlocks.length} 场完成（${(scene.shots || []).length} 镜）`)
@@ -1913,7 +1434,6 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     report({ phase: PHASE.SCENES, done: 0, total: sceneBlocks.length, message: `分场生成中：0/${sceneBlocks.length} 场完成` })
 
     if (!parallelScenes) {
-      let prevFinalFrame = ''
       for (let i = 0; i < sceneBlocks.length; i++) {
         report({
           phase: PHASE.SCENES,
@@ -1922,11 +1442,9 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
           currentLabel: sceneBlocks[i].title || `第 ${i + 1} 块`,
           message: `正在生成第 ${i + 1}/${sceneBlocks.length} 场${sceneBlocks[i].title ? `「${sceneBlocks[i].title}」` : ''}…`,
         })
-        const { scene, unmatched } = await generateSceneAt(i, prevFinalFrame)
+        const { scene, unmatched } = await generateSceneAt(i)
         allScenes.push(scene)
         allUnmatched.push(...unmatched)
-        const shots = scene.shots || []
-        prevFinalFrame = shots.length ? shots[shots.length - 1].finalFrame : ''
         report({
           phase: PHASE.SCENES,
           done: i + 1,
@@ -1935,12 +1453,12 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
           message: `分场生成中：${i + 1}/${sceneBlocks.length} 场完成`,
         })
       }
-      mergeAllScenes()
+      // 保留 Skill 原始镜头边界，不执行平台自定义合并。
     } else {
       console.log(`[generateStoryboard] 两阶段并行：${sceneBlocks.length} 场同时发起，完成后进入归一化`)
       let doneCount = 0
       const results = await Promise.all(sceneBlocks.map(async (_, i) => {
-        const r = await generateSceneAt(i, '')
+        const r = await generateSceneAt(i)
         doneCount++
         report({
           phase: PHASE.SCENES,
@@ -1956,33 +1474,19 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
         allUnmatched.push(...unmatched)
       }
 
-      mergeAllScenes()
+      // 保留 Skill 原始镜头边界，不执行平台自定义合并。
 
       // 跨场衔接由「尾帧参考图 + 提示词承接句」承担，无跨场文本修补阶段
       //（原 Airlock 跨场修补链已于 2026-09-24 事故整改中整体废除，不再有任何跨场文本改写/修补。）
       console.log('[generateStoryboard] 跳过跨场文本修补：跨场衔接改由尾帧参考图 + 提示词承接句承担')
 
-      if (config.storyboard?.fixAxis !== false) {
-        const charNames = (assets?.characters || []).map((c) => c.name).filter(Boolean)
-        const aliasMap = buildAliasMap(assets?.characters || [])
-        report({ phase: PHASE.AXIS, done: 0, total: 0, message: '正在做越轴巡检（检测侧位翻转）…' })
-        const axisRes = await fixAxisFlips(allScenes, charNames, style, aliasMap, (done, total) => {
-          report({ phase: PHASE.AXIS, done, total, message: `越轴修补中：${done}/${total} 处` })
-        })
-        if (axisRes?.unresolved?.length) {
-          console.warn(`[generateStoryboard] 越轴修补后仍有 ${axisRes.unresolved.length} 处未修复：`,
-            axisRes.unresolved.map((u) => `${u.shot}@${u.name}(${u.reason})`).join('; '))
-        }
-      }
+      // Skill 已决定机位与轴线。生成后不再调用 LLM 重写镜头，避免把已定稿的
+      // 构图、动作或镜头边界改成平台自己的解释。
     }
     const normalizedMulti = normalizeStoryboard({ scenes: allScenes }, targetDuration)
     normalizedMulti.unmatched = allUnmatched
     // 出片提示词预算守卫（H3 硬上限 7000）——超限镜头自动瘦身，保证可出片
     enforcePromptBudget(normalizedMulti, assets)
-    const finalQc = runStoryboardQC(normalizedMulti, assets, styleForPoison)
-    if (finalQc.errors.length) {
-      console.warn(`[generateStoryboard] 分场合并后 QC 仍有 ${finalQc.errors.length} 个硬错误，已透传 storyboard.qc:`, finalQc.errors.join('; '))
-    }
     return normalizedMulti
   }
 
@@ -1995,41 +1499,12 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     result = await buildAndRun(retryNote)
     if (result.parseError) throw result.parseError
   }
+  result = await repairOnContract(result)
 
-  // 镜头合并引擎入口（单场模式）：所有 return 出口统一过这道闸——
-  // 把无收益的相邻碎镜合并成连续运镜长镜；QC 硬错误增加或执行异常则回退原稿。
-  const finalizeWithMergeInner = (sb) => {
-    if (!sb || config.storyboard?.shotMerge === false) return sb
-    try {
-      const { storyboard: merged, mergedCount, mergeLog } = applyShotMergeToStoryboard(sb, {
-        durationMax: config.storyboard?.durationMax ?? 15,
-        dialogueReverseBlock: config.storyboard?.dialogueReverseBlock === true,
-      })
-      if (mergedCount <= 0) return sb
-      const beforeQc = runStoryboardQC(sb, assets, styleForPoison)
-      const afterQc = runStoryboardQC(merged, assets, styleForPoison)
-      // 守卫：只对比「实质性」硬错误（剔除素材超长类——参考素材挂载量的固有属性，与合并无关）
-      const qualityBefore = countQualityErrors(beforeQc)
-      const qualityAfter = countQualityErrors(afterQc)
-      if (qualityAfter > qualityBefore) {
-        console.warn(`[generateStoryboard] 镜头合并后实质性 QC 硬错误 ${qualityAfter} > 合并前 ${qualityBefore}（已剔除素材超长类），放弃合并保留原稿`)
-        return sb
-      }
-      merged.unmatched = sb.unmatched
-      const detail = mergeLog.filter((m) => m.merged).map((m) => `${m.from}+${m.to}`).join('、')
-      console.log(`[generateStoryboard] 镜头合并引擎：${mergedCount} 处无收益切镜已合并（${detail || '详见日志'}）`)
-      return merged
-    } catch (e) {
-      console.warn('[generateStoryboard] 镜头合并执行失败，保留原稿:', e.message)
-      return sb
-    }
-  }
-  // 单场模式统一出口：先过合并闸（finalizeWithMergeInner），再过「出片提示词预算守卫」
-  // （H3 硬上限 7000——超限镜头自动瘦身，保证可出片；无匹配资产/未超限时零开销）
-  const finalizeWithMerge = (sb) => {
-    const out = finalizeWithMergeInner(sb)
-    enforcePromptBudget(out, assets)
-    return out
+  const finalizeStoryboard = (sb) => {
+    // H3 适配只处理 prompt 的物理上限，不改变 Skill 已定稿的镜头数量和顺序。
+    enforcePromptBudget(sb, assets)
+    return sb
   }
 
   const storyboard = result.storyboard
@@ -2040,37 +1515,62 @@ ${scriptSceneTitles.map((t, i) => `${i + 1}. ${t}`).join('\n')}` : ''}`}【JSON 
     const retryNote = `\n\n【纠错重试】上一次输出只有 ${storyboard.scenes.length} 个场次，与剧本的 ${scriptSceneTitles.length} 个场次不符。本次必须输出完整 ${scriptSceneTitles.length} 个场次：${scriptSceneTitles.join('、')}，一场都不能少，每个场次至少 1 个镜头。`
     const retried = await buildAndRun(retryNote)
     if (retried.parseError) throw retried.parseError
-    retried.storyboard.unmatched = Array.isArray(retried.unmatched) ? retried.unmatched : []
-    const retriedQc = runStoryboardQC(retried.storyboard, assets, styleForPoison)
-    if (retriedQc.errors.length) {
-      console.warn(`[generateStoryboard] 场次数重试后 QC 仍有 ${retriedQc.errors.length} 个硬错误，已透传 storyboard.qc:`, retriedQc.errors.join('; '))
-    }
-    return finalizeWithMerge(retried.storyboard)
+    const retriedFixed = await repairOnContract(retried)
+    const retriedStoryboard = retriedFixed.storyboard || retried.storyboard
+    retriedStoryboard.unmatched = Array.isArray(retried.unmatched) ? retried.unmatched : []
+    return finalizeStoryboard(retriedStoryboard)
   }
   storyboard.unmatched = Array.isArray(result.unmatched) ? result.unmatched : []
-  const qc = runStoryboardQC(storyboard, assets, styleForPoison)
-  if (qc.errors.length) {
-    console.warn(`[generateStoryboard] QC 发现 ${qc.errors.length} 个硬错误，喂回重试:`, qc.errors.join('; '))
-    const qcRetried = await buildAndRun(qcRetryNote(qc))
-    if (!qcRetried.parseError) {
-      qcRetried.storyboard.unmatched = Array.isArray(qcRetried.unmatched) ? qcRetried.unmatched : []
-      const retriedQc = runStoryboardQC(qcRetried.storyboard, assets, styleForPoison)
-      if (!retriedQc.errors.length) return finalizeWithMerge(qcRetried.storyboard)
-      console.warn(`[generateStoryboard] QC 重试后仍有 ${retriedQc.errors.length} 个硬错误，沿用重试版并透传 qc 结果供人工审核`)
-      return finalizeWithMerge(qcRetried.storyboard)
-    }
-    console.warn('[generateStoryboard] QC 重试解析失败，沿用上一版并透传 qc 结果')
-  }
-  return finalizeWithMerge(storyboard)
+  return finalizeStoryboard(storyboard)
 }
 
 export async function generateStoryboardFromFile(fileContent, style = config.defaultArtStyle, assets = null, options = {}) {
-  // 画风毒词豁免文本：画风名 + 类别桶词，与 generateStoryboard 同口径
-  const styleForPoison = stylePoisonText(style, options.styleCategory)
+  const normalizedFileText = String(fileContent || '').replace(/\r\n/g, '\n').trim()
+  if (countNonSpace(normalizedFileText) > FILE_NORMALIZE_CHUNK_MIN_CHARS && !options.__fileChunk) {
+      const chunks = splitStoryboardFileIntoChunks(normalizedFileText)
+      if (chunks.length > 1) {
+      const mergedScenes = []
+      const unmatched = []
+      reportProgressForFileChunks(options.onProgress, chunks.length)
+        for (let index = 0; index < chunks.length; index += 1) {
+          console.log(`[generateStoryboardFromFile] 文件分批规整 ${index + 1}/${chunks.length}（${countNonSpace(chunks[index])} 字）`)
+        const chunkResult = await generateStoryboardFromFile(chunks[index], style, assets, {
+          ...options,
+          __fileChunk: true,
+          onProgress: (payload) => {
+            if (typeof options.onProgress !== 'function') return
+            try {
+              options.onProgress({ ...payload, done: index + (payload.done ? 1 : 0), total: chunks.length, message: `正在分批规整分镜：${index + 1}/${chunks.length}…` })
+            } catch { }
+          },
+        })
+        if (Array.isArray(chunkResult.scenes)) {
+          for (const scene of chunkResult.scenes) {
+            const existing = mergedScenes.find((item) => String(item.title || '') === String(scene.title || ''))
+            if (existing) existing.shots.push(...(scene.shots || []))
+            else mergedScenes.push({ ...scene, shots: [...(scene.shots || [])] })
+          }
+        }
+        if (Array.isArray(chunkResult.unmatched)) unmatched.push(...chunkResult.unmatched)
+      }
+      let cursor = 0
+      for (const scene of mergedScenes) {
+        for (const shot of scene.shots || []) {
+          const duration = Math.max(
+            config.storyboard?.durationMin ?? 4,
+            Math.min(config.storyboard?.durationMax ?? 15, Math.round(Number(shot.duration) || config.storyboard?.defaultDuration || 8))
+          )
+          shot.startTime = cursor
+          shot.endTime = cursor + duration
+          shot.duration = duration
+          cursor += duration
+        }
+      }
+      return { scenes: mergedScenes, unmatched }
+    }
+  }
   const assetMaps = assets ? buildAssetMaps(assets) : null
   const assetListPrompt = assets ? buildAssetListPrompt(assets) : ''
-  const specHint = directorNotesPrompt(options?.directorNotes || '', { mode: 'gentle' })
-
   const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null
   const report = (payload) => {
     if (!onProgress) return
@@ -2092,20 +1592,35 @@ export async function generateStoryboardFromFile(fileContent, style = config.def
 5. ${assetNameRule()}清单外出现的 @名 一律不要写进资产数组，改为在输出末尾的 __unmatched 里列出（见下方格式）。清单里没有的角色/道具/场景，宁可不列也不要编造新名。
 6. 时间轴：若用户给了每镜时长，按 startTime 累加（首镜 startTime=0，后续=上一镜 endTime），连续不重叠；否则从 0 起按估算时长累加。
 7. 【伪台词识别】原文中"台词：音效(...)「...」""台词：字幕淡入(...)「...」""台词：题材(...)「...」"这类行【不是任何角色的台词】——音效内容并入该镜 soundEffects 字段；字幕内容写入 description 末尾（前缀"片尾字幕："）或直接丢弃；题材/角色表/风格等元信息直接丢弃。绝不能把 character 写成"音效/字幕/题材"塞进 dialogue——对话生成模型会把它们当成台词念出来，属于严重缺陷。
+8. 【字段保真】输出必须保留原文件已有的 transitionIn/transitionOut、worldStateIn/worldStateOut；没有原值才留空。不得为了补字段改写原镜头语义。
+9. 【时间轴保真】原文件已有的 actionNote、台词、声音和时长必须原样保留；不要为了平台自定义格式删除、合并或改写动作语义。
 
 每个镜头必须输出以下字段（缺失字段填空字符串或 null，不要省略键）：
-- shotType: 全景/中景/近景/特写（用户未标注则你按描述推断，至少给"中景"）
+- shotType: 景别，取值（Skill §3 档位表）：${shotTypeTermsText()}（用户原文明确标注其他写法则原样保留；未标注按描述推断，至少给"中景"）
+- spaceType: 空间类型代号 S1/S2/S3/S4/O1/O2/X（用户原文有则提取，无则按场景尺度推断）
+- spaceEvidence: 空间判定依据中文一句话（用户原文有则提取，无则按场景结构写一句，如「两侧高墙夹持的窄巷，只容一人通过」）；与 spaceType 成对，不得留空
+- lens: 焦段（如「中长焦 85mm」「广角 24mm」，用户原文有则提取，无则空字符串）
+- cameraAngle: 水平机位（Skill §5 方向轴）：正面/侧45度/侧面/过肩/主观（用户原文有则提取；如「侧45度+微俯」拆为 cameraAngle=侧45度 + cameraElevation=微俯）
+- cameraElevation: 俯仰：平视/微俯/俯拍/大俯角/微仰/仰拍/大仰角（无则空字符串）
 - startTime/endTime: 整数秒
 - duration: 整数秒
-- description: 中文画面描述，用 @角色名/@道具名/@场景名 标记出现的资产；若用户原描述已合规则保留原话，不塞 integratedMultimodalDescription 内容、不写"音效：""角色："等带冒号小标题
+- description: 中文画面描述，用 @角色名/@道具名/@场景名 标记出现的资产；若用户原描述已合规则保留原话，不塞 integratedMultimodalDescription 内容、不写"音效：""角色："等带冒号小标题；原文的「画面内容」「光影」两段合并进本字段
+- colorLighting: 色调方案整行（原文「色调」字段原样提取，无则空字符串）
+- humanVoice: 表演性人声（原文「人声」字段提取，"无"则空字符串）
 - actionNote: 动作说明（无则空字符串）
-- cameraMovement: 固定/推近/拉远/变焦推近/变焦拉远/左摇/右摇/左移/右移/摇上/摇下/升高/降低/环绕/跟拍/手持跟拍/主观/滚转（无则"固定"；本字段为单值，只填一个运镜；情绪升级可用急推/快甩/急跟/急升等快速变体，抒情段落可用缓推/缓摇/缓环绕等缓慢变体；俯拍/仰拍属 camera_angle 不写这里）
-- soundEffects: 画内音效（无则空字符串）
+- cameraMovement: 运镜（原文表头「推镜/跟拍/手持剧烈晃动/微运镜（极缓慢推）」等原样提取；可复合；俯拍/仰拍属 cameraElevation 不写这里；无则"固定"）
+- soundEffects: 画内音效（原文「音效」字段提取"音桥入/出"标注，无则空字符串）
 - overallSoundscape: 环境声（无则空字符串）
-- nonDiegeticMusic: 非画内音乐建议（无则空字符串）
-- dialogue: 台词对象 {character, tone, text, startTime}；character 必须是真实角色名（与资产清单 characters 匹配）；无台词为 null（"台词：音效/字幕/题材"这类伪台词行禁止进入本字段，见铁律 7）
+- nonDiegeticMusic: 一律空字符串 ""（Skill 规则全程无 BGM；原文若含配乐建议也丢弃）
+- dialogue: 台词对象或数组 {character, tone, text, startTime}；character 必须是真实角色名（与资产清单 characters 匹配）；无台词为 null（"台词：音效/字幕/题材"这类伪台词行禁止进入本字段，见铁律 7）
+- transitionIn/transitionOut: 入/出场转场原值；worldStateIn/worldStateOut 有原值就保留，没有原值填空；不得根据平台自定义连续性规则改写角色在场、离场或硬切语义
+- isCombat: 布尔，本镜有无动作对抗（原文表头「人物镜头/非人物镜头」不是本字段；按内容判定，无把握填 false）
+- purpose: 本镜叙事任务一句话（可从原文推断，10-30 字）
+- emotionTone: 情绪基调 2-6 字（可从原文推断）
+- worldStateOut: 末帧实体状态快照（可从末帧描述推断，紧凑中文格式）
+- worldStateOutEn: 上一条的中文快照对应的纯英文版，逐项对齐不许增删（谁在画面哪个位置·姿态·朝向·手持/驮负关系）。用 "X is at ... facing ..." 直陈句式，30-80 英文词；角色名与场景名保留中文原样（如 "角色中文名 is at frame center"）。此字段与 worldStateOut 必须严格同义，不得独立发挥
 - characters/sceneAssets/propAssets: 资产名数组，逐字匹配资产清单
-- finalFrame: 本镜最终画面描述（用户原文有则提取，无则空字符串）
+- finalFrame: 本镜最终画面描述，必须是纯 ASCII 英文（禁止任何中文字符）；角色/场景/道具必须使用资产的 name_en/title_en，不得直接写中文资产名。逐项复述 worldStateOut 的位置、姿态、手持和朝向：面向/朝向/朝着必须写 facing/gazing toward/looking toward，背对/背向必须写 back to the camera/facing away；含画面侧位与光位方向色温
 - integratedMultimodalDescription: 用户原文若已含多模态提示词则原样提取，否则空字符串（不强制补全）
 
 输出格式（严格合法 JSON，以 { 开头 } 结尾）：
@@ -2117,7 +1632,7 @@ export async function generateStoryboardFromFile(fileContent, style = config.def
   "__unmatched": [ "清单外出现的资产名1", "资产名2" ]
 }
 
-${assetListPrompt}【JSON 语法要求】字符串值内部禁止未转义双引号和裸换行；数组元素间必须有逗号；只输出 JSON 不输出其他文字。${specHint}${retryNote}`,
+${assetListPrompt}【JSON 语法要求】字符串值内部禁止未转义双引号和裸换行；数组元素间必须有逗号；只输出 JSON 不输出其他文字。${retryNote}`,
       },
       {
         role: 'user',
@@ -2130,6 +1645,10 @@ ${assetListPrompt}【JSON 语法要求】字符串值内部禁止未转义双引
       maxTokens: 12000,
       responseFormat: { type: 'json_object' },
       timeoutMs: config.timeouts.llm.longScript,
+      maxAttempts: 1,
+      retryBudgetMs: config.timeouts.llm.longScript,
+      disableThinking: true,
+      stream: true,
       usageContext: { task: 'storyboard' },
     })
 
@@ -2138,7 +1657,9 @@ ${assetListPrompt}【JSON 语法要求】字符串值内部禁止未转义双引
       if (jsonStr) {
         try {
           const parsed = JSON.parse(jsonStr)
-          const storyboard = normalizeStoryboard(parsed, 0)
+          // sourceText 传原始分镜文本（不是 LLM 的 JSON 输出）：表头是确定性来源，
+          // 机位/俯仰/焦段的权威值在原文表头里，不在模型的 JSON 里。
+          const storyboard = normalizeStoryboard(parsed, 0, { sourceText: fileContent })
           const unmatched = []
           const fileUnmatched = Array.isArray(parsed.__unmatched) ? parsed.__unmatched.map(String) : []
           if (fileUnmatched.length) {
@@ -2163,7 +1684,7 @@ ${assetListPrompt}【JSON 语法要求】字符串值内部禁止未转义双引
               })
             })
           }
-          applyImdHybridCompile(storyboard, assets)
+          // 文件导入只做字段规整与资产名绑定；不自动补写末帧、静音声明或画面语义。
           return { storyboard, rawText: text, parseError: null, unmatched }
         } catch (parseError) {
           try {
@@ -2191,38 +1712,39 @@ ${assetListPrompt}【JSON 语法要求】字符串值内部禁止未转义双引
     result = await buildAndRun(retryNote)
     if (result.parseError) throw result.parseError
   }
-  report({ phase: PHASE.NORMALIZE, done: 1, total: 1, message: '结构规整完成，正在对齐资产…' })
+   report({ phase: PHASE.NORMALIZE, done: 1, total: 1, message: '结构规整完成，正在对齐资产…' })
 
   const storyboard = result.storyboard
   if (!storyboard.scenes || !storyboard.scenes.length) throw new Error('规整结果缺少 scenes')
   storyboard.unmatched = Array.isArray(result.unmatched) ? result.unmatched : []
-  const fileQc = runStoryboardQC(storyboard, assets, styleForPoison)
-  if (fileQc.errors.length) {
-    console.warn(`[generateStoryboardFromFile] QC ${fileQc.errors.length} 个硬错误（源文件缺字段，已透传供人工确认）:`, fileQc.errors.join('; '))
-  }
   return storyboard
 }
 
-const PROHIBITED_OUTFIT_HINTS = [
-  'explorer hat', 'daisies', 'daisy', 'adventurer', 'wearing a hat', 'wearing a cap', 'wearing a dress',
-  'wearing clothes', 'wearing a scarf', 'wearing glasses', 'male ', 'female ', ' girl', ' boy',
-  'woman', 'man', 'tall', 'short', 'sturdy', 'chubby', 'slender', ' petite',
-  'round belly', 'belly jiggling', 'chubby belly', 'round chubby', 'fluffy round ears',
-]
+// IMD 清洗规则由 config 提供（默认全空 = 不清洗）。
+// 平台不内置任何剧集专属的外观禁忌词表：换一部剧不需要改代码，需要禁词时配 env 即可。
 function sanitizeIntegrated(text) {
   if (!text) return text
+  const cfg = config.video?.integrated || {}
+  const hints = Array.isArray(cfg.prohibitedHints) ? cfg.prohibitedHints : []
+  const patterns = Array.isArray(cfg.stripClausePatterns) ? cfg.stripClausePatterns : []
+  if (!hints.length && !patterns.length) return text
+
   let cleaned = text
-  cleaned = cleaned.replace(
-    /(@[\u4e00-\u9fa5A-Za-z0-9]+,\s*exactly as shown,\s*)[^.\n]*([.\n])/g,
-    (m, prefix, terminator) => {
-      const tail = m.slice(prefix.length, m.length - terminator.length)
-      const hasProhibited = PROHIBITED_OUTFIT_HINTS.some((kw) => tail.toLowerCase().includes(kw.toLowerCase()))
-      return hasProhibited ? prefix.trimEnd() + terminator : m
-    }
-  )
-  cleaned = cleaned.replace(/,\s*[^,.\n]*?(round belly|belly jiggling|chubby belly|round chubby)[^,.\n]*?(?=[,.\n])/gi, '')
-  cleaned = cleaned.replace(/,\s*(decorated|adorned)\s+with[^,.\n]*/gi, '')
-  cleaned = cleaned.replace(/,\s*wearing\s+[^,.\n]*/gi, '')
+  if (hints.length) {
+    cleaned = cleaned.replace(
+      /(@[\u4e00-\u9fa5A-Za-z0-9]+,\s*exactly as shown,\s*)[^.\n]*([.\n])/g,
+      (m, prefix, terminator) => {
+        const tail = m.slice(prefix.length, m.length - terminator.length)
+        const hasProhibited = hints.some((kw) => tail.toLowerCase().includes(String(kw).toLowerCase()))
+        return hasProhibited ? prefix.trimEnd() + terminator : m
+      }
+    )
+  }
+  for (const p of patterns) {
+    try {
+      cleaned = cleaned.replace(new RegExp(p, 'gi'), '')
+    } catch { /* 配置正则非法时跳过，不阻断主流程 */ }
+  }
   return cleaned.trim()
 }
 
@@ -2243,7 +1765,7 @@ export async function enrichShotIntegrated(shot, assets, style = '', opts = {}) 
   const messages = [
     {
       role: 'system',
-      content: `你是专业的 AI 视频提示词工程师，精通 AI 视频控制式 prompt 写法（用于本项目的画面描述字段，按其六模块结构书写）。【重要】立刻输出 integrated_multimodal_description 正文，不要任何思考、分析、解释或前言。请根据给定的单个镜头信息，为该镜头生成完整的 integrated_multimodal_description（英文，6 模块结构）。${assetListPrompt}${directorNotesPrompt(opts?.directorNotes || '')}
+      content: `你是专业的 AI 视频提示词工程师，精通 AI 视频控制式 prompt 写法（用于本项目的画面描述字段，按其六模块结构书写）。【重要】立刻输出 integrated_multimodal_description 正文，不要任何思考、分析、解释或前言。请根据给定的单个镜头信息，为该镜头生成完整的 integrated_multimodal_description（英文，6 模块结构）。${assetListPrompt}
 
 画风：${style || config.defaultArtStyle}（画面开头声明画风，全片严格统一，禁止偏离）。
 
@@ -2252,19 +1774,23 @@ ${integratedModulesRule()}${frameGeographyRule()}
 【硬约束】
 - 模块2/3 的角色与环境外貌必须【逐字复制】资产清单 description，禁止增删改、禁止编造清单外特征（帽子/服装/性别/年龄/体型等）。
 - 镜头描述或最终画面中 @ 提到的所有角色（含不说话的角色）都必须在模块2 中出现并锁定外观。
+- 模块内提及角色一律写 @中文名（如 @角色名），平台解析为规范英文名；禁止自造英文名/音译/别名——名字对不上，出片时角色与参考图的绑定会静默丢失。
 ${styleLockRule(style, opts.styleCategory || '')}
 - 只输出 integrated_multimodal_description 正文，不要输出 JSON、不要标题、不要解释。`,
     },
     {
       role: 'user',
       content: `镜头描述：${shot.description || ''}
-时长：${shot.duration || 8} 秒
-景别：${shot.shotType || '中景'}
+时长：${shot.duration || config.storyboard?.defaultDuration || 8} 秒
+景别：${shot.shotType || config.storyboard?.defaultShotType || '中景'}
 角色：${(shot.characters || []).join('、') || '无'}
 场景：${(shot.sceneAssets || []).join('、') || '无'}
 道具：${(shot.propAssets || []).join('、') || '无'}
 台词：${dialogue}
-动作说明：${shot.actionNote || '无'}`,
+动作说明：${shot.actionNote || '无'}
+本镜开场状态：${shot.worldStateIn || '无'}
+本镜收尾状态：${shot.worldStateOut || '无'}
+收尾状态必须在 The final frame 中逐项可见；不要添加状态字段之外的新主体或道具。`,
     },
   ]
 
@@ -2279,7 +1805,19 @@ ${styleLockRule(style, opts.styleCategory || '')}
   if (compiled.injected.length) {
     console.log(`[enrichShotIntegrated] 混合编译注入模块：${compiled.injected.join('/')}${compiled.kept.length ? `（${compiled.kept.join('/')} 缺英文原文，保留 AI 版）` : ''}`)
   }
-  return compiled.text
+  // 角色称呼确定性归一（治本）：LLM 可能把两字中文名拼音粘连音译、描述型中文名意译回英文，
+  // 落库前按资产表改回规范名，保证出片侧 <Subject N> 绑定必中。空转无副作用。
+  const canon = canonicalizeImdCharacterNames(compiled.text, assets)
+  if (canon.replaced.length) {
+    console.log(`[enrichShotIntegrated] 角色称呼归一：${canon.replaced.map((r) => `${r.name}×${r.count}(${r.kind})`).join('，')}`)
+  }
+  // 画风是项目级生产约束，不能只依赖模型是否听懂提示词；在 IMD 落库前
+  // 确定性写入可追溯锚点，供出片和契约校验复用。
+  const styleLabel = String(style || config.defaultArtStyle || '').trim()
+  if (styleLabel && !/(arts*style|visuals*style|render(?:ing)?s*style|sames+style|styles+as|画风|风格)/i.test(canon.text)) {
+    return `Visual style lock: ${styleLabel}.\n${canon.text}`
+  }
+  return canon.text
 }
 
 // ---- 单镜重生成（供 POST /episodes/:id/shots/:shotId/regenerate 使用）----
@@ -2335,19 +1873,30 @@ export async function regenerateShot(ctx, assets, style = '', opts = {}) {
     : ''
   const scriptBlock = scriptSpan ? `【本镜对应的剧本片段】\n${scriptSpan}` : ''
 
+  const skillRules = loadSkillRules()
+
   const messages = [
     {
       role: 'system',
-      content: `你是专业的分镜师，精通 AI 视频生成的"控制式 prompt"写法。任务：在保持叙事任务与前后镜衔接不变的前提下，重写【单个镜头】的全部内容。输出严格的 JSON 格式，立刻输出 JSON，禁止任何思考、分析、解释或前言。${assetListPrompt}${directorNotesPrompt(opts?.directorNotes || '')}
+      content: `你是专业的分镜师，精通 AI 视频生成的"控制式 prompt"写法。任务：在保持叙事任务与前后镜衔接不变的前提下，重写【单个镜头】的全部内容。输出严格的 JSON 格式，立刻输出 JSON，禁止任何思考、分析、解释或前言。${assetListPrompt}
 
 画风：${style || config.defaultArtStyle}（与全片一致，禁止偏离）。
+
+【冲突仲裁】你的镜头设计方法论以【Skill 分镜规则】为唯一权威来源（xiaomo-film-studio 小墨影视工作室），下方规则全文必须先通读、全部硬性约束严格遵守；下方平台条款只规定输出格式与出片物理边界——【镜头设计方法论服从 Skill 规则，输出格式与时长字段服从平台契约】。
+
+<skill_storyboard_rules>
+${skillRules.storyboard}
+</skill_storyboard_rules>
+
+<skill_visual_quality>
+${skillRules.visualQuality}
+</skill_visual_quality>
 
 【铁律】
 1. 视觉锁定：角色外貌必须【逐字复制】资产清单中该角色的 description；清单里没有的特征绝对禁止添加。场景描写必须【逐字复制】该场景的 description，禁止编造清单外元素。
 2. 道具专属：每个道具声明 "belongs exclusively to @XX"，其他角色 "paws/hands remain empty"。
 3. 动作微分解：道具动作拆成 动作方式 → 最终状态 → 材质确认 → 否定约束 四段。
 4. 多模态分离：画面/声景/音乐/台词分模块独立书写。
-${cameraAngleRule()}
 ${frameGeographyRule()}
 ${stagingRule()}
 ${pointOfViewRule()}
@@ -2369,22 +1918,24 @@ ${durationLock}
 【输出字段】（单镜 JSON）
 {
   "shot": {
-    "shotType": "全景/中景/近景/特写",
+    "shotType": "${shotTypeTermsText()}（Skill §3 档位表，按本镜内容选一）",
     "startTime": ${baseStart},
-    "cameraMovement": "运镜（一镜一个主运镜）",
-    "camera_angle": "正面/侧面/背面/过肩/俯拍/仰拍",
+    "cameraMovement": "运镜（一镜一个主运镜；固定镜头全片≤10%，Skill §6）",
+    "camera_angle": "Skill §5 方向×高度组合（如 侧45度+微仰）：方向取 正面/侧45度/侧面/过肩/主观，高度取 平视/微仰/微俯/仰拍/俯拍/大仰角/大俯角；纯平视只写方向",
+    "transition_in": "原稿有值时原样保留；场内普通直接切镜填「切」；仅当 xiaomo-film-studio 明确设计动作/视线/图形匹配或视桥时填写「动作匹配」「视桥」等连续承接语义；原稿未填写则留空，平台不得自动推断连续承接",
     "duration": ${duration},
-    "description": "中文画面描述 40-80 字，用 @角色名/@道具名/@场景名 标记资产",
+    "description": "中文画面描述 3-6 句（信息密度优先于句数，Skill 单镜头模板），用 @角色名/@道具名/@场景名 标记资产",
     "actionNote": "动作说明",
     "soundEffects": "画内音效，没有则为空字符串",
     "overallSoundscape": "环境声，没有则为空字符串",
-    "nonDiegeticMusic": "非画内音乐建议，没有则为空字符串",
+    "nonDiegeticMusic": "一律输出空字符串（Skill §14 全程无背景音乐，硬规则无例外）",
     "isCombat": true/false,
     "purpose": "本镜叙事任务（10-30字）",
     "goal": "观众任务（10-30字）",
     "emotionTone": "情绪基调（2-6字）",
     "infoPoints": ["关键信息点（0-3个）"],
     "worldStateOut": "@角色：画面位置·手持·朝向；@道具：位置·状态",
+    "worldStateOutEn": "纯英文版末帧状态快照，与 worldStateOut 逐项同义（谁在画面哪个位置·姿态·朝向·手持/驮负关系），30-80 英文词，用 \"X is at ... facing ...\" 直陈句式；角色名与场景名保留中文原样",
     "dialogue": "台词，对象或对象数组（一镜多句写数组）；每句 {character, tone, text, startTime}，startTime 用全片绝对秒；无对白写 null。凡本镜原有台词必须全部保留，禁止漏句或合并",
     "characters": ["角色名"],
     "sceneAssets": ["场景名"],
@@ -2466,96 +2017,12 @@ ${integratedModulesRule()}
   return { shot: regenShot }
 }
 
-// QC 错误消息里「镜头 X：…」的镜号前缀（与 storyboardValidator 的 label 口径保持一致）
-const QC_SHOT_LABEL_RE = /^镜头\s*([^：:]+?)\s*[：:]/
-
-// 复现 storyboardValidator 的镜头 label 口径：优先用已编号的 shotNumber，否则回落到
-// `scene{场号}-shot{本场累计镜号}`。生成中间态（AI 刚输出、尚未落库）没有 shotNumber，
-// 走的正是回落分支——只按 shotNumber 匹配会让定点修补永远找不到目标镜头。
-function shotLabelsOfScene(scene) {
-  let shotCount = 0
-  return (scene?.shots || []).map((shot) => {
-    shotCount++
-    const raw = shot?.shotNumber || shot?.shot_number || `scene${scene?.sceneNumber || ''}-shot${shotCount}`
-    return String(raw).trim()
-  })
-}
-
-// QC 定点修补：把「镜头 X：…」形式的硬错误按镜号归组，只回炉这些镜头，替代整场重跑。
-// 整场重跑要把规则与资产清单整份重发（实测约 2.2 万 tokens 输入 / 单次 150s+）；
-// 定点修补复用单镜重写器，只带本镜与相邻镜上下文（约 1~2k tokens），快一个量级。
-// 归组失败、任一镜修补失败、或整场复检仍有硬错误，都返回 null，由调用方回退整场重跑。
-async function applyQcShotRepair(scene, qcErrors, assets, style, sceneIndex = 0, styleCategory = '') {
-  const shots = scene?.shots || []
-  if (!shots.length) return null
-
-  const labels = shotLabelsOfScene(scene)
-  const errorsByIndex = new Map()
-  for (const err of qcErrors || []) {
-    const matched = QC_SHOT_LABEL_RE.exec(String(err || ''))
-    if (!matched) return null
-    const idx = labels.indexOf(matched[1].trim())
-    if (idx < 0) return null
-    const list = errorsByIndex.get(idx) || []
-    list.push(String(err))
-    errorsByIndex.set(idx, list)
-  }
-  const targets = [...errorsByIndex.keys()]
-  if (!targets.length) return null
-
-  const patched = new Array(shots.length).fill(null)
-  let cursor = 0
-  let aborted = false
-  const worker = async () => {
-    while (!aborted) {
-      const at = cursor++
-      if (at >= targets.length) return
-      const idx = targets[at]
-      try {
-        const { shot } = await regenerateShot({
-          current: shots[idx],
-          prev: idx > 0 ? shots[idx - 1] : null,
-          next: idx + 1 < shots.length ? shots[idx + 1] : null,
-          sceneTitle: scene.title || '',
-          instruction: `本镜存在以下硬性校验错误，必须逐条修正；除修正所必需的内容外，其余字段与叙事任务保持原样：\n${errorsByIndex.get(idx).map((e, n) => `${n + 1}. ${e}`).join('\n')}`,
-        }, assets, style, { styleCategory })
-        patched[idx] = shot
-      } catch (e) {
-        console.warn(`[generateStoryboard] 第 ${sceneIndex + 1} 场镜头 ${labels[idx]} 定点修补失败:`, e.message)
-        aborted = true
-      }
-    }
-  }
-  const concurrency = Math.min(
-    Math.max(1, Number(config.storyboard?.repairConcurrency) || 4),
-    targets.length
-  )
-  await Promise.all(Array.from({ length: concurrency }, () => worker()))
-  if (aborted) return null
-
-  const nextScene = { ...scene, shots: shots.map((s, idx) => (patched[idx] ? { ...s, ...patched[idx] } : s)) }
-  if (validateStoryboard({ scenes: [nextScene] }, assets, { projectStyleText: stylePoisonText(style, styleCategory) }).errors.length) return null
-  return { scene: nextScene, labels: targets.map((idx) => labels[idx]) }
-}
-
-function runStoryboardQC(storyboard, assets, styleText = '') {
-  const qc = validateStoryboard(storyboard, assets, { projectStyleText: styleText })
-  storyboard.qc = { errors: qc.errors, warnings: qc.warnings, fixed: qc.fixed }
-  return qc
-}
-
-// QC 硬错误计数（剔除「出片提示词超长」类）：该类错误源于参考素材挂载总量（骨架+素材固定开销占大头），
-// 是镜头宿主的固有属性、与镜头合并无关——若纳入对比，素材挂载偏重的集会让合并被整体误判回退。
-function countQualityErrors(qc) {
-  return (qc?.errors || []).filter((e) => !/出片提示词/.test(String(e.message || e))).length
-}
-
 // 出片提示词预算守卫（H3 硬上限 7000 字符，超限则出片直接被拒）：
 // 按「对成片影响最小」的顺序自动瘦身——先移除道具引用（道具图是为近景交互准备的，仅出现在
 // 远景/背景中的道具纯属冗余，靠场景图与文字描述即可），仍超再移除次要场景引用（保留首个 = 本场主场景）。
 // ratio 为安全系数（默认 0.98，留 2% 余量防英译长度波动，实测残差可达 ±500）。
 export function enforcePromptBudget(storyboard, assets, ratio = 0.98) {
-  const limit = (config.storyboard?.h3PromptCharLimit ?? 7000) * ratio
+  const limit = h3ProviderProfile.capabilities.promptCharLimit * ratio
   const budgetCtx = { assetNames: assets }
   let trimmedProp = 0
   let trimmedScene = 0
@@ -2580,14 +2047,132 @@ export function enforcePromptBudget(storyboard, assets, ratio = 0.98) {
   return trimmedProp + trimmedScene
 }
 
-function qcRetryNote(qc) {
-  return `\n\n【QC纠错重试】你上一次输出的分镜存在硬性校验错误：${qc.errors.join('；')}。请修正后重新输出完整分镜 JSON：每个镜头的 finalFrame 与 integratedMultimodalDescription 必填、duration 必须是数字、characters 里的名字必须与资产清单逐字一致。`
-}
-
 const FAKE_SPEAKER_WORDS = new Set(['音效', '音效台词', '字幕', '字幕淡入', '片尾字幕', '题材', '旁白字幕', 'BGM', 'bgm', '音乐'])
 const isFakeSpeaker = (name) => FAKE_SPEAKER_WORDS.has(String(name || '').trim())
 
-const CAMERA_ANGLE_VALUES = ['正面', '侧面', '背面', '过肩', '俯拍', '仰拍']
+// 水平机位枚举（2026-09-26 对齐 Skill §5：侧45度为对话与叙事默认机位，新增侧45度/正侧/主观）
+const CAMERA_ANGLE_VALUES = ['正面', '侧45度', '侧面', '正侧', '背面', '过肩', '主观', '俯拍', '仰拍']
+// 俯仰枚举（Skill §5/§9：与水平机位正交的第二维）
+const CAMERA_ELEVATION_VALUES = ['平视', '微俯', '俯拍', '大俯角', '微仰', '仰拍', '大仰角']
+
+// ─── Skill 表头 → 结构化字段的确定性解析（2026-09-27）───────────────────────
+// 根因：Skill 分镜表头形如「### 镜头 01 | O2 室外半封闭 | 中景 | 标准 35mm | 侧45度+微俯 | 跟拍 | 人物镜头」，
+// 七个槽位中「侧45度+微俯」是两个正交维度（水平机位 × 俯仰）、「标准 35mm」是焦段——
+// 但规整链路只有 LLM 一条入口，表头从未被结构化解析。实测全库 camera_elevation 全空、
+// camera_angle 只剩「正面/侧面」两档（LLM 把复合机位拍扁成一档），lens 全空：
+// 下游 h3PromptTranslator 明明完整支持 侧45度/微俯/大俯角 与 mm 焦段，却永远收不到值——
+// 分镜设计的机位体系在入库这一步就丢了，出片侧只能按「正面/侧面」重建，镜间衔接必然跳。
+// 解法：表头是确定性文本，不依赖 LLM 自觉。规整后按镜头序号回读原始文本表头，补全空缺字段
+// （只填空缺，LLM 已正确拆出的值不覆盖）。
+const HEADER_ANGLE_PATTERNS = [
+  // 长词优先：「侧45度」含「侧」，「大俯角」含「俯」，必须先匹配更具体的
+  { value: '侧45度', re: /侧\s*45\s*度/ },
+  { value: '正侧', re: /正侧/ },
+  { value: '侧面', re: /侧面/ },
+  { value: '正面', re: /正面/ },
+  { value: '过肩', re: /过肩/ },
+  { value: '背面', re: /背面/ },
+  { value: '主观', re: /主观|POV/i },
+]
+const HEADER_ELEVATION_PATTERNS = [
+  { value: '大俯角', re: /大俯角/ },
+  { value: '大仰角', re: /大仰角/ },
+  { value: '微俯', re: /微俯/ },
+  { value: '微仰', re: /微仰/ },
+  { value: '俯拍', re: /俯拍|俯视/ },
+  { value: '仰拍', re: /仰拍|仰视/ },
+  { value: '平视', re: /平视/ },
+]
+// 从表头槽位文本解析水平机位 + 俯仰（两维独立，可同时命中，如「侧45度+微俯」）
+function parseHeaderAngleElevation(slot) {
+  const s = String(slot || '')
+  const angle = HEADER_ANGLE_PATTERNS.find((p) => p.re.test(s))?.value || ''
+  const elevation = HEADER_ELEVATION_PATTERNS.find((p) => p.re.test(s))?.value || ''
+  return { angle, elevation }
+}
+// 从表头槽位解析焦段：「标准 35mm」「中长焦 85mm」「微距 100mm」原样返回该槽
+function parseHeaderLens(slot) {
+  const s = String(slot || '').trim()
+  if (!s) return ''
+  // 必须含 mm 数字或镜头类型词，否则不是焦段槽（避免把景别/运镜误当焦段）
+  if (/\d+\s*mm/i.test(s) || /超广角|广角|中长焦|长焦|微距|标准/.test(s)) return s
+  return ''
+}
+// 景别槽：整槽即景别词（十档口径，与 skillContract 一致；归一到产线四档由 normalizeShotType 负责）
+const HEADER_SHOT_TYPE_RE = new RegExp(`^(${shotTypeTermsText('|')})$`)
+// 空间类型槽：槽首即代号（S1-S4/O1/O2/X），后可跟名称，如「O2 室外半封闭」「S4 室内超大型」
+const HEADER_SPACE_TYPE_RE = /^(S[1-4]|O[12]|X)(?=[\s\u4e00-\u9fa5]|$)/
+// 运镜词（与 h3PromptTranslator.CAMERA_MAP 的中文键同族；俯拍/仰拍属机位俯仰，不在此列）
+const HEADER_MOVEMENT_RE = /固定|推|拉|摇|移|跟|升|降|环绕|旋转|手持|甩/
+// 从表头槽位解析景别：整槽精确命中才认（避免把「中近景的镜头缓缓推近」这类长句误当景别槽）
+function parseHeaderShotType(slot) {
+  const s = String(slot || '').trim()
+  return HEADER_SHOT_TYPE_RE.test(s) ? s : ''
+}
+// 从表头槽位解析空间类型代号
+function parseHeaderSpaceType(slot) {
+  const m = String(slot || '').trim().match(HEADER_SPACE_TYPE_RE)
+  return m ? m[1] : ''
+}
+// 从表头槽位解析运镜：含运镜词即认（运镜词集合与机位/景别/焦段/空间/主体槽词汇不相交，不会误挂）
+function parseHeaderMovement(slot) {
+  const s = String(slot || '').trim()
+  return HEADER_MOVEMENT_RE.test(s) ? s : ''
+}
+// 把一份原始分镜文本切成「镜头序号 → 表头槽位数组」。
+// 兼容 Skill 的 `### 镜头 01 | ... | ...` 与规整前的 `镜头 1 | ...` 等写法。
+export function parseStoryboardTextHeaders(sourceText) {
+  const map = new Map()
+  const lines = String(sourceText || '').split('\n')
+  for (const line of lines) {
+    const t = line.trim()
+    if (!t) continue
+    // 必须含竖线分隔且首段以「镜头」开头（Skill 表头特征）
+    if (!t.includes('|') || !/^#{0,6}\s*\**\s*(?:镜头|shot)\s*\d+/i.test(t)) continue
+    const cells = t
+      .replace(/^#{0,6}\s*/, '')   // 去 Markdown 标题标记
+      .replace(/\*\*/g, '')         // 去加粗标记
+      .split('|')
+      .map((c) => c.trim())
+    if (cells.length < 3) continue
+    const numMatch = cells[0].match(/(?:镜头|shot)\s*(\d+)/i)
+    if (!numMatch) continue
+    const shotNo = Number(numMatch[1])
+    if (Number.isFinite(shotNo)) map.set(shotNo, cells)
+  }
+  return map
+}
+// 按镜头序号对应的表头，补全 LLM 漏拆的机位/俯仰/焦段/景别/空间类型/运镜。
+// 槽位归属不靠猜位置：全表头扫一遍，用「模式命中」直接定位（机位槽含角度词、焦段槽含 mm、
+// 景别槽整槽即景别词、空间槽槽首是代号、运镜槽含运镜词），位置漂移（少槽/多槽/表头被改）都不会误挂。
+export function backfillFromHeader(shot, cells) {
+  if (!cells || !cells.length) return shot
+  const joined = cells.join(' | ')
+  const { angle, elevation } = parseHeaderAngleElevation(joined)
+  const lens = cells.map(parseHeaderLens).find(Boolean) || ''
+  const shotType = cells.map(parseHeaderShotType).find(Boolean) || ''
+  const spaceType = cells.map(parseHeaderSpaceType).find(Boolean) || ''
+  const movement = cells.map(parseHeaderMovement).find(Boolean) || ''
+  const next = { ...shot }
+  if (!next.cameraAngle && !next.camera_angle) {
+    if (angle) next.cameraAngle = angle
+  }
+  if (!next.cameraElevation && !next.camera_elevation) {
+    if (elevation) next.cameraElevation = elevation
+  }
+  if (!String(next.lens || '').trim() && lens) next.lens = lens
+  if (!String(next.shotType || next.shot_type || '').trim() && shotType) next.shotType = shotType
+  if (!String(next.spaceType || next.space_type || '').trim() && spaceType) next.spaceType = spaceType
+  // 运镜特例：规整契约默认「固定」，LLM 漏拆时库里的「固定」与真空无法区分——
+  // 表头是权威：只要表头有运镜且不是「固定」，而当前值是空或默认「固定」，就以表头为准。
+  if (movement && movement !== '固定') {
+    const cur = String(next.cameraMovement || next.camera_movement || '').trim()
+    if (!cur || cur === '固定') next.cameraMovement = movement
+  } else if (movement === '固定' && !String(next.cameraMovement || '').trim()) {
+    next.cameraMovement = movement
+  }
+  return next
+}
 
 // 与 storyboardValidator 的台词语速估算保持同一口径（chars / speechRateMaxCharsPerSec），
 // 用于推导每句台词的 endTime（AI 不输出该字段，程序统一计算）
@@ -2617,9 +2202,16 @@ function allocateSceneDurations(targetDuration, sceneBlocks) {
   return ints.map((v) => v + minPer)
 }
 
-function normalizeStoryboard(storyboard, targetDuration = 0, { minDuration = 4 } = {}) {
+export function normalizeStoryboard(storyboard, targetDuration = 0, { minDuration = config.storyboard?.durationMin ?? 4, sourceText = '' } = {}) {
   const scenes = Array.isArray(storyboard?.scenes) ? storyboard.scenes : []
   if (!scenes.length) throw new Error('分镜结果缺少 scenes')
+
+  // Skill 表头确定性回填（2026-09-27）：源文本里的表头是机位/俯仰/焦段/景别/空间/运镜的唯一权威来源，
+  // LLM 拍扁或漏拆时在此补全。按「全局镜头序号」对齐表头（分镜文件的镜头编号全场连续；
+  // 若 LLM 把场次划错，全局序号仍然对得上——匹配不到就不补，绝不猜）。
+  const headerIndex = parseStoryboardTextHeaders(sourceText)
+  let headerFilled = 0
+  let globalShotNo = 0
 
   const durationCeil = config.storyboard?.durationMax ?? 15
   let cursor = 0
@@ -2628,7 +2220,17 @@ function normalizeStoryboard(storyboard, targetDuration = 0, { minDuration = 4 }
     const shots = Array.isArray(scene.shots) ? scene.shots : []
     if (!shots.length) throw new Error(`场次 ${sceneIndex + 1} 没有镜头`)
 
-    const normalizedShots = shots.map((shot, shotIndex) => {
+    const normalizedShots = shots.map((rawShot, shotIndex) => {
+      // 表头回填：按全局序号（1-based）取表头。只在 LLM 未给出对应字段时补，已拆出的一律保留。
+      // 用别名而非改参数——下游大量 shot.xxx 引用必须读到回填后的值。
+      globalShotNo += 1
+      const headerCells = headerIndex.get(globalShotNo)
+      const shot = headerCells ? backfillFromHeader(rawShot, headerCells) : rawShot
+      if (shot !== rawShot) {
+        const key = (s) =>
+          `${s.cameraAngle || ''}|${s.cameraElevation || ''}|${s.lens || ''}|${s.shotType || ''}|${s.spaceType || ''}|${s.cameraMovement || ''}`
+        if (key(shot) !== key(rawShot)) headerFilled++
+      }
       const rawDur = Number(shot.duration) || 8
       const duration = Math.round(Math.max(minDuration, Math.min(durationCeil, rawDur)))
       if (duration !== rawDur) clampedCount++
@@ -2680,6 +2282,7 @@ function normalizeStoryboard(storyboard, targetDuration = 0, { minDuration = 4 }
       }
 
       return {
+        shotNumber: String(shot.shotNumber || shot.shot_number || `${sceneIndex + 1}-${shotIndex + 1}`).trim(),
         shotType: normalizeShotType(shot.shotType),
         startTime,
         endTime,
@@ -2702,7 +2305,30 @@ function normalizeStoryboard(storyboard, targetDuration = 0, { minDuration = 4 }
         infoPoints: (Array.isArray(shot.infoPoints) ? shot.infoPoints : (Array.isArray(shot.info_points) ? shot.info_points : []))
           .map((p) => String(p || '').trim()).filter(Boolean),
         worldStateOut: String(shot.worldStateOut || shot.world_state_out || '').trim(),
+        // 末帧状态的英文副本（2026-09-27）：分镜阶段 LLM 上下文最全，此时产出的英文
+        // 位置/朝向语义最准；出片链路优先消费，缺才回落翻译（见 v4Video / h3PromptTranslator）。
+        worldStateOutEn: String(shot.worldStateOutEn || shot.world_state_out_en || '').trim(),
+        // ─── Skill 新增字段（2026-09-26）：此前本函数的固定键集合会把它们整段丢弃，
+        // 导致镜头契约产出的焦段/机位俯仰/五层色彩/人声/空间类型全部到不了下游。
+        // 保留条件：枚举型字段做取值校验（防模型吐垃圾），文本型字段直接透传。
+        spaceType: String(shot.spaceType || shot.space_type || '').trim(),
+        spaceEvidence: String(shot.spaceEvidence || shot.space_evidence || '').trim(),
+        lens: String(shot.lens || '').trim(),
+        colorLighting: String(shot.colorLighting || shot.color_lighting || '').trim(),
+        humanVoice: String(shot.humanVoice || shot.human_voice || '').trim(),
+        // 接续字段必须在规整时保真，否则下游会把原本声明的硬切/离场降级成软接续。
+        transitionIn: String(shot.transitionIn || shot.transition_in || '').trim(),
+        transitionOut: String(shot.transitionOut || shot.transition_out || '').trim(),
+        worldStateIn: String(shot.worldStateIn || shot.world_state_in || '').trim(),
+        worldStateInEn: String(shot.worldStateInEn || shot.world_state_in_en || '').trim(),
         ...(typeof shot.isCombat === 'boolean' ? { isCombat: shot.isCombat } : {}),
+        ...(CAMERA_ANGLE_VALUES.includes(shot.cameraAngle || shot.camera_angle)
+          ? { cameraAngle: shot.cameraAngle || shot.camera_angle }
+          : {}),
+        ...(CAMERA_ELEVATION_VALUES.includes(shot.cameraElevation || shot.camera_elevation)
+          ? { cameraElevation: shot.cameraElevation || shot.camera_elevation }
+          : {}),
+        // 兼容旧数据键：历史分镜若仍带驼峰/下划线 camera_angle 亦一并保留
         ...(CAMERA_ANGLE_VALUES.includes(shot.camera_angle) ? { camera_angle: shot.camera_angle } : {}),
       }
     })
@@ -2714,6 +2340,11 @@ function normalizeStoryboard(storyboard, targetDuration = 0, { minDuration = 4 }
   })
 
   const total = cursor
+  if (headerFilled > 0) {
+    console.log(
+      `[generateStoryboard] Skill 表头确定性回填：${headerFilled} 个镜头的机位/俯仰/焦段/景别/空间/运镜由表头补全（LLM 未拆出的表头信息在此归位，下游不再只拿到「正面/侧面」两档）`
+    )
+  }
   if (clampedCount > 0) {
     console.warn(
       `[generateStoryboard] ${clampedCount} 个镜头的 AI 输出时长超出 ${minDuration}-${durationCeil}s，已归一到范围内（镜头数未变——碎切由后续镜头合并引擎复核）`
@@ -2766,7 +2397,7 @@ ${fp}`
 2. 镜头链式衔接：按镜头顺序排位，第 N 镜每个角色的 start 必须与第 N-1 镜该角色的 end 完全一致（坐标和区域都相同）；第 1 镜的 start 由画面描述合理推导。
 3. finalFrame 是唯一权威：每镜每个角色/道具的 end 位置和朝向，必须严格符合该镜的 finalFrame 描述；finalFrame 说什么就排什么，禁止另行想象。
 4. 命名一致：角色/道具/家具名字全场统一（用资产清单和镜头道具的原名），叙事元素（脚印、蒸汽、黑影等）也要全场同名。
-5. 跨角色关系显式化：剧情中有遮挡（"挡在面前"）、拉拽、跟随、躲藏等关系时，用 relation 字段写明（如 "shielding @角色甲" / "hidden behind 巨石 with @角色乙"），并且用前后景深坐标体现（前景 y 更大，遮挡者必须比被遮挡者更靠近威胁方向）。
+5. 跨角色关系显式化：剧情中有遮挡（"挡在面前"）、拉拽、跟随、躲藏等关系时，用 relation 字段写明（如 "shielding @角色甲" / "hidden behind 遮挡物 with @角色乙"），并且用前后景深坐标体现（前景 y 更大，遮挡者必须比被遮挡者更靠近威胁方向）。
 6. 每镜坐标独立完整：每个镜头对象里都要有该镜的全部角色（含 start/end/facing/gaze/actions）、道具、机位、交汇点，不许省略或引用其他镜头。
 
 画布与坐标系：

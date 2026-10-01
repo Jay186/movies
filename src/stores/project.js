@@ -1,6 +1,7 @@
 ﻿import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { api } from '../services/api'
+import { useModelConfigStore } from './modelConfig'
 import {
   confirmDialog, toastSuccess, toastWarn, toastError, toastInfo,
 } from '../services/dialog'
@@ -8,9 +9,9 @@ import { buildAssetImagePrompt } from '../services/promptBuilder'
 import { reconcilePendingAssetGens } from '../services/pendingAssetGens'
 import { buildSceneGroupChains } from '../utils/sceneGroupSchedule'
 import { hasId, sameId } from '../utils/assetId.js'
-import { characterColor } from '../constants/palette'
-import { getVideoEngine } from '../data/videoEngines'
+import { getVideoEngine, DEFAULT_VIDEO_ENGINE, VIDEO_ENGINE_KIND, engineCostText } from '../data/videoEngines'
 import { STORAGE_KEYS, STORAGE_KEY_PREFIX, POLL, TIMEOUTS, DELAYS, DEFAULTS, FALLBACK_STYLE, BATCH_GEN } from '../constants/app'
+import { tableLabel } from '../constants/assetTypes'
 
 const CURRENT_PROJECT_STORAGE_KEY = STORAGE_KEYS.CURRENT_PROJECT
 
@@ -37,6 +38,7 @@ function mapStoryboardScenes(rawScenes) {
         soundEffects: shot.soundEffects || shot.sound_effects || '',
         cameraMovement: shot.cameraMovement || shot.camera_movement || '',
         cameraAngle: shot.cameraAngle || shot.camera_angle || '',
+        cameraElevation: shot.cameraElevation || shot.camera_elevation || '',
         overallSoundscape: shot.overallSoundscape || shot.overall_soundscape || '',
         nonDiegeticMusic: shot.nonDiegeticMusic || shot.non_diegetic_music || '',
         integratedMultimodalDescription: shot.integratedMultimodalDescription || shot.integrated_multimodal_description || '',
@@ -68,13 +70,27 @@ function mapStoryboardScenes(rawScenes) {
         isCombat: shot.is_combat === 1 ? 1 : (shot.is_combat === 0 ? 0 : null),
         locked: shot.locked === 1 || shot.locked === true,
         version: shot.version || 1,
-        qcStatus: shot.qc_status || '',
-        qcItems: (() => {
-          try {
-            const raw = typeof shot.qc_report === 'string' ? JSON.parse(shot.qc_report || '{}') : (shot.qc_report || null)
-            return Array.isArray(raw?.items) ? raw.items : []
-          } catch { return [] }
+        fieldSources: (() => {
+          const raw = shot.fieldSources || shot.field_sources_json
+          if (raw && typeof raw === 'object') return raw
+          try { return raw ? JSON.parse(raw) : {} } catch { return {} }
         })(),
+        shotUid: shot.shotUid || shot.shot_uid || '',
+        beatId: shot.beatId || shot.beat_id || '',
+        coverageId: shot.coverageId || shot.coverage_id || '',
+        relationType: shot.relationType || shot.relation_type || '',
+        relatedShots: Array.isArray(shot.relatedShots)
+          ? shot.relatedShots
+          : (() => { try { const v = JSON.parse(shot.related_shots_json || '[]'); return Array.isArray(v) ? v : [] } catch { return [] } })(),
+        composition: shot.composition || '',
+        lens: shot.lens || '',
+        depthOfField: shot.depthOfField || shot.depth_of_field || '',
+        transitionIn: shot.transitionIn || shot.transition_in || '',
+        transitionOut: shot.transitionOut || shot.transition_out || '',
+        colorLighting: shot.colorLighting || shot.color_lighting || '',
+        promptProviderId: shot.promptProviderId || shot.prompt_provider_id || '',
+        compiledPrompt: shot.compiledPrompt || shot.compiled_prompt || '',
+        promptCompiledAt: shot.promptCompiledAt || shot.prompt_compiled_at || null,
         hasFrame: !!shot.frame_url,
         hasBlocking: !!(shot.blocking_url || shot.blocking_plan),
         // 回存标识：整场保存靠 (sceneNumber, shotNumber) 定位既有镜头，必须用服务端原值，
@@ -124,52 +140,30 @@ function stripInstructionEcho(originalText, newText) {
   return { text: kept.join('\n'), removed }
 }
 
-const ASSET_TABLE_LABEL = { characters: '角色', props: '道具', scenes: '场景' }
+// 资产中文标签走 constants/assetTypes 单一事实源，不在 store 里另写一份
+const ASSET_TABLE_LABEL = (table) => tableLabel(table) || table
 
-const PROPS_ID_OFFSET = 100000
-const SCENES_ID_OFFSET = 200000
-
-function buildOverwriteDetails(report) {
+// 合并三表的风险报告为决策弹窗明细（后端 persistAssets 的 guard 预检返回结构）
+function buildCombinedRiskDetails(reports = {}) {
   const details = []
-  const counts = report?.counts || {}
-  if (counts.overwrites) {
-    details.push({ label: '字段覆盖', value: `${counts.overwrites} 处现有内容将被新提取结果替换`, tone: 'warn' })
-  }
-  if (counts.deletions) {
-    details.push({ label: '条目删除', value: `${counts.deletions} 个现有资产在新提取里消失`, tone: 'warn' })
-  }
-  const names = [
-    ...(report?.overwrites || []).map((o) => o.name),
-    ...(report?.deletions || []).map((d) => d.name),
-  ].filter(Boolean)
-  if (names.length) {
+  for (const [table, report] of Object.entries(reports)) {
+    const counts = report?.counts || {}
+    const parts = []
+    if (counts.overwrites) parts.push(`覆盖 ${counts.overwrites} 处`)
+    if (counts.deletions) parts.push(`删除 ${counts.deletions} 项`)
+    if (!parts.length) continue
+    const names = [
+      ...(report.overwrites || []).map((o) => o.name),
+      ...(report.deletions || []).map((d) => d.name),
+    ].filter(Boolean)
     const preview = names.slice(0, 6).join('、') + (names.length > 6 ? ` 等 ${names.length} 项` : '')
-    details.push({ label: '涉及', value: preview })
-  }
-  return details
-}
-
-async function saveAssetsGuarded({ episodeId, table, items, saveFn, decisions }) {
-  const call = (decision) => saveFn(episodeId, {
-    [table]: items,
-    source: 'extract',
-    ...(decision ? { decision } : {}),
-  })
-  let result = await call(decisions[table])
-  if (result && result.risk) {
-    const acceptNew = await confirmDialog({
-      title: `${ASSET_TABLE_LABEL[table] || '资产'}将被覆盖`,
-      description: '新提取结果会覆盖你手工改过或补充过的内容。\n「全部保留我的」= 沿用现有版本、只新增本次新提取的条目；「接受新值」= 用本次提取结果整体替换。',
-      details: buildOverwriteDetails(result.report),
-      confirmText: '接受新值',
-      cancelText: '全部保留我的',
+    details.push({
+      label: ASSET_TABLE_LABEL(table),
+      value: `${parts.join('、')}${preview ? `：${preview}` : ''}`,
       tone: 'warn',
     })
-    const decision = acceptNew ? 'accept' : 'keep'
-    decisions[table] = decision
-    result = await call(decision)
   }
-  return result
+  return details
 }
 
 
@@ -231,14 +225,62 @@ export const useProjectStore = defineStore('project', () => {
   const generatingAssetIds = ref([]) 
   const assetGenControllers = new Map()
 
-  const LEGACY_IMAGE_MODELS = { 'visionary-gpt-image-2': 'zikl' }
-  const storedImageModel = localStorage.getItem(STORAGE_KEYS.IMAGE_MODEL) || ''
-  const resolvedImageModel = LEGACY_IMAGE_MODELS[storedImageModel] || storedImageModel || 'zikl'
-  if (resolvedImageModel !== storedImageModel) localStorage.setItem(STORAGE_KEYS.IMAGE_MODEL, resolvedImageModel)
-  const imageModel = ref(resolvedImageModel)
-  watch(imageModel, (v) => localStorage.setItem(STORAGE_KEYS.IMAGE_MODEL, v))
-  const videoModel = ref(localStorage.getItem(STORAGE_KEYS.VIDEO_MODEL) || 'h3v4')
+  // imageModel 语义 = ai_model_entries.id（生图条目 id），不再是 provider 字符串。
+  // 本地存量值若不是有效条目 id，等 modelConfig 加载完成后回落到默认条目。
+  const imageModel = ref(localStorage.getItem(STORAGE_KEYS.IMAGE_MODEL) || '')
+  watch(imageModel, (v) => {
+    try {
+      if (v) localStorage.setItem(STORAGE_KEYS.IMAGE_MODEL, String(v))
+      else localStorage.removeItem(STORAGE_KEYS.IMAGE_MODEL)
+    } catch {  }
+  })
+  const videoModel = ref(localStorage.getItem(STORAGE_KEYS.VIDEO_MODEL) || DEFAULT_VIDEO_ENGINE.value)
   watch(videoModel, (v) => localStorage.setItem(STORAGE_KEYS.VIDEO_MODEL, v))
+
+  // 单镜时长上下限由后端配置下发（SHOT_DURATION_MIN / MAX / DEFAULT）。
+  // 前端不再写死 3 / 5 / 15：否则与后端下限不一致时提交会被直接拒绝。
+  const shotDurationLimits = ref({ min: 4, max: 15, default: 8 })
+  let durationLimitsPromise = null
+  function loadShotDurationLimits({ force = false } = {}) {
+    if (durationLimitsPromise && !force) return durationLimitsPromise
+    durationLimitsPromise = api
+      .getShotDurationLimits()
+      .then((d) => {
+        const min = Number(d?.min)
+        const max = Number(d?.max)
+        if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max < min) return
+        const def = Number(d?.default)
+        shotDurationLimits.value = {
+          min,
+          max,
+          default: Number.isFinite(def) && def >= min && def <= max ? def : min,
+        }
+      })
+      .catch(() => {  })
+    return durationLimitsPromise
+  }
+  function clampShotDuration(value, fallback) {
+    const { min, max, default: def } = shotDurationLimits.value
+    const n = Number(value)
+    const base = Number.isFinite(n) && n > 0 ? n : Number(fallback) || def
+    return Math.max(min, Math.min(max, base))
+  }
+
+  // 生图条目加载完成后校验本地存量值：不是有效条目 id（含空值/历史 provider 值）
+  // 或所选条目已停用（会从下拉里消失）时，回落到默认条目
+  const modelConfig = useModelConfigStore()
+  modelConfig.load().catch(() => {})
+  watch(
+    () => modelConfig.enabledImageEntries,
+    (entries) => {
+      if (!Array.isArray(entries) || !entries.length) return
+      const ids = entries.map((e) => String(e.id))
+      if (ids.includes(String(imageModel.value))) return
+      const fallback = entries.find((e) => e.is_default) || entries[0]
+      if (fallback) imageModel.value = String(fallback.id)
+    },
+    { immediate: true, deep: true }
+  )
   const generatingStoryboardIds = ref([]) 
   const generatingBlockingIds = ref([]) 
   const generatingKeyframeIds = ref([])
@@ -327,13 +369,6 @@ export const useProjectStore = defineStore('project', () => {
   const storyboardScenes = ref([])
   const storyboardSource = ref('generated')
   const projectCharacters = ref([])
-
-  const qcReport = ref(null)
-  const qcLoading = ref(false)
-  const qcFixing = ref([]) 
-  const qcShowIgnored = ref(false) 
-  const qcLastResult = ref('')
-  const qcFixDetails = ref([]) 
 
   const wordCount = computed(() => scriptContent.value.replace(/\s/g, '').length)
   const totalShots = computed(() => storyboardScenes.value.reduce((sum, s) => sum + s.shots.length, 0))
@@ -462,7 +497,7 @@ export const useProjectStore = defineStore('project', () => {
   // —— 单镜 AI 重写 / 版本链刷新（重生成、回退、时长顺延后统一走这里）——
   const regeneratingShotIds = ref([])
 
-  // 拉取服务端最新分镜行，按 id 就地覆盖本地镜像（内容/时轴/QC/锁定全量刷新）；
+  // 拉取服务端最新分镜行，按 id 就地覆盖本地镜像（内容/时轴/锁定全量刷新）；
   // 场次或镜头数量与本地不一致（锁定镜跳过删除、清空重来等结构变化）时整体重建
   async function refreshStoryboardShots() {
     if (!currentEpisodeId.value) return
@@ -593,51 +628,46 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
-  async function fetchAllVideoInflightJobs() {
-    const results = await Promise.allSettled([
-      api.getVideoV3JobsInflight(),
-      api.getVideoV4JobsInflight(),
-    ])
-    const jobs = []
-    const seen = new Set()
-    for (const r of results) {
-      if (r.status !== 'fulfilled') continue
-      for (const j of Array.isArray(r.value?.jobs) ? r.value.jobs : []) {
-        if (seen.has(j.shotId)) continue
-        seen.add(j.shotId)
-        jobs.push(j)
-      }
-    }
-    return jobs
+  async function fetchVideoJobs() {
+    if (!currentEpisodeId.value) return []
+    try {
+      const r = await api.getVideoJobs(currentEpisodeId.value)
+      return Array.isArray(r.jobs) ? r.jobs : []
+    } catch { return [] }
+  }
+
+  const videoJobFailedNotified = new Set()
+
+  // 出片任务轮询：状态来自服务端 video_jobs 表，刷新/重开页面都能接上。
+  // 有活动任务就持续轮询，全部结束后自动停止。
+  function startVideoJobPolling() {
+    if (videoJobPollTimer) return
+    videoJobPollTimer = setInterval(async () => {
+      try {
+        const jobs = await fetchVideoJobs()
+        const active = jobs.filter((j) => j.status === 'queued' || j.status === 'running')
+        generatingVideoIds.value = active.map((j) => Number(j.shot_id))
+        for (const j of jobs) {
+          if (j.status === 'failed' && !videoJobFailedNotified.has(j.id)) {
+            videoJobFailedNotified.add(j.id)
+            toastError(`镜 ${j.shot_id} 出片失败`, { detail: String(j.error || '未知错误') })
+          }
+        }
+        if (active.length) await refreshShotVideoFields().catch(() => {})
+        if (!active.length) {
+          clearInterval(videoJobPollTimer)
+          videoJobPollTimer = null
+        }
+      } catch {  }
+    }, POLL.INTERVAL_MS)
   }
 
   async function restoreGeneratingVideos() {
     try {
-      const jobs = await fetchAllVideoInflightJobs()
-      generatingVideoIds.value = jobs.map((j) => j.shotId)
-      if (videoJobPollTimer) { clearInterval(videoJobPollTimer); videoJobPollTimer = null }
-      if (!jobs.length) return
-      let polls = 0
-      videoJobPollTimer = setInterval(async () => {
-        polls++
-        if (polls > POLL.MAX_POLLS.VIDEO_JOB) {
-          clearInterval(videoJobPollTimer)
-          videoJobPollTimer = null
-          generatingVideoIds.value = []
-          return
-        }
-        try {
-          const remaining = await fetchAllVideoInflightJobs()
-          if (remaining.length < jobs.length) {
-            generatingVideoIds.value = remaining.map((j) => j.shotId)
-            await refreshShotVideoFields()
-          }
-          if (!remaining.length) {
-            clearInterval(videoJobPollTimer)
-            videoJobPollTimer = null
-          }
-        } catch {  }
-      }, POLL.INTERVAL_MS)
+      const jobs = await fetchVideoJobs()
+      const active = jobs.filter((j) => j.status === 'queued' || j.status === 'running')
+      generatingVideoIds.value = active.map((j) => Number(j.shot_id))
+      if (active.length) startVideoJobPolling()
     } catch (e) {
       console.warn('[restoreGeneratingVideos] 恢复出片任务失败:', e.message)
     }
@@ -1071,6 +1101,7 @@ export const useProjectStore = defineStore('project', () => {
         instruction: String(instruction).trim(),
         selectedText: String(selectedText),
         context: scriptContent.value,
+        episodeId: currentEpisodeId.value,
       })
       if (!result.rewrittenText) throw new Error('后端未返回改写结果')
       pendingRewrite.value = {
@@ -1182,22 +1213,24 @@ export const useProjectStore = defineStore('project', () => {
     return !!lastStoryboardInfo.value && lastStoryboardInfo.value.script !== (scriptContent.value || '')
   })
 
-  const pendingAssetSave = ref(null)
-
-  async function extractAssets() {
+  // 提取资产：服务端一步「提取+落库」。decision 为风险拍板后的重试决策
+  //（'accept'/'keep'），重试时服务端直接复用暂存的上次提取结果，不再调用模型。
+  async function extractAssets(decision = '') {
     if (!scriptContent.value.trim()) {
       toastWarn('请先编写或确认剧本')
-      return
+      return { success: false }
     }
-    if (aiLoading.value) return
+    if (aiLoading.value) return { success: false }
 
     const fingerprint = scriptContent.value
     const styleLabel = currentStyle.value?.label || artStyle.value || ''
     const episodeId = currentEpisodeId.value
+    if (!episodeId) {
+      toastWarn('当前没有选中的集')
+      return { success: false }
+    }
 
-    const resumeSave = !!(pendingAssetSave.value && pendingAssetSave.value.episodeId === episodeId)
-
-    if (!resumeSave) {
+    if (!decision) {
       const hasExisting = characters.value.length || assetScenes.value.length || props.value.length
       if (hasExisting) {
         const sameAsLast = lastExtractInfo.value &&
@@ -1223,137 +1256,36 @@ export const useProjectStore = defineStore('project', () => {
     }
 
     aiLoading.value = true
-    handleAiProgress('submitting', { message: resumeSave ? '正在重试保存资产...' : '正在提取角色/场景/道具...' })
+    handleAiProgress('submitting', { message: decision ? '正在按你的决策保存资产...' : '正在提取角色/场景/道具...' })
 
     try {
-      if (!episodeId) throw new Error('当前没有选中的集')
-
-      let mapped, scriptFp
-      if (resumeSave) {
-        mapped = pendingAssetSave.value
-        scriptFp = mapped.scriptFp
-      } else {
-        const oldCharImages = {}
-        const oldCharAudios = {}
-        const oldSceneImages = {}
-        const oldSceneLighting = {}
-        const oldPropImages = {}
-        const oldCharDesc = {}
-        const oldSceneDesc = {}
-        const oldPropDesc = {}
-        characters.value.forEach(c => {
-          if (c.imageUrl) oldCharImages[c.name] = c.imageUrl
-          if (c.audioUrl) oldCharAudios[c.name] = c.audioUrl
-          oldCharDesc[c.name] = c.description || ''
-        })
-        assetScenes.value.forEach(s => {
-          if (s.imageUrl) oldSceneImages[s.name] = s.imageUrl
-          if (s.lightingEn) oldSceneLighting[s.name] = s.lightingEn
-          oldSceneDesc[s.name] = s.description || ''
-        })
-        props.value.forEach(p => {
-          if (p.imageUrl) oldPropImages[p.name] = p.imageUrl
-          oldPropDesc[p.name] = p.description || ''
-        })
-
-        const result = await api.generateAssets({ episodeId, style: styleLabel })
-        if (!result.assets) throw new Error('后端未返回资产')
-        scriptFp = result.scriptFp || ''
-
-        const assetBatchBase = Date.now() * 1000
-        mapped = {
-          episodeId,
-          scriptFp,
-          characters: (result.assets.characters || []).map((c, i) => ({
-            id: assetBatchBase + i, 
-            name: c.name || `角色${i + 1}`,
-            role: c.role || '配角',
-            description: c.description || '',
-            color: characterColor(i),
-            imageUrl: oldCharImages[c.name] || '', 
-            audioUrl: oldCharAudios[c.name] || '', 
-            nameEn: c.nameEn || c.name_en || '',
-            descriptionEn: c.descriptionEn || c.description_en || '',
-          })),
-          props: (result.assets.props || []).map((p, i) => ({
-            id: assetBatchBase + PROPS_ID_OFFSET + i,
-            name: typeof p === 'string' ? p : (p.name || `道具${i + 1}`),
-            description: typeof p === 'string' ? '' : (p.description || ''),
-            owner: typeof p === 'string' ? '' : (p.owner || ''),
-            imageUrl: oldPropImages[typeof p === 'string' ? p : p.name] || '',
-            nameEn: typeof p === 'string' ? '' : (p.nameEn || p.name_en || ''),
-            descriptionEn: typeof p === 'string' ? '' : (p.descriptionEn || p.description_en || ''),
-          })),
-          scenes: (result.assets.scenes || []).map((s, i) => ({
-            id: assetBatchBase + SCENES_ID_OFFSET + i,
-            name: s.name || `场景${i + 1}`,
-            description: s.description || '',
-            propNames: Array.isArray(s.props) ? s.props.map(String) : (Array.isArray(s.propNames) ? s.propNames : []),
-            imageUrl: oldSceneImages[s.name] || '',
-            titleEn: s.titleEn || s.title_en || '',
-            summaryEn: s.summaryEn || s.summary_en || '',
-            lightingEn: s.lightingEn || s.lighting_en || '',
-            location: s.location || s.location_en || '',
-          })),
-        }
-
-        mapped.staleAssets = [
-          ...mapped.characters
-            .filter(c => oldCharImages[c.name] && (oldCharDesc[c.name] || '') !== (c.description || ''))
-            .map(c => ({ type: 'character', name: c.name })),
-          ...mapped.props
-            .filter(p => oldPropImages[p.name] && (oldPropDesc[p.name] || '') !== (p.description || ''))
-            .map(p => ({ type: 'prop', name: p.name })),
-          ...mapped.scenes
-            .filter(s => oldSceneImages[s.name] && (oldSceneDesc[s.name] || '') !== (s.description || ''))
-            .map(s => ({ type: 'scene', name: s.name })),
-        ]
-      }
-
-      const saveErrors = []
-      const decisions = mapped.decisions || (mapped.decisions = {})
-      try {
-        if (mapped.characters.length) {
-          await saveAssetsGuarded({ episodeId, table: 'characters', items: mapped.characters, saveFn: api.saveCharacters, decisions })
-        }
-      } catch (e) { saveErrors.push(`角色：${e.message}`) }
-      try {
-        if (mapped.props.length) {
-          await saveAssetsGuarded({ episodeId, table: 'props', items: mapped.props, saveFn: api.saveProps, decisions })
-        }
-      } catch (e) { saveErrors.push(`道具：${e.message}`) }
-      try {
-        if (mapped.scenes.length) {
-          await saveAssetsGuarded({ episodeId, table: 'scenes', items: mapped.scenes, saveFn: api.saveScenes, decisions })
-        }
-      } catch (e) { saveErrors.push(`场景：${e.message}`) }
-
-      if (saveErrors.length) {
-        pendingAssetSave.value = { ...mapped, scriptFp }
-        toastError(`部分资产保存失败（${saveErrors.length} 项）`, {
-          detail: `${saveErrors.join('；')}\n已提取的结果已保留，再次点击「提取资产」将直接重试保存，不再消耗余额。`,
+      const result = await api.generateAssets({ episodeId, style: styleLabel, decision })
+      if (result?.risk) {
+        // 三表合并风险报告：弹一次决策框，拍板后带 decision 重入（复用服务端暂存，不重复计费）
+        const acceptNew = await confirmDialog({
+          title: '提取结果将覆盖现有资产',
+          description: '新提取结果会覆盖你手工改过或补充过的内容。\n「全部保留我的」= 沿用现有版本、只新增本次新提取的条目；「接受新值」= 用本次提取结果整体替换。',
+          details: buildCombinedRiskDetails(result.risk),
+          confirmText: '接受新值',
+          cancelText: '全部保留我的',
+          tone: 'warn',
         })
         aiLoading.value = false
         aiStatus.value = ''
-        return { success: false, partial: true }
+        return extractAssets(acceptNew ? 'accept' : 'keep')
       }
+      if (!result?.assets) throw new Error('后端未返回资产')
 
-      if (mapped.characters.length) characters.value = mapped.characters
-      if (mapped.props.length) props.value = mapped.props
-      if (mapped.scenes.length) assetScenes.value = mapped.scenes
-      pendingAssetSave.value = null
       await loadEpisode(episodeId)
-      if (scriptFp) {
-        try { await api.saveExtractInfo(episodeId, scriptFp) } catch (e) { console.warn('[extractAssets] 指纹登记失败:', e.message) }
-      }
       saveExtractInfo(fingerprint, styleLabel)
-      if (Array.isArray(mapped.staleAssets) && mapped.staleAssets.length) {
-        const preview = mapped.staleAssets.slice(0, 5).map(a => a.name).join('、')
-          + (mapped.staleAssets.length > 5 ? ` 等 ${mapped.staleAssets.length} 项` : '')
-        toastWarn(`${mapped.staleAssets.length} 个资产的描述已更新，但图片还是旧的`, {
+      const staleAssets = Array.isArray(result.staleAssets) ? result.staleAssets : []
+      if (staleAssets.length) {
+        const preview = staleAssets.slice(0, 5).map((a) => a.name).join('、')
+          + (staleAssets.length > 5 ? ` 等 ${staleAssets.length} 项` : '')
+        toastWarn(`${staleAssets.length} 个资产的描述已更新，但图片还是旧的`, {
           detail: `${preview}\n旧图按之前的描述生成，可能和新描述对不上（出片会图文打架）。点「一键重新生成」按新描述重出这些图（会覆盖现有图）。`,
-          action: { label: '一键重新生成', onClick: () => regenerateStaleAssets(mapped.staleAssets) },
-          duration: 0, 
+          action: { label: '一键重新生成', onClick: () => regenerateStaleAssets(staleAssets) },
+          duration: 0,
         })
       }
       aiLoading.value = false
@@ -1361,11 +1293,10 @@ export const useProjectStore = defineStore('project', () => {
       return { success: true }
     } catch (e) {
       toastError('提取失败', { detail: String(e.message) })
+      aiLoading.value = false
+      aiStatus.value = ''
+      return { success: false }
     }
-
-    aiLoading.value = false
-    aiStatus.value = ''
-    return { success: false }
   }
 
   async function extractStoryboard() {
@@ -1738,21 +1669,18 @@ ${assetBrief}
     const targetShot = found.shot
     const eng = getVideoEngine(videoModel.value)
 
-    const duration = Math.max(
-      5,
-      Math.min(15, Number(overrides.duration ?? targetShot.duration) || 6)
-    )
+      const duration = clampShotDuration(overrides.duration ?? targetShot.duration, 6)
     if (!overrides.skipConfirm) {
       const ok = await confirmDialog({
         title: '武戏出片 · 计费确认',
-        description: '打斗工作流额外带豆包分镜 + 3 组 LoRA + 两轮采样，单条成本高于普通文戏。',
+        description: '武戏工作流会额外生成打斗分镜并做两轮采样，单条成本高于普通文戏。',
         details: [
           { label: '本镜', value: String(targetShot.shotNumber || targetShot.displayId || targetShot.id) },
           { label: '时长', value: `${duration}s` },
           { label: '引擎', value: eng.label },
           {
             label: '计费',
-            value: eng.coinLow != null ? `约 ${eng.coinLow}~${eng.coinHigh} 币/条` : '按 RunningHub 计费',
+            value: engineCostText(eng),
             tone: 'warn',
           },
         ],
@@ -1773,18 +1701,16 @@ ${assetBrief}
         megapixels: overrides.megapixels,
         duration,
       })
-      console.log('[generateShotVideoCombat] result:', result)
-      if (result.success && result.url) {
-        targetShot.videoUrl = result.url
-        if (result.warning) toastWarn('生成完成，有 1 项提示', { detail: String(result.warning) })
-        return { success: true, url: result.url }
+      console.log('[generateShotVideoCombat] submitted:', result)
+      if (result?.success && result.jobId) {
+        startVideoJobPolling()
+        return { success: true, jobId: result.jobId }
       }
-      throw new Error(result.error || '出片失败')
+      throw new Error(result?.error || '提交出片任务失败')
     } catch (e) {
-      console.error('[generateShotVideoCombat] error:', e)
-      toastError(`打斗出片失败（${eng.label}）`, { detail: String(e.message) })
-    } finally {
       generatingVideoIds.value = generatingVideoIds.value.filter((x) => x !== shotId)
+      console.error('[generateShotVideoCombat] error:', e)
+      toastError(`打斗出片提交失败（${eng.label}）`, { detail: String(e.message) })
     }
     return { success: false }
   }
@@ -1799,10 +1725,9 @@ ${assetBrief}
 
     const dlgText = String(targetShot.dialogue || '').trim()
     const hasDlg = !!dlgText && dlgText !== 'null' && dlgText !== '[]'
-    const allowSilent = !hasDlg
 
-    const duration = Math.max(3, Math.min(15, Number(overrides.duration ?? targetShot.duration) || 5))
-    const eng = getVideoEngine('h3v4')
+    const duration = clampShotDuration(overrides.duration ?? targetShot.duration, 5)
+    const eng = getVideoEngine(videoModel.value)
 
     if (!overrides.skipConfirm) {
       const details = [
@@ -1836,59 +1761,40 @@ ${assetBrief}
 
     generatingVideoIds.value.push(shotId)
     try {
-      // 衔接告警锁（409）的人工放行：确认后带 ignoreSeamAlert 重试（循环而非递归，
-      // 避免 inflight 状态未清导致重试被"该镜正在出片"拦截而静默失败）
-      let ignoreSeamAlert = Boolean(overrides.ignoreSeamAlert)
-      for (;;) {
-        let result
-        try {
-          result = await api.generateVideoV4({
-            shotId: targetShot.id,
-            aspectRatio: overrides.aspectRatio ?? aspectRatio.value,
-            megapixels: overrides.megapixels,
-            duration,
-            allowSilent,
-            ignoreSeamAlert,
-          })
-        } catch (e) {
-          if (e?.status === 409 && !ignoreSeamAlert && /出片链已锁死/.test(String(e.message || ''))) {
-            const ok = await confirmDialog({
-              title: '衔接告警 · 人工放行',
-              description: String(e.message || ''),
-              confirmText: '忽略告警，继续出片',
-              cancelText: '先去重生上一镜',
-              tone: 'warn',
-            })
-            if (ok) { ignoreSeamAlert = true; continue }
-          }
-          throw e
-        }
-        console.log('[generateShotVideoV4] result:', result)
-        if (result.success && result.url) {
-          targetShot.videoUrl = result.url
-          if (result.warning) toastWarn('生成完成，有 1 项提示', { detail: String(result.warning) })
-          return { success: true, url: result.url }
-        }
-        throw new Error(result.error || '出片失败')
+      const result = await api.generateVideoV4({
+        shotId: targetShot.id,
+        aspectRatio: overrides.aspectRatio ?? aspectRatio.value,
+        megapixels: overrides.megapixels,
+        duration,
+        secondPass: overrides.secondPass,
+        seed: overrides.seed,
+        forceRetry: overrides.forceRetry,
+      })
+      console.log('[generateShotVideoV4] submitted:', result)
+      if (result?.success && result.jobId) {
+        startVideoJobPolling()
+        return { success: true, jobId: result.jobId }
       }
+      throw new Error(result?.error || '提交出片任务失败')
     } catch (e) {
-      console.error('[generateShotVideoV4] error:', e)
-      toastError('全能V4 出片失败', { detail: String(e.message) })
-    } finally {
       generatingVideoIds.value = generatingVideoIds.value.filter((x) => x !== shotId)
+      console.error('[generateShotVideoV4] error:', e)
+      toastError(`${eng.label} 出片提交失败`, { detail: String(e.message) })
     }
     return { success: false }
   }
 
+  // 引擎 → 生成链路：按 kind 分派，新增引擎只需要在 VIDEO_ENGINES 里加一条数据
   const VIDEO_ENGINE_HANDLERS = {
-    combat: (id, o) => generateShotVideoCombat(id, o),
-    h3v4: (id, o) => generateShotVideoV4(id, o),
+    [VIDEO_ENGINE_KIND.COMBAT]: (id, o) => generateShotVideoCombat(id, o),
+    [VIDEO_ENGINE_KIND.GENERAL]: (id, o) => generateShotVideoV4(id, o),
   }
   async function generateShotVideoByModel(shotId, overrides = {}) {
-    const handler = VIDEO_ENGINE_HANDLERS[videoModel.value]
+    const eng = getVideoEngine(videoModel.value)
+    const handler = VIDEO_ENGINE_HANDLERS[eng.kind]
     if (!handler) {
-      toastError(`出片引擎「${videoModel.value}」尚未在后端接线`, { detail: '请先在 store.generateShotVideoByModel 注册再使用' })
-      return { success: false, error: `引擎 ${videoModel.value} 未接线` }
+      toastError(`出片引擎「${eng.label}」尚未在后端接线`, { detail: `引擎类型 ${eng.kind} 没有对应的生成链路` })
+      return { success: false, error: `引擎 ${eng.value} 未接线` }
     }
     return handler(shotId, overrides)
   }
@@ -2446,98 +2352,6 @@ ${assetBrief}
     }
   }
 
-  async function loadQcReport({ silent = false, includeIgnored } = {}) {
-    if (!currentEpisodeId.value) return null
-    if (!silent) qcLoading.value = true
-    try {
-      const inc = includeIgnored !== undefined ? includeIgnored : qcShowIgnored.value
-      const res = await api.getQcReport(currentEpisodeId.value, inc)
-      qcReport.value = res
-      return res
-    } catch (e) {
-      console.error('[loadQcReport] failed:', e)
-      if (!silent) qcLastResult.value = '质检报告获取失败：' + (e.message || '未知错误')
-      return null
-    } finally {
-      if (!silent) qcLoading.value = false
-    }
-  }
-
-  async function toggleQcShowIgnored() {
-    qcShowIgnored.value = !qcShowIgnored.value
-    return loadQcReport({ silent: true, includeIgnored: qcShowIgnored.value })
-  }
-
-  async function qcFix(code, shots, title = '') {
-    if (!currentEpisodeId.value || !code) return { success: false }
-    if (qcFixing.value.includes(code)) return { success: false }
-    qcFixing.value = [...qcFixing.value, code]
-    qcLastResult.value = ''
-    qcFixDetails.value = []
-    const label = title || code
-    try {
-      const res = await api.qcFix({ episodeId: currentEpisodeId.value, code, shots })
-      const parts = []
-      if (res.fixed) parts.push(`修好 ${res.fixed} 处`)
-      if (res.failed) parts.push(`${res.failed} 处未成功`)
-      if (res.truncated) {
-        parts.push(`本次只处理前 ${res.processed} 处，还剩 ${res.requested - res.processed} 处需再点一次`)
-      }
-      qcLastResult.value = parts.length
-        ? `「${label}」${parts.join('，')}`
-        : (res.message || `「${label}」处理完成`)
-      qcFixDetails.value = Array.isArray(res.details) ? res.details : []
-      if (res.fixed) {
-        await loadEpisode(currentEpisodeId.value)
-      }
-      await loadQcReport({ silent: true })
-      return res
-    } catch (e) {
-      console.error('[qcFix] failed:', e)
-      qcLastResult.value = `「${label}」修复失败：${e.message || '未知错误'}`
-      qcFixDetails.value = []
-      return { success: false, error: e.message }
-    } finally {
-      qcFixing.value = qcFixing.value.filter((c) => c !== code)
-    }
-  }
-
-  async function qcIgnore(code, shotNumber) {
-    if (!currentEpisodeId.value || !code) return { success: false }
-    try {
-      await api.qcIgnore({ episodeId: currentEpisodeId.value, code, shotNumber })
-      await loadQcReport({ silent: true })
-      return { success: true }
-    } catch (e) {
-      console.error('[qcIgnore] failed:', e)
-      qcLastResult.value = `忽略失败：${e.message || '未知错误'}`
-      return { success: false, error: e.message }
-    }
-  }
-
-  async function qcUnignore(id) {
-    if (!currentEpisodeId.value || id == null) return { success: false }
-    try {
-      await api.qcUnignore({ episodeId: currentEpisodeId.value, id })
-      await loadQcReport({ silent: true, includeIgnored: true })
-      return { success: true }
-    } catch (e) {
-      console.error('[qcUnignore] failed:', e)
-      return { success: false, error: e.message }
-    }
-  }
-
-  function qcCodesForShot(shotNumber) {
-    const idx = qcReport.value?.shotIndex || {}
-    return idx[String(shotNumber || '')] || []
-  }
-
-  function qcHasErrorForShot(shotNumber) {
-    const codes = qcCodesForShot(shotNumber)
-    const groups = qcReport.value?.groups || []
-    return codes.some((c) => groups.find((g) => g.code === c)?.level === 'error')
-  }
-
   async function generateFull(prompt, options = {}) {
     if (!currentEpisodeId.value) {
       toastWarn('请先初始化项目')
@@ -2625,13 +2439,12 @@ ${assetBrief}
     generatingAssetIds,
     generatingStoryboardIds, generatingBlockingIds, generatingKeyframeIds, generatingSceneGridIds, generatingShotGridIds, generatingVideoIds,
     shotGridFailed, shotGridStartedAt, clearShotGridFailed,
-    qcReport, qcLoading, qcFixing, qcShowIgnored, qcLastResult, qcFixDetails,
-    loadQcReport, toggleQcShowIgnored, qcFix, qcIgnore, qcUnignore, qcCodesForShot, qcHasErrorForShot,
     systemAlerts, systemAlertCount,
     batchStoryboardGenerating, batchBlockingGenerating,
     fullGenRunning, fullGenProgress, fullGenMessage,
     imageModel, videoModel, aspectRatio,
     initProject, ensureReady, selectProject, loadEpisode, loadProjectCharacters, setStyle,
+    shotDurationLimits, loadShotDurationLimits,
     loadEpisodes, switchEpisode, addEpisode, removeEpisode, updateProjectAspectRatio,
     lastExtractInfo, assetsStale, storyboardStale,
     sendAiMessage, saveDraft, confirmScript,

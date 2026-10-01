@@ -1,0 +1,20 @@
+{
+  "version": "1.0.7",
+  "skillName": "xiaomo-film-studio",
+  "syncedAt": "2026-10-01T02:31:17.339Z",
+  "files": {
+    "asset-rules.md": {
+      "sha256": "5fdec5da7df70cb4b4be0d1198d8e8da292f4d5b5b8c4b334e86d14bf514c6f4",
+      "bytes": 35796
+    },
+    "storyboard-rules.md": {
+      "sha256": "a74ddc139ac70b463721a2db5c13f88d9a00ee8c14f0b5c03ba6088afc8e9281",
+      "bytes": 48443
+    },
+    "visual-quality.md": {
+      "sha256": "03552636bf121325a623b6713a47737ead298bfc966461f48e7cb8fe41785811",
+      "bytes": 3364
+    }
+  },
+  "notes": "工程内规则快照，由 sync-from-skill.mjs 生成，不记录本机源路径"
+}

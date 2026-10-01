@@ -12,7 +12,7 @@ export function getProjectCharacters(projectId) {
   return query('SELECT * FROM project_characters WHERE project_id = ? ORDER BY id', [projectId])
 }
 
-function findProjectCharacter(projectId, { id, name }) {
+export function findProjectCharacter(projectId, { id, name }) {
   if (!projectId) return null
   if (id) {
     const row = queryOne('SELECT * FROM project_characters WHERE id = ? AND project_id = ?', [id, projectId])
@@ -113,7 +113,7 @@ export function mergeMasterIntoEpisodeCharacters(rows = []) {
   })
 }
 
-export function replaceEpisodeCharacters(episodeId, projectId, characters = [], { source = 'edit', decision = '', guard = false } = {}) {
+export function replaceEpisodeCharacters(episodeId, projectId, characters = [], { source = 'edit', decision = '', guard = false, mergeStrategy = 'preserve' } = {}) {
   const isExtract = source === 'extract'
 
   let effectiveCharacters = characters
@@ -171,13 +171,20 @@ export function replaceEpisodeCharacters(episodeId, projectId, characters = [], 
       if (!master) {
         master = createProjectCharacter(projectId, incoming)
       } else if (isExtractWrite) {
-        const fill = {}
-        for (const f of ['image_url', 'audio_url', 'description', 'appearance', 'name_en', 'description_en']) {
-          if (!master[f] && incoming[f]) fill[f] = incoming[f]
-        }
-        if (Object.keys(fill).length) {
-          master = updateProjectCharacter(master.id, fill)
+        if (mergeStrategy === 'overwrite') {
+          // 提取值覆盖主设定（含清空），并同步到所有引用集
+          master = updateProjectCharacter(master.id, incoming, { allowClear: true })
           syncProjectCharacterToEpisodes(master.id)
+        } else {
+          // 默认 preserve：只补主设定上的空字段，非空一律不覆盖
+          const fill = {}
+          for (const f of ['image_url', 'audio_url', 'description', 'appearance', 'name_en', 'description_en']) {
+            if (!master[f] && incoming[f]) fill[f] = incoming[f]
+          }
+          if (Object.keys(fill).length) {
+            master = updateProjectCharacter(master.id, fill)
+            syncProjectCharacterToEpisodes(master.id)
+          }
         }
       } else {
         master = updateProjectCharacter(master.id, incoming, { allowClear: true })

@@ -15,6 +15,7 @@ export function confirmDialog(o = {}) {
   return new Promise((resolve) => {
     confirmQueue.value.push({
       id: nextId('c'),
+      kind: 'confirm',
       title: o.title || '确认操作',
       description: o.description || '',
       details: Array.isArray(o.details) ? o.details.filter((d) => d && d.label) : [],
@@ -23,6 +24,30 @@ export function confirmDialog(o = {}) {
       tone,
       dismissOnBackdrop: o.dismissOnBackdrop ?? tone !== 'danger',
       extraActions: Array.isArray(o.extraActions) ? o.extraActions : [],
+      resolve,
+    })
+  })
+}
+
+// 输入型对话框：与确认框共用队列（DialogHost 按 kind 渲染不同内容），
+// resolve 传用户输入的字符串；取消 / 关闭传 null。
+// examples 是给 C 端用户看的可点击示例——用户不必自己琢磨怎么描述。
+export function promptDialog(o = {}) {
+  return new Promise((resolve) => {
+    confirmQueue.value.push({
+      id: nextId('p'),
+      kind: 'input',
+      title: o.title || '请输入',
+      description: o.description || '',
+      details: [],
+      placeholder: o.placeholder || '',
+      defaultValue: String(o.defaultValue || ''),
+      examples: Array.isArray(o.examples) ? o.examples.filter(Boolean) : [],
+      confirmText: o.confirmText || '确定',
+      cancelText: o.cancelText || '取消',
+      tone: o.tone || 'normal',
+      dismissOnBackdrop: o.dismissOnBackdrop ?? true,
+      extraActions: [],
       resolve,
     })
   })

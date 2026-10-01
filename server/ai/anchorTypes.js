@@ -28,16 +28,16 @@ export const REVIEW_ACTION = {
 }
 
 
-function normalizeElementPhrase(x) {
+function normalizeElementPhrase(x, maxLen = 24) {
   return String(x ?? '')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/[。．.；;，,、;:！!？?~～\-—－]+$/, '')
     .trim()
-    .slice(0, 24)
+    .slice(0, maxLen)
 }
 
-export function parseElementList(raw) {
+export function parseElementList(raw, maxLen = 24) {
   let arr = []
   try {
     const v = JSON.parse(raw || '[]')
@@ -48,7 +48,7 @@ export function parseElementList(raw) {
   const seen = new Set()
   const out = []
   for (const item of arr) {
-    const s = normalizeElementPhrase(item)
+    const s = normalizeElementPhrase(item, maxLen)
     if (!s || seen.has(s)) continue
     seen.add(s)
     out.push(s)
@@ -56,6 +56,9 @@ export function parseElementList(raw) {
   return out
 }
 
+// 以下常量与函数在 src/services/promptBuilder.js 有一份逐字相同的副本（前端拼提示词时使用），
+// 两份的 TAG 文案是跨端幂等去重协议的依据（generate-image.js 用 includes(TAG) 防重复追加），
+// 修改任何一边必须同步另一边。
 export const ELEMENT_WEIGHT = 1.35
 
 export const ELEMENT_NOTE_TAG = '【本场必须可见的要素】'

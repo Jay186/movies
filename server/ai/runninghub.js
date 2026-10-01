@@ -1,12 +1,26 @@
 import { config } from '../config.js'
+import { UPLOADS_URL_SLASH, uploadsDir } from '../paths.js'
+import { getEffectiveRunningHub, resolveWorkflowId } from '../modelConfig.js'
 import { logAiCall } from './aiLog.js'
 import { mimeFromExt, assertSafeDownloadTarget, uploadsUrlToAbs, allowHosts } from './shared.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import https from 'node:https'
-import { uploadsDir } from '../paths.js'
 
-const { apiKey, baseURL, workflows, nodeMap } = config.runninghub
+// baseURL 用户不可配，保持读 config；nodeMap 是代码资产，保持静态。
+// apiKey 与 workflowId 走运行时配置（AI 模型配置热生效），不再做加载期快照。
+const { baseURL, nodeMap } = config.runninghub
+
+function badRequest(message) {
+  return Object.assign(new Error(message), { status: 400 })
+}
+
+// 视频通道未配置 → 抛可读 400（不再回退 .env）
+function currentApiKey() {
+  const { apiKey, configured } = getEffectiveRunningHub()
+  if (!configured) throw badRequest('视频通道未配置：请在「AI 模型配置」里为「视频通道」填写 API Key')
+  return apiKey
+}
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = config.timeouts.http.default) {
   const controller = new AbortController()
@@ -20,7 +34,6 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = config.timeouts.h
     clearTimeout(timer)
   }
 }
-
 
 const uploadCache = new Map()
 const UPLOAD_CACHE_TTL = 20 * 60 * 60 * 1000
@@ -65,8 +78,8 @@ export async function insecureDownload(url, maxRedirects = 3, timeoutMs = config
 
 export async function resolveLocalMedia(url, id, tag) {
   const u = String(url || '').trim()
-  if (u.startsWith('/uploads/')) {
-    const rel = decodeURIComponent(u.slice('/uploads/'.length))
+  if (u.startsWith(UPLOADS_URL_SLASH)) {
+    const rel = decodeURIComponent(u.slice(UPLOADS_URL_SLASH.length))
     if (rel.split('/').some((seg) => seg === '..')) throw new Error(`非法的媒体地址: ${u}`)
     const p = path.join(uploadsDir, rel)
     if (!fs.existsSync(p)) throw new Error(`本地文件已不存在: ${u}`)
@@ -134,7 +147,7 @@ async function uploadBinary(source, { cacheKey, pickValue, fallbackName }) {
     buffer = await insecureDownload(source)
     filename = source.split('/').pop()?.split('?')[0] || fallbackName
     mimeType = mimeFromExt(filename)
-  } else if (source.startsWith('/uploads/')) {
+  } else if (source.startsWith(UPLOADS_URL_SLASH)) {
     const abs = uploadsUrlToAbs(source, uploadsDir)
     if (!abs) throw new Error(`本地素材路径非法或不存在（已拒绝穿越/不存在）: ${source}`)
     buffer = fs.readFileSync(abs)
@@ -156,7 +169,7 @@ async function uploadBinary(source, { cacheKey, pickValue, fallbackName }) {
   formData.append('file', new Blob([buffer], { type: mimeType }), filename)
   const res = await fetchWithTimeout(`${baseURL}/openapi/v2/media/upload/binary`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: { Authorization: `Bearer ${currentApiKey()}` },
     body: formData,
   }, UPLOAD_TIMEOUT_MS)
   const jr = await res.json()
@@ -190,7 +203,7 @@ async function createTaskV1(workflowId, nodeInfoList) {
   const res = await fetchWithTimeout(`${baseURL}/task/openapi/create`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey, workflowId, nodeInfoList }),
+    body: JSON.stringify({ apiKey: currentApiKey(), workflowId, nodeInfoList }),
   })
   return res.json()
 }
@@ -199,7 +212,7 @@ async function queryOutputsV1(taskId) {
   const res = await fetchWithTimeout(`${baseURL}/task/openapi/outputs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ apiKey, taskId }),
+    body: JSON.stringify({ apiKey: currentApiKey(), taskId }),
   })
   return res.json()
 }
@@ -212,7 +225,7 @@ async function createTaskV2(workflowId, nodeInfoList, kind = 'workflow', instanc
       : { addMetadata: true, nodeInfoList, instanceType, usePersonalQueue: 'false' }
   const res = await fetchWithTimeout(`${baseURL}/openapi/v2/run/${path}/${workflowId}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentApiKey()}` },
     body: JSON.stringify(body),
   })
   return res.json()
@@ -221,12 +234,11 @@ async function createTaskV2(workflowId, nodeInfoList, kind = 'workflow', instanc
 async function queryOutputsV2(taskId) {
   const res = await fetchWithTimeout(`${baseURL}/openapi/v2/query`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentApiKey()}` },
     body: JSON.stringify({ taskId }),
   })
   return res.json()
 }
-
 
 export async function queryTaskOutput(taskId) {
   try {
@@ -261,8 +273,8 @@ export async function cancelTask(taskId) {
   try {
     const res = await fetchWithTimeout(`${baseURL}/task/openapi/cancel`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ apiKey, taskId: String(taskId) }),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentApiKey()}` },
+      body: JSON.stringify({ apiKey: currentApiKey(), taskId: String(taskId) }),
     })
     const jr = await res.json()
     return jr.code === 0
@@ -273,7 +285,7 @@ export async function cancelTask(taskId) {
 }
 
 async function runWorkflowImpl(workflowKey, values = {}, options = {}) {
-  const workflowId = workflows[workflowKey]
+  const workflowId = resolveWorkflowId(workflowKey)
   const mapping = nodeMap[workflowKey]
   if (!workflowId || !mapping) {
     return { success: false, error: `工作流「${workflowKey}」未配置` }
@@ -415,6 +427,13 @@ async function runWorkflowImpl(workflowKey, values = {}, options = {}) {
 }
 
 export async function runWorkflow(workflowKey, values = {}, options = {}) {
+  // 前置校验：视频通道未配置 / 该工作流条目缺失或全部停用 → 抛可读 400。
+  // 不再回退 .env，也绝不把空 workflowId 发出去（空 ID 会被 RunningHub 拒绝且难定位）。
+  const { configured } = getEffectiveRunningHub()
+  if (!configured) throw badRequest('视频通道未配置：请在「AI 模型配置」里为「视频通道」填写 API Key')
+  if (!resolveWorkflowId(workflowKey)) {
+    throw badRequest(`工作流「${workflowKey}」未配置：请在「AI 模型配置」的「视频通道」里添加并启用该工作流`)
+  }
   const startedAt = Date.now()
   const ctx = options.usageContext || {}
   try {

@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS scenes (
   location TEXT DEFAULT '',
   time_of_day TEXT DEFAULT '',
   prop_names TEXT DEFAULT '[]',
+  space_type TEXT DEFAULT '',
+  space_evidence TEXT DEFAULT '',
+  spatial_context TEXT DEFAULT '',
   gen_context TEXT DEFAULT '',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
@@ -153,19 +156,71 @@ CREATE TABLE IF NOT EXISTS shots (
   info_points TEXT DEFAULT '[]',
   world_state_in TEXT DEFAULT '',
   world_state_out TEXT DEFAULT '',
+  world_state_in_en TEXT DEFAULT '',
+  world_state_out_en TEXT DEFAULT '',
+  -- 分镜英文版（2026-10-01）：与资产 nameEn/descriptionEn 同模型——英文是分镜数据的一部分，
+  -- 分镜生成/保存时产出，出片直接读取，不再是出片期才翻译的过程产物。
+  description_en TEXT DEFAULT '',
+  action_note_en TEXT DEFAULT '',
+  soundscape_en TEXT DEFAULT '',
+  music_en TEXT DEFAULT '',
+  tone_en TEXT DEFAULT '',
+  english_source_fp TEXT DEFAULT '',
   shot_role TEXT DEFAULT '',
   related_shot_id INTEGER,
   script_span TEXT DEFAULT '',
-  qc_status TEXT DEFAULT '',
-  qc_report TEXT DEFAULT '',
-  qc_waived TEXT DEFAULT '[]',
   version INTEGER DEFAULT 1,
   parent_id INTEGER,
   edited_by TEXT DEFAULT '',
   anchor_refs_snapshot TEXT DEFAULT '',
+  field_sources_json TEXT DEFAULT '{}',
+  shot_uid TEXT DEFAULT '',
+  beat_id TEXT DEFAULT '',
+  coverage_id TEXT DEFAULT '',
+  relation_type TEXT DEFAULT '',
+  related_shots_json TEXT DEFAULT '[]',
+  composition TEXT DEFAULT '',
+  lens TEXT DEFAULT '',
+  depth_of_field TEXT DEFAULT '',
+  transition_in TEXT DEFAULT '',
+  transition_out TEXT DEFAULT '',
+  color_lighting TEXT DEFAULT '',
+  camera_elevation TEXT DEFAULT '',
+  space_type TEXT DEFAULT '',
+  space_evidence TEXT DEFAULT '',
+  prompt_provider_id TEXT DEFAULT '',
+  compiled_prompt TEXT DEFAULT '',
+  prompt_compiled_at DATETIME,
+  video_semantics_json TEXT DEFAULT '',
+  video_semantics_status TEXT DEFAULT 'needs_compile',
+  video_semantics_version INTEGER DEFAULT 0,
+  video_semantics_source_fingerprint TEXT DEFAULT '',
+  video_semantics_error TEXT DEFAULT '',
+  video_semantics_compiled_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (storyboard_scene_id) REFERENCES storyboard_scenes(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS shot_prompt_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  episode_id INTEGER NOT NULL,
+  shot_id INTEGER NOT NULL,
+  shot_version INTEGER NOT NULL DEFAULT 1,
+  semantic_fingerprint TEXT NOT NULL DEFAULT '',
+  reference_set_json TEXT NOT NULL DEFAULT '{}',
+  provider_id TEXT NOT NULL DEFAULT '',
+  workflow_id TEXT NOT NULL DEFAULT '',
+  template_version TEXT NOT NULL DEFAULT '',
+  generation_params_json TEXT NOT NULL DEFAULT '{}',
+  retry_feedback_hash TEXT NOT NULL DEFAULT '',
+  retry_feedback_text TEXT NOT NULL DEFAULT '',
+  input_fingerprint TEXT NOT NULL,
+  compiled_prompt TEXT NOT NULL,
+  compile_status TEXT NOT NULL DEFAULT 'ready',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_snapshot_shot_fingerprint ON shot_prompt_snapshots(shot_id, input_fingerprint, id);
 
 CREATE TABLE IF NOT EXISTS shot_versions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,7 +297,8 @@ CREATE TABLE IF NOT EXISTS ai_calls (
   latency_ms INTEGER,             
   success INTEGER DEFAULT 0,      
   error_family TEXT DEFAULT '',   
-  error_msg TEXT DEFAULT ''
+  error_msg TEXT DEFAULT '',
+  prompt TEXT DEFAULT ''          
 );
 CREATE INDEX IF NOT EXISTS idx_ai_calls_created ON ai_calls(created_at);
 CREATE INDEX IF NOT EXISTS idx_ai_calls_episode ON ai_calls(episode_id);
@@ -264,17 +320,6 @@ CREATE TABLE IF NOT EXISTS system_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_system_alerts_unresolved ON system_alerts(resolved_at, id);
 CREATE INDEX IF NOT EXISTS idx_system_alerts_shot ON system_alerts(shot_id);
-
-CREATE TABLE IF NOT EXISTS qc_ignores (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  episode_id INTEGER NOT NULL,
-  code TEXT NOT NULL,                    
-  shot_number TEXT NOT NULL DEFAULT '',  
-  reason TEXT DEFAULT '',                
-  UNIQUE(episode_id, code, shot_number)
-);
-CREATE INDEX IF NOT EXISTS idx_qc_ignores_episode ON qc_ignores(episode_id, code);
 
 CREATE TABLE IF NOT EXISTS asset_image_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -395,3 +440,69 @@ CREATE TABLE IF NOT EXISTS lighting_checks (
   UNIQUE(fingerprint, model)
 );
 
+-- ── AI 模型配置（运行时热生效，唯一事实源在库；.env 仅作首启 seed 初值 / 旧库迁移取值源）──────
+-- ai_accounts：用途通道级凭据（provider_key = 'text' | 'image' | 'video'）
+--   旧库为两厂商形态（'qimingxing' | 'runninghub'），启动时由 modelConfig.migrateLegacyModelConfig() 幂等重塑。
+CREATE TABLE IF NOT EXISTS ai_accounts (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider_key TEXT NOT NULL UNIQUE,
+  name         TEXT NOT NULL DEFAULT '',
+  base_url     TEXT NOT NULL DEFAULT '',
+  api_key      TEXT NOT NULL DEFAULT '',
+  updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ai_model_entries：通道下的模型条目（kind = text | image | video；account_key 与 kind 一一对应）
+--   image=模型ID；video=workflow_id；text=模型ID
+--   workflow_key 仅 video 使用（h3Combat | h3V4vc | shotGridApp）；vision 仅 text 使用
+CREATE TABLE IF NOT EXISTS ai_model_entries (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_key  TEXT NOT NULL,
+  kind         TEXT NOT NULL CHECK(kind IN ('text','image','video')),
+  name         TEXT NOT NULL DEFAULT '',
+  model_id     TEXT NOT NULL DEFAULT '',
+  workflow_key TEXT DEFAULT '',
+  vision       INTEGER DEFAULT 0,
+  is_default   INTEGER DEFAULT 0,
+  enabled      INTEGER DEFAULT 1,
+  sort_order   INTEGER DEFAULT 0,
+  created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_entries_unique ON ai_model_entries(account_key, kind, model_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_entries_default ON ai_model_entries(account_key, kind) WHERE is_default = 1;
+CREATE INDEX IF NOT EXISTS idx_ai_entries_list ON ai_model_entries(account_key, kind, sort_order);
+
+CREATE TABLE IF NOT EXISTS ai_model_config_meta (key TEXT PRIMARY KEY, value TEXT);
+
+-- ── 出片任务系统：提交与执行分离，状态落库，重启可恢复 ──────
+CREATE TABLE IF NOT EXISTS video_jobs (
+  id TEXT PRIMARY KEY,
+  episode_id INTEGER NOT NULL,
+  shot_id INTEGER NOT NULL,
+  engine TEXT NOT NULL DEFAULT 'h3v4',
+  status TEXT NOT NULL DEFAULT 'queued',  -- queued/running/succeeded/failed/interrupted
+  phase TEXT DEFAULT '',
+  provider_task_id TEXT DEFAULT '',
+  error TEXT DEFAULT '',
+  result_url TEXT DEFAULT '',
+  params_json TEXT DEFAULT '{}',
+  attempts INTEGER DEFAULT 0,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  started_at DATETIME,
+  finished_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_video_jobs_episode ON video_jobs(episode_id, status);
+CREATE INDEX IF NOT EXISTS idx_video_jobs_shot ON video_jobs(shot_id, status);
+
+-- ── 拼片产物登记：历史成片可回放下载 ──────
+CREATE TABLE IF NOT EXISTS compose_outputs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  episode_id INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  shot_count INTEGER DEFAULT 0,
+  total_seconds REAL DEFAULT 0,
+  params_json TEXT DEFAULT '{}',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_compose_outputs_episode ON compose_outputs(episode_id, id);

@@ -111,6 +111,16 @@ const assetStats = computed(() => {
   return { imageCount, videoCount, audioCount }
 })
 
+const relationBadges = computed(() => {
+  const badges = []
+  if (props.shot.englishPending) badges.push({ label: '翻译待完成', title: '本镜的英文版正在后台准备；不处理也不影响出片，出片时会自动完成' })
+  if (props.shot.beatId) badges.push({ label: `节拍 ${props.shot.beatId}`, title: '剧情节拍' })
+  if (props.shot.coverageId) badges.push({ label: `覆盖 ${props.shot.coverageId}`, title: '同组覆盖镜头' })
+  if (props.shot.relationType) badges.push({ label: props.shot.relationType, title: '镜头关系类型' })
+  if (props.shot.relatedShots?.length) badges.push({ label: `关联 ${props.shot.relatedShots.length}`, title: '关联镜头数量' })
+  return badges
+})
+
 const parsedDescription = computed(() => {
   const text = props.shot.description || ''
   const allNames = [
@@ -240,18 +250,6 @@ const anchorGeneratedAtText = computed(() => {
   return `${d.getMonth() + 1}-${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 })
 
-// QC 状态：用落库的每镜 qc_report（保存/修复/编辑后由后端 persistQcToShots 自动刷新）。
-// 不再走 store.qcReport 的 shotIndex——该字段后端响应中并不存在，旧实现实际取不到值。
-const qcItems = computed(() => Array.isArray(props.shot.qcItems) ? props.shot.qcItems : [])
-const qcHasError = computed(() => qcItems.value.some((it) => it.level === 'error'))
-const qcTitle = computed(() => {
-  if (!qcItems.value.length) return ''
-  const lines = qcItems.value.map((it) =>
-    `${it.title || it.code}${it.level === 'error' ? '（必须修）' : '（建议改）'}：${it.message || ''}`
-  )
-  return `该镜质检问题（${qcItems.value.length} 项）：\n${lines.join('\n')}`
-})
-
 const keyframeImage = computed(() => props.shot.keyframeUrl || '')
 const keyframeLoading = computed(() => store.generatingKeyframeIds.includes(props.shot.id))
 const showKeyframeModal = ref(false)
@@ -264,19 +262,14 @@ const hovKey = ref('')
 function hovEnter(key) { hovKey.value = key }
 function hovLeave(key) { if (hovKey.value === key) hovKey.value = '' }
 
-const statusDetail = computed(() => {
-  const qc = qcItems.value.length
-  return {
-    stateRows: statusDots.value.map((d) => ({
-      key: d.key,
-      label: d.label,
-      text: d.failed ? '生成失败' : d.done ? '已就绪' : '待产出',
-      cls: d.failed ? 'text-danger' : d.done ? 'text-ok' : 'text-text-muted',
-    })),
-    qc,
-    qcHasError: qcHasError.value,
-  }
-})
+const statusDetail = computed(() => ({
+  stateRows: statusDots.value.map((d) => ({
+    key: d.key,
+    label: d.label,
+    text: d.failed ? '生成失败' : d.done ? '已就绪' : '待产出',
+    cls: d.failed ? 'text-danger' : d.done ? 'text-ok' : 'text-text-muted',
+  })),
+}))
 
 const assetDetail = computed(() => {
   const a = assetStats.value
@@ -314,7 +307,6 @@ const statusTitle = computed(() => {
   if (failed.length) parts.push(`失败：${failed.join('、')}`)
   if (pendingLabels.value.length) parts.push(`待产出：${pendingLabels.value.join('、')}`)
   if (!parts.length) parts.push('四路产出物齐全')
-  if (qcItems.value.length) parts.push(`质检问题 ${qcItems.value.length} 项`)
   return parts.join('\n')
 })
 
@@ -514,12 +506,6 @@ async function saveDuration() {
               <span :class="r.cls">{{ r.text }}</span>
             </div>
           </div>
-          <div v-if="statusDetail.qc" class="mt-1.5 flex items-center gap-2 whitespace-nowrap border-t border-border pt-1.5 text-micro">
-            <span class="w-12 shrink-0 text-text-secondary">质检</span>
-            <span :class="statusDetail.qcHasError ? 'text-danger' : 'text-warn'">
-              {{ statusDetail.qc }} 处{{ statusDetail.qcHasError ? '必须修' : '建议改' }}
-            </span>
-          </div>
         </div>
       </div>
 
@@ -528,30 +514,17 @@ async function saveDuration() {
         class="rounded-tag bg-bg-hover px-1 text-micro leading-snug text-text-muted"
         :title="`待产出：${pendingLabels.join('、')}`"
       >缺 {{ pendingLabels.length }}</span>
-
-      <span
-        v-if="qcItems.length"
-        class="inline-flex items-center gap-0.5 rounded-control border px-1 py-0.5 text-micro font-medium"
-        :class="qcHasError
-          ? 'border-danger/40 bg-danger/10 text-danger'
-          : 'border-warn/40 bg-warn/10 text-warn'"
-        :title="qcTitle"
-      >
-        <svg class="h-2.5 w-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 9v2m0 4h.01M4.5 19h15a1.5 1.5 0 001.3-2.25l-7.5-13a1.5 1.5 0 00-2.6 0l-7.5 13A1.5 1.5 0 004.5 19z" /></svg>
-        {{ qcItems.length }}
-      </span>
-
-      <span
-        v-else-if="shot.qcStatus === 'pass'"
-        class="inline-flex items-center gap-0.5 rounded-control border border-ok/30 bg-ok/10 px-1 py-0.5 text-micro font-medium text-ok"
-        title="该镜质检通过，无待处理问题"
-      >
-        <svg class="h-2.5 w-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" /></svg>
-        质检过
-      </span>
     </div>
 
     <div class="space-y-2">
+      <div v-if="relationBadges.length" class="flex flex-wrap gap-1">
+        <span
+          v-for="badge in relationBadges"
+          :key="`${badge.title}-${badge.label}`"
+          class="rounded-control border border-accent/25 bg-accent/5 px-1.5 py-0.5 text-micro text-accent"
+          :title="badge.title"
+        >{{ badge.label }}</span>
+      </div>
       <div
         class="relative flex flex-wrap gap-1 text-micro"
         @mouseenter="hovEnter('assets')"
@@ -981,7 +954,7 @@ async function saveDuration() {
           ? 'bg-bg-hover text-text-secondary hover:text-text-primary'
           : 'bg-info/20 text-info hover:bg-info/30'"
         :disabled="generatingVideo"
-        :title="generatingVideo ? '出片中，约 3~15 分钟' : `单镜出片（${shot.duration}s，按 RunningHub 计费）`"
+        :title="generatingVideo ? '出片中，请稍候' : `单镜出片（${shot.duration}s）`"
         @click.stop="generateVideo"
       >{{ videoBtnText }}</button>
     </div>
@@ -1412,7 +1385,7 @@ async function saveDuration() {
             <div class="mb-1 font-medium text-info">保存后自动顺延</div>
             本镜之后的所有镜头（含跨场）开始/结束时间按差值自动平移，台词时间同步调整；后续镜头如已锁定，其时间轴仍会被顺延（锁定冻结的是内容，不是时轴）。
           </div>
-          <div class="text-micro text-text-muted">时长过短或过长会触发质检警告，但不阻止保存。</div>
+          <div class="text-micro text-text-muted">时长过短或过长不阻止保存（分镜质检已移除，时长由生成规则与出片预算约束）。</div>
           <div v-if="durationError" class="rounded-btn border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">{{ durationError }}</div>
         </div>
         <div class="flex shrink-0 items-center justify-end gap-2 border-t border-border px-5 py-3 text-xs">

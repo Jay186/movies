@@ -4,8 +4,8 @@ export function logAiCall(r = {}) {
   try {
     execute(
       `INSERT INTO ai_calls
-        (kind, model, episode_id, task, in_tokens, out_tokens, frames, latency_ms, success, error_family, error_msg)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (kind, model, episode_id, task, in_tokens, out_tokens, frames, latency_ms, success, error_family, error_msg, prompt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         r.kind || 'unknown',
         r.model || '',
@@ -18,6 +18,7 @@ export function logAiCall(r = {}) {
         r.success ? 1 : 0,
         r.errorFamily || '',
         (r.errorMsg || '').slice(0, 500),
+        (r.prompt || '').slice(0, 4000),
       ]
     )
   } catch (e) {
@@ -27,6 +28,9 @@ export function logAiCall(r = {}) {
 
 export function classifyError(err, httpStatus) {
   const msg = String(err?.message || err || '')
+  if (httpStatus === 524) {
+    return { family: 'timeout', message: '上游 AI 网关等待模型响应超时（524）；请求未进入本地分镜 JSON 解析阶段' }
+  }
   if (/Free quota exhausted|额度|quota exhausted|AllocationQuota/i.test(msg)) {
     return { family: 'auth', message: '模型免费额度已耗尽，请充值或在 .env 切换到其它可用模型' }
   }

@@ -1,10 +1,10 @@
 import { Router } from 'express'
+import { uploadsUrl, uploadsDir } from '../paths.js'
 import path from 'path'
 import fs from 'fs'
 import { query, execute } from '../db.js'
 import { translateStylePrompt } from '../ai/stylePromptEn.js'
 import { recordAlert } from '../ai/alerts.js'
-import { uploadsDir } from '../paths.js'
 
 const router = Router()
 
@@ -139,7 +139,7 @@ router.post('/', (req, res) => {
     const filepath = path.join(uploadsDir, filename)
     try {
       fs.writeFileSync(filepath, Buffer.from(m[2], 'base64'))
-      coverPath = `/uploads/${filename}`
+      coverPath = `${uploadsUrl(filename)}`
     } catch (e) {
       return res.status(500).json({ error: '封面图保存失败：' + e.message })
     }
@@ -217,7 +217,7 @@ router.patch('/:key', (req, res) => {
       try {
         fs.writeFileSync(filepath, Buffer.from(m[2], 'base64'))
         if (existing.cover_path) removeCoverFile(existing.cover_path)
-        coverPath = `/uploads/${filename}`
+        coverPath = `${uploadsUrl(filename)}`
       } catch (e) {
         return res.status(500).json({ error: '封面图保存失败：' + e.message })
       }

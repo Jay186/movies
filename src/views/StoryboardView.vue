@@ -2,18 +2,27 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/project'
+import { useModelConfigStore } from '../stores/modelConfig'
 import { api } from '../services/api'
 import { confirmDialog, toastInfo } from '../services/dialog'
+import { MODEL_CONFIG_TEXT } from '../constants/modelConfig'
 import ShotRow from '../components/ShotRow.vue'
 import ImportStoryboardDialog from '../components/ImportStoryboardDialog.vue'
 import StyleBadge from '../components/StyleBadge.vue'
-import QcPanel from '../components/QcPanel.vue'
 import SbProgressBar from '../components/SbProgressBar.vue'
 import { ASPECT_RATIO_OPTIONS, DELAYS } from '../constants/app'
 
 const store = useProjectStore()
+const modelConfigStore = useModelConfigStore()
 const router = useRouter()
 const showImportDialog = ref(false)
+
+// 生图模型下拉数据源：来自「AI 模型配置」的已启用的生图条目
+const imageModelOptions = computed(() => modelConfigStore.enabledImageEntries)
+// 未加载完 / 一条都没启用，两种占位文案，保证下拉任何时候都不留白
+const imageModelHint = computed(() => (
+  modelConfigStore.loaded ? MODEL_CONFIG_TEXT.imageSelectEmpty : MODEL_CONFIG_TEXT.imageSelectPlaceholder
+))
 
 async function handleStoryboardImported() {
   const result = await store.loadEpisode(store.currentEpisodeId)
@@ -28,13 +37,6 @@ async function handleStoryboardImported() {
 }
 const enriching = ref(false)
 const enrichResult = ref('')
-
-const QC_PANEL_KEY = 'storyboard_qc_panel_open'
-const showQcPanel = ref(localStorage.getItem(QC_PANEL_KEY) !== '0')
-function toggleQcPanel() {
-  showQcPanel.value = !showQcPanel.value
-  localStorage.setItem(QC_PANEL_KEY, showQcPanel.value ? '1' : '0')
-}
 
 const scrollRef = ref(null)
 const highlightedShot = ref('')
@@ -56,15 +58,6 @@ async function locateShot(shotNumber) {
   highlightTimer = setTimeout(() => { highlightedShot.value = '' }, 2200)
 }
 onBeforeUnmount(() => { if (highlightTimer) clearTimeout(highlightTimer) })
-
-const qcErrorCount = computed(() => store.qcReport?.errorCount || 0)
-const qcWarningCount = computed(() => store.qcReport?.warningCount || 0)
-
-watch(
-  () => [store.currentEpisodeId, store.storyboardScenes],
-  ([id]) => { if (id) store.loadQcReport({ silent: true }) },
-  { immediate: true }
-)
 
 const moreOpen = ref(false)
 const menuRef = ref(null)
@@ -250,14 +243,22 @@ async function clearStoryboard() {
             </span>
 
             <span class="h-4 w-px shrink-0 bg-border"></span>
-            <label class="flex cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-[12px]" title="分镜图与站位图使用的生图模型（前列支持以图生图；末项为分镜四宫格专用通道）">
+            <label class="flex cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-[12px]" title="分镜图与站位图使用的生图模型，可在顶部齿轮的「AI 模型配置」里增删">
               <span class="text-text-muted">模型</span>
-              <select v-model="store.imageModel" class="cursor-pointer bg-transparent text-[12px] text-text-primary outline-none">
-                <option value="zikl">gpt-image-2 (ZIKL)</option>
-                <option value="visionary-nano-banana-pro">Nano Banana Pro</option>
-                <option value="visionary-nano-banana-pro-cl">Nano Banana Pro CL</option>
-                <option value="visionary-nano-banana-2-lite">Nano Banana 2 Lite</option>
-                <option value="runninghub">四宫格通道（文生图）</option>
+              <select
+                v-model="store.imageModel"
+                :disabled="!imageModelOptions.length"
+                class="cursor-pointer bg-transparent text-[12px] text-text-primary outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <option v-if="!imageModelOptions.length" :value="store.imageModel">
+                  {{ imageModelHint }}
+                </option>
+                <option
+                  v-for="entry in imageModelOptions"
+                  :key="entry.id"
+                  :value="entry.id"
+                  :title="entry.model_id"
+                >{{ entry.name }}</option>
               </select>
             </label>
 
@@ -377,47 +378,6 @@ async function clearStoryboard() {
           </button>
         </div>
 
-        <div
-          v-if="store.totalShots > 0"
-          class="overflow-hidden rounded-panel border transition-colors"
-          :class="qcErrorCount
-            ? 'border-danger/40 bg-danger/5'
-            : qcWarningCount
-              ? 'border-warn/40 bg-warn/5'
-              : 'border-border bg-bg-secondary/40'"
-        >
-          <div class="flex items-center justify-between gap-3 px-3 py-2">
-            <button class="group flex min-w-0 flex-1 items-center gap-2 text-left" @click="toggleQcPanel">
-              <svg
-                class="h-3 w-3 shrink-0 text-text-muted transition-transform duration-200"
-                :class="showQcPanel ? 'rotate-90' : ''"
-                fill="none" stroke="currentColor" viewBox="0 0 24 24"
-              ><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7" /></svg>
-              <span class="text-[12px] font-medium text-text-primary">分镜质检</span>
-              <span
-                v-if="store.qcReport"
-                class="flex shrink-0 items-center gap-2 text-micro"
-              >
-                <span v-if="qcErrorCount" class="inline-flex items-center gap-1 rounded-full border border-danger/40 bg-danger/10 px-2 py-0.5 font-medium text-danger">
-                  <span class="h-1.5 w-1.5 rounded-full bg-danger"></span>{{ qcErrorCount }} 必须修
-                </span>
-                <span v-if="qcWarningCount" class="inline-flex items-center gap-1 rounded-full border border-warn/40 bg-warn/10 px-2 py-0.5 font-medium text-warn">
-                  <span class="h-1.5 w-1.5 rounded-full bg-warn"></span>{{ qcWarningCount }} 建议修
-                </span>
-                <span v-if="!qcErrorCount && !qcWarningCount" class="inline-flex items-center gap-1 text-ok">
-                  <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7" /></svg>
-                  全部通过
-                </span>
-              </span>
-              <span v-else-if="store.qcLoading" class="shrink-0 text-micro text-text-muted">质检中…</span>
-              <span v-else class="shrink-0 text-micro text-text-muted" title="尚未质检——展开面板可立即跑一遍（不消耗 AI 额度）">未质检</span>
-            </button>
-            <span class="shrink-0 text-micro text-text-muted">{{ showQcPanel ? '收起' : '展开' }}</span>
-          </div>
-          <div v-if="showQcPanel" class="border-t border-border/60 p-2">
-            <QcPanel @locate="locateShot" />
-          </div>
-        </div>
       </div>
     </div>
 

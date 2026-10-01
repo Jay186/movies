@@ -467,7 +467,7 @@ async function promote(pc) {
       <div v-if="showCreate" class="shrink-0 border-b border-[#2a2a2a] bg-[#171717] px-6 py-4">
         <div class="grid grid-cols-[180px_1fr_auto] items-start gap-3">
           <input v-model="createForm.name" class="border border-[#404040] bg-[#151515] px-3 py-2 text-xs text-white outline-none focus:border-[#c7ff00]" placeholder="角色名" />
-          <textarea v-model="createForm.description" rows="2" class="resize-none border border-[#404040] bg-[#151515] px-3 py-2 text-xs text-white outline-none focus:border-[#c7ff00]" placeholder="外观描述：毛色、眼睛、配饰等，越具体生成越稳定" />
+          <textarea v-model="createForm.description" rows="2" class="resize-none border border-[#404040] bg-[#151515] px-3 py-2 text-xs text-white outline-none focus:border-[#c7ff00]" placeholder="外观描述：体型、五官、服饰、配色等，越具体生成越稳定" />
           <div class="flex gap-2">
             <button class="bg-[#c7ff00] px-4 py-2 text-xs font-semibold text-black disabled:opacity-50" :disabled="saving || !createForm.name.trim()" @click="createIp">创建</button>
             <button class="border border-[#444] px-3 py-2 text-xs text-white/60" @click="showCreate = false">取消</button>

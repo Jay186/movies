@@ -6,12 +6,15 @@ const confirmQueue = dialogState.confirmQueue
 const toasts = dialogState.toasts
 
 const current = computed(() => confirmQueue.value[0] || null)
+const isInput = computed(() => current.value?.kind === 'input')
 const isDanger = computed(() => current.value?.tone === 'danger')
 const focusCancelFirst = computed(() => ['danger', 'warn'].includes(current.value?.tone))
 
 const dialogEl = ref(null)
 const cancelBtn = ref(null)
 const confirmBtn = ref(null)
+const inputEl = ref(null)
+const inputValue = ref('')
 let restoreFocusTo = null
 
 const TONE = {
@@ -34,15 +37,26 @@ function settle(result) {
   _settleConfirm(current.value.id, result)
 }
 
+// 输入型对话框：确认回传用户输入的字符串，取消 / 关闭回传 null；确认框仍是 boolean
+function cancel() {
+  settle(isInput.value ? null : false)
+}
+function confirm() {
+  if (!isInput.value) { settle(true); return }
+  const v = inputValue.value.trim()
+  if (!v) return
+  settle(v)
+}
+
 function onKeydown(e) {
   if (!current.value) return
   if (e.key === 'Escape') {
     e.preventDefault()
-    settle(false)
+    cancel()
     return
   }
   if (e.key === 'Tab') {
-    const nodes = [cancelBtn.value, confirmBtn.value].filter(Boolean)
+    const nodes = [inputEl.value, cancelBtn.value, confirmBtn.value].filter(Boolean)
     if (nodes.length < 2) return
     const first = nodes[0]
     const last = nodes[nodes.length - 1]
@@ -69,8 +83,9 @@ watch(current, async (val, old) => {
     restoreFocusTo = null
   }
   if (val) {
+    inputValue.value = isInput.value ? (val.defaultValue || '') : ''
     await nextTick()
-    ;(focusCancelFirst.value ? cancelBtn.value : confirmBtn.value)?.focus()
+    ;(isInput.value ? inputEl.value : (focusCancelFirst.value ? cancelBtn.value : confirmBtn.value))?.focus()
   }
 })
 
@@ -143,6 +158,29 @@ onBeforeUnmount(() => {
           </template>
         </div>
 
+        <div v-if="isInput" class="ml-9 mt-3">
+          <textarea
+            ref="inputEl"
+            v-model="inputValue"
+            :placeholder="current.placeholder"
+            rows="3"
+            class="w-full resize-none rounded-lg border border-border bg-bg-primary px-3 py-2.5 text-[12px] leading-relaxed text-text-primary outline-none transition placeholder:text-text-muted focus:border-accent/50"
+            @keydown.enter.exact.prevent="confirm()"
+          ></textarea>
+          <div v-if="current.examples.length" class="mt-2.5">
+            <p class="mb-1.5 text-micro text-text-muted">点一下直接套用：</p>
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-for="ex in current.examples"
+                :key="ex"
+                type="button"
+                class="rounded-tag border border-border px-2.5 py-1 text-[12px] text-text-secondary transition hover:border-border-light hover:text-text-primary"
+                @click="inputValue = ex"
+              >{{ ex }}</button>
+            </div>
+          </div>
+        </div>
+
         <div v-if="current.extraActions.length" class="ml-9 mt-2.5 flex flex-wrap gap-2">
           <button
             v-for="a in current.extraActions"
@@ -157,13 +195,14 @@ onBeforeUnmount(() => {
         <button
           ref="cancelBtn"
           class="rounded-btn border border-border bg-bg-card px-4 py-1.5 text-[12px] font-medium text-text-secondary transition hover:border-border-light hover:text-text-primary"
-          @click="settle(false)"
+          @click="cancel()"
         >{{ current.cancelText }}</button>
         <button
           ref="confirmBtn"
           class="rounded-btn px-4 py-1.5 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-45"
           :class="tone.solid"
-          @click="settle(true)"
+          :disabled="isInput && !inputValue.trim()"
+          @click="confirm()"
         >{{ current.confirmText }}</button>
       </div>
     </div>

@@ -14,14 +14,17 @@ const MAX_SHARED_ENV_COUNT = 6
 
 const GROUP_ANCHOR_HINT =
   '本空间的「人审基准图」已作为参考图提供：本场景与基准图是同一物理空间，' +
-  '空间结构、地标物体的形态与相对位置、光照方向必须与基准图连续；' +
-  '但视角、机位高度、景别与画面主体占比一律以本场景文字描述为准，严禁照搬基准图的构图；' +
-  '时段、天气、色温同样以本场景文字描述为准'
+  '各物体的形态、朝向与彼此的相对位置关系必须与基准图连续；' +
+  '但透视关系、前后景层次、画面占比、取景范围、视角、机位高度、景别与画面主体占比一律以本场景文字描述为准，严禁照搬基准图的构图；' +
+  '光照一致性以随本图注入的组级光照常量（共有环境注记中的光照条目）为准，不由基准图承担；' +
+  '光源方向、色温、受光面与背光面关系一律以该组级光照常量为准；' +
+  '时段与天气细节仅在不与组级光照常量冲突的范围内以本场景文字描述为准'
 
 
 export function fingerprintOf(scenes) {
   const h = crypto.createHash('md5')
-  for (const s of scenes) h.update(`${s.id}${s.scene_number}${s.title}${s.summary}#`)
+  // spatial_context 纳入指纹：已确认空间关联属于"场景集内容"，变了就该触发重析（与注释承诺一致）
+  for (const s of scenes) h.update(`${s.id}${s.scene_number}${s.title}${s.summary}${s.spatial_context || ''}#`)
   return h.digest('hex')
 }
 
@@ -67,9 +70,41 @@ export function normalizeSceneGrouping(episodeId) {
   return { grouped }
 }
 
+// 解析提取阶段产出的空间关联 JSON（scenes.spatial_context）：{group, role, landmarks}
+// 空串/坏 JSON/全空字段一律返回 null，调用方按"无已确认关联"处理
+function parseSpatialContext(raw) {
+  try {
+    const obj = JSON.parse(String(raw || 'null'))
+    if (!obj || typeof obj !== 'object') return null
+    const ctx = {
+      group: String(obj.group || '').trim(),
+      role: String(obj.role || '').trim(),
+      landmarks: Array.isArray(obj.landmarks) ? obj.landmarks.map((x) => String(x || '').trim()).filter(Boolean) : [],
+    }
+    return ctx.group || ctx.role || ctx.landmarks.length ? ctx : null
+  } catch {
+    return null
+  }
+}
+
 async function analyzeWithLlm(scenes, episodeId) {
+  // 提取阶段已确认的空间关联（skill【同空间关联】节产出，scenes.spatial_context JSON）。
+  // 分析器从"全量推断"降级为"采用+补全"：已确认字段直接采用，LLM 只推断缺失项与组级共享信息。
+  const extractCtx = new Map()
+  for (const s of scenes) {
+    extractCtx.set(s.id, parseSpatialContext(s.spatial_context))
+  }
+  const fmtCtx = (s) => {
+    const c = extractCtx.get(s.id)
+    if (!c || (!c.group && !c.role && !c.landmarks.length)) return ''
+    const parts = []
+    if (c.group) parts.push(`空间组=${c.group}`)
+    if (c.role) parts.push(`组内视角=${c.role}`)
+    if (c.landmarks.length) parts.push(`共享地标=${c.landmarks.join('、')}`)
+    return `\n【提取时确认的空间关联】${parts.join('；')}`
+  }
   const sceneList = scenes
-    .map((s) => `【场景${s.scene_number}】(scene_id=${s.id}) ${s.title}\n${s.summary || '（无描述）'}`)
+    .map((s) => `【场景${s.scene_number}】(scene_id=${s.id}) ${s.title}\n${s.summary || '（无描述）'}${fmtCtx(s)}`)
     .join('\n\n')
 
   const messages = [
@@ -80,17 +115,21 @@ async function analyzeWithLlm(scenes, episodeId) {
     {
       role: 'user',
       content:
-        `以下是同一集的全部场景（编号/标题/环境描述）：\n\n${sceneList}\n\n` +
+        `以下是同一集的全部场景（编号/标题/环境描述；部分场景末尾附【提取时确认的空间关联】）：\n\n${sceneList}\n\n` +
+        `【优先级规则】场景末尾附有【提取时确认的空间关联】的，其中空间组/组内视角/共享地标是资产提取阶段已确认的关联事实，` +
+        `你的输出必须与之逐字一致，不得改动或重新命名；你只负责：①没有该信息的场景（推断其组与视角）；` +
+        `②组级的 shared_landmarks 汇总与 shared_env 提取；③检查同组各场视角是否重复，若重复则微调未确认场景的视角措辞。\n` +
         `请完成视觉连续性分析：\n` +
-        `1. spatial_group：把发生在同一物理空间的场景归为同组，组名用简短英文 snake_case（如 cliff_river、palace_hall）。\n` +
+        `1. spatial_group：把发生在同一物理空间的场景归为同组，组名用简短英文 snake_case（如 valley_river、palace_hall）。\n` +
         `   判断标准：站在一处能互相看见、或同一地点的不同视角/不同高度/内外关系，都算同组；剧情上完全无关的地点各自成组。\n` +
         `   每个场景都必须有组名（独立空间也要给唯一组名），不允许为空。\n` +
         `2. spatial_role：每个场景在其组内的具体位置或视角，用中文短语（如"崖顶俯视谷底""谷底浅滩仰视"）。\n` +
-        `3. shared_landmarks（场景固定大型物体）：全集中**在 2 个及以上场景重复出现、外观必须保持一致**的固定大型物体——\n` +
-        `   即构成空间本身的、不可移动的大型组成部分：建筑结构、地形、大型植物、固定设施（如桥、门、石碑、古树、井台）。\n` +
-        `   【判定标准】同时满足三条才列：① 不可移动；② 大型（不是能拿在手里的小物件）；③ 属于空间本身的组成部分。\n` +
+        `3. shared_landmarks（场景固定大型物体）：全集中**在 2 个及以上场景重复出现、外观必须保持一致**、且**角色不与之互动的**固定物体——\n` +
+        `   即构成空间本身的、角色只"存在其中"而不施加动作的组成部分：建筑结构、地形、大型植物、固定设施（如岩壁、石阶、门洞、古树、井台）。\n` +
+        `   【判定标准】同时满足三条才列：① 不可移动；② 大型（不是能拿在手里的小物件）；③ **角色不与之发生动作**（仅位于/站在/倚靠不算动作）。\n` +
         `   不列天气/光照/水面等泛化环境；名字用简短中文（2~6 字）。\n` +
-        `   【范围边界】本任务只提取「场景的固定大型物体」；可交互、可手持的小型剧情物件不属于本任务范围（由道具资产单独管理），一律不列。\n` +
+        `   【范围边界】本任务只提取「角色不与之互动的固定大型物体」；**角色会拿起、使用、操作、踩踏、乘坐、破坏的物件**（无论大小，含桥、船、大型载具）不属于本任务范围（由道具资产单独管理），一律不列。\n` +
+        `   ⚠️ 判据是「角色碰没碰」，不是「它大不大」：一座被角色踩上去、踩塌的桥是道具，不是本任务的对象。\n` +
         `4. 每个场景的 landmarks：该场景描述中实际出现的、属于 shared_landmarks 的固定大型物体，名称必须与 shared_landmarks 完全一致。\n` +
         `5. 每个场景的 elements：**该场景描述里明文写了、且必须在画面上看得见**的要素，用 2~6 字中文短语，\n` +
         `   按重要性排序，最多 5 条（如"清晨浓雾""老旧木桥""石阶栈道"）。\n` +
@@ -98,7 +137,7 @@ async function analyzeWithLlm(scenes, episodeId) {
         `   判断标准：一条要素若在画面中缺失，这场景就画错了 —— 只有这样的才列。\n` +
         `   ⚠️ **天气与大气现象只要写了就必须列**（雾/云/雨/雪/风/水汽/天光/日晒/光线）：\n` +
         `   这类词最容易被当成"只是氛围"而被省略，而它们恰恰是最常丢的——描述写了雾，就必须画得出雾。\n` +
-        `   ⚠️ 描述里写了**具体数量或形态**的，要连形态一起写进短语（"断了一半斜挂"→"半截斜挂的断桥"，\n` +
+        `   ⚠️ 描述里写了**具体数量或形态**的，要连形态一起写进短语（"断了一半斜挂"→"半截斜挂的古桥"，\n` +
         `   "水流挤在乱石堆里翻着白花"→"乱石堆翻白花"）——只写"桥"等于把形态信息丢了。\n` +
         `6. 每组（spatial_group）的 shared_env：**同组所有场景共享**的环境特征，用 2~8 字中文短语，最多 6 条。\n` +
         `   从组内各场描述的交集与空间常识中提取属于该地点本身的稳定特征：植被、地质、水体、色调倾向、标志性地形。\n` +
@@ -106,8 +145,15 @@ async function analyzeWithLlm(scenes, episodeId) {
         `   ⚠️ 判断"是否共享"看的是**这个地点本身有没有**，不是"每场都写了没有"：\n` +
         `   某场若明确写了"这里没有雾"（如"谷底无雾"），说明雾是该地点的**局部现象**，不得进组卡；\n` +
         `   而植被/地质这类实存特征，哪怕某一场的描述只字未提，也照样进组卡——\n` +
-        `   某场没提不代表那个地方没有，那一片山崖不会因为某一镜没写就没有松林。\n` +
-        `   举例：某组是河谷场景，则"灰白砾石滩""半山松林""冷蓝色调"都应列出——它们属于该地点，不随场次改变。\n\n` +
+        `   某场没提不代表那个地方没有，那一片山墙不会因为某一镜没写就没有爬藤。\n` +
+        `   举例：某组是河谷场景，则"灰白砾石滩""半山松林""冷蓝色调"都应列出——它们属于该地点，不随场次改变；\n` +
+        `   某组是古宅场景，则"青砖灰瓦""木质门廊""暗暖色调"同样都应列出——规则与题材无关。\n` +
+        `7. 【必需】每组 shared_env 必须包含且仅包含一条组级光照常量，固定格式：\n` +
+        `   "光照｜{时段}；主光源{方向+色温+强度}；{本组各场的受光面与背光面状态，必须写明低处物体的阴影}"\n` +
+        `   （示例："光照｜清晨；主光源对岸高处斜射阳光，暖金；本侧背光冷灰，低处桥体与谷底处于阴影"）\n` +
+        `   归并裁决规则：同组场景处于同一物理空间、同一时刻，光照常量全组唯一——组内各场描述矛盾时\n` +
+        `   （如一场写"阴天散射"一场写"对岸阳光"），以剧本同一时刻与空间物理为准裁决：有明确光源动机的版本优先，\n` +
+        `   阳光只照亮高处时低处必须写阴影。该条目会原样注入同组所有场景的生图提示词，是同组光照一致性的唯一事实源。\n\n` +
         `输出 JSON（严格遵守此结构）：\n` +
         `{"scenes":[{"scene_id":数字,"spatial_group":"...","spatial_role":"...","landmarks":["..."],"elements":["..."]}],` +
         ` "shared_landmarks":["..."],"shared_env":{"组名":["..."]}}`,
@@ -176,7 +222,9 @@ function validateAnalysis(parsed, scenes) {
   for (const [g, list] of Object.entries(rawEnv)) {
     const name = String(g || '').trim()
     if (!name || !liveGroups.has(name)) continue
-    const cleaned = parseElementList(JSON.stringify(Array.isArray(list) ? list : [])).slice(0, MAX_SHARED_ENV_COUNT)
+    // shared_env 放宽到 80 字：组级光照常量条目（固定前缀"光照｜"）需要容纳时段+光源+受光状态，
+    // 48 字曾把常量截成半截话（"…低处冰河与谷底隐在阴"），消费端吃到的是残句
+    const cleaned = parseElementList(JSON.stringify(Array.isArray(list) ? list : []), 80).slice(0, MAX_SHARED_ENV_COUNT)
     if (cleaned.length) sharedEnv[name] = cleaned
   }
 
@@ -197,7 +245,7 @@ export function ensureSceneAnalysis(episodeId, { force = false } = {}) {
 
 async function runEnsureSceneAnalysis(episodeId, { force = false } = {}) {
   const scenes = query(
-    'SELECT id, scene_number, title, summary, image_url FROM scenes WHERE episode_id = ? ORDER BY scene_number',
+    'SELECT id, scene_number, title, summary, image_url, spatial_context FROM scenes WHERE episode_id = ? ORDER BY scene_number',
     [episodeId]
   )
   if (!scenes.length) return { ok: false, reason: 'no_scenes', sceneCount: 0 }
@@ -207,6 +255,15 @@ async function runEnsureSceneAnalysis(episodeId, { force = false } = {}) {
   if (!force && cur?.fingerprint === fp) return { ok: true, cached: true, sceneCount: scenes.length }
 
   const { rows: llmRows, sharedEnv } = await analyzeWithLlm(scenes, episodeId)
+
+  // 提取已确认关联兜底：LLM 留空的组/视角/地标用提取产出补齐——LLM 只做增量推断，不推翻已确认事实
+  for (const r of llmRows) {
+    const ext = parseSpatialContext(scenes.find((s) => s.id === r.scene_id)?.spatial_context)
+    if (!ext) continue
+    if (!r.spatial_group && ext.group) r.spatial_group = ext.group
+    if (!r.spatial_role && ext.role) r.spatial_role = ext.role
+    if (!r.landmarks.length && ext.landmarks.length) r.landmarks = ext.landmarks.slice()
+  }
 
   const locks = loadGroupLocks(episodeId, { query, queryOne })
   const { rows, lockedCount, changedCount } = applyGroupLocks(llmRows, locks)

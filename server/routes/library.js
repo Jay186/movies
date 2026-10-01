@@ -1,10 +1,11 @@
 import { Router } from 'express'
+import { UPLOADS_URL_SLASH, uploadsUrl, uploadsDir } from '../paths.js'
 import { getDB } from '../db.js'
 import { removeLocalUploads } from '../ai/shared.js'
 import fs from 'fs'
 import path from 'path'
-import { uploadsDir } from '../paths.js'
 
+import { ASSET_BIZ_TYPE, uploadRefGroupSql, uploadRefCountSql } from '../ai/assetTypes.js'
 
 const router = Router()
 
@@ -12,8 +13,7 @@ router.get('/', (req, res) => {
   const db = getDB()
   const { type = 'character', source = 'library', page = 1, size = 32, keyword = '' } = req.query
 
-  const bizTypeMap = { character: 'CHARACTER', scene: 'SCENE', prop: 'PROP' }
-  const bizType = bizTypeMap[type] || 'CHARACTER'
+    const bizType = ASSET_BIZ_TYPE[type] || 'CHARACTER'
   const sourceFilter = source === 'mine' ? 'MINE' : 'LIBRARY'
 
   const pageNum = Math.max(1, parseInt(page) || 1)
@@ -33,15 +33,10 @@ router.get('/', (req, res) => {
 
   const records = db.prepare(`SELECT * FROM library_assets ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, pageSize, offset)
 
-  const refRows = db.prepare(`
-    SELECT image_url, COUNT(*) c FROM (
-      SELECT image_url FROM ip_characters WHERE image_url != ''
-      UNION ALL
-      SELECT image_url FROM project_characters WHERE image_url != ''
-      UNION ALL
-      SELECT image_url FROM characters WHERE image_url != ''
-    ) GROUP BY image_url`).all()
-  const refMap = new Map(refRows.map((r) => [r.image_url, r.c]))
+  const refRows = db
+    .prepare(`SELECT u, COUNT(*) c FROM (${uploadRefGroupSql()}) GROUP BY u`)
+    .all()
+  const refMap = new Map(refRows.map((r) => [r.u, r.c]))
 
   const withRef = records.map((r) => ({ ...r, referencedBy: refMap.get(r.cover_url) || 0 }))
 
@@ -95,11 +90,10 @@ router.post('/upload', (req, res) => {
 
     fs.writeFileSync(filepath, Buffer.from(base64Data, 'base64'))
 
-    const imageUrl = `/uploads/${filename}`
+    const imageUrl = `${uploadsUrl(filename)}`
 
     const db = getDB()
-    const bizTypeMap = { character: 'CHARACTER', scene: 'SCENE', prop: 'PROP' }
-    const bizType = bizTypeMap[type] || 'CHARACTER'
+        const bizType = ASSET_BIZ_TYPE[type] || 'CHARACTER'
     const clusterKey = `MINE:${bizType}:${timestamp}`
 
     const info = db.prepare(`INSERT INTO library_assets 
@@ -140,20 +134,16 @@ router.delete('/:id', (req, res) => {
     }
 
     if (asset.cover_url) {
-      const refRow = db.prepare(`
-        SELECT COUNT(*) c FROM (
-          SELECT image_url FROM ip_characters WHERE image_url = ?
-          UNION ALL
-          SELECT image_url FROM project_characters WHERE image_url = ?
-          UNION ALL
-          SELECT image_url FROM characters WHERE image_url = ?
-        )`).get(asset.cover_url, asset.cover_url, asset.cover_url)
+      const { sql: refSql, paramCount } = uploadRefCountSql()
+      const refRow = db.prepare(`SELECT COUNT(*) c FROM (${refSql})`).get(
+        ...new Array(paramCount).fill(asset.cover_url)
+      )
       if (refRow.c > 0) {
-        return res.status(409).json({ code: 409, msg: `该素材正被 ${refRow.c} 个角色引用，请先解除引用后再删除` })
+        return res.status(409).json({ code: 409, msg: `该素材正被 ${refRow.c} 处引用，请先解除引用后再删除` })
       }
     }
 
-    if (asset.cover_url && asset.cover_url.startsWith('/uploads/')) {
+    if (asset.cover_url && asset.cover_url.startsWith(UPLOADS_URL_SLASH)) {
       removeLocalUploads([asset.cover_url], uploadsDir)
     }
 

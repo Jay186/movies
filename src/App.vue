@@ -25,6 +25,7 @@ function saveToken() {
 }
 
 onMounted(async () => {
+  store.loadShotDurationLimits()
   await store.ensureReady()
   appReady.value = true
 })

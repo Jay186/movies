@@ -5,7 +5,7 @@ import { api } from '../services/api'
 import {
   confirmDialog, toast, toastInfo, toastSuccess, toastWarn, toastError,
 } from '../services/dialog'
-import { VIDEO_ENGINES, getVideoEngine } from '../data/videoEngines'
+import { VIDEO_ENGINES, getVideoEngine, engineCostText } from '../data/videoEngines'
 import { ASPECT_RATIO_OPTIONS } from '../constants/app'
 
 const store = useProjectStore()
@@ -42,22 +42,6 @@ const generatedPercent = computed(() => {
   if (!allShots.value.length) return 0
   return Math.round((playableCount.value / allShots.value.length) * 100)
 })
-const seamAlert = (shot) => hasDisplayVideo(shot) && !!shot.seamCheck?.alert
-const seamTip = (shot) => {
-  const c = shot.seamCheck
-  if (!c) return ''
-  if (c.checkType === 'openerTone') {
-    return `开场色向闸：首帧 R-B ${c.rb}，带宽 [${c.band?.rbMin}, ${c.band?.rbMax}] · ${c.alert ? '色调跑偏：建议重新生成本镜（修好前下游出片会被拦截）' : '正常'}`
-  }
-  const parts = []
-  if (c.cctDiffK != null) parts.push(`色温差 ${c.cctDiffK}K`)
-  else parts.push('色温差 n/a（近黑/近灰帧无法测 CCT）')
-  parts.push(`亮度差 ${c.lumaDiff}`)
-  if (c.hashDist != null) parts.push(`构图差 ${c.hashDist}/64`)
-  parts.push(c.alert ? '超阈值：建议重新生成本镜（修好前下游出片会被拦截）' : '正常')
-  return parts.join(' · ')
-}
-
 const shotAlerts = (shot) => store.alertsForShot(shot.id)
 const shotErrAlerts = (shot) => shotAlerts(shot).filter((a) => a.level === 'error')
 const alertsTip = (shot) => shotAlerts(shot).map((a) => `[${a.source}] ${a.message}`).join('\n')
@@ -69,7 +53,7 @@ async function dismissOneUnattached() {
   if (!list.length) return
   const ok = await confirmDialog({
     title: `标记 ${list.length} 条告警为已处置`,
-    description: `这批告警未关联到具体镜头或场景（多为历史数据或集级问题），共 ${list.length} 条。仅记录「已知悉」，不会重跑任何校验。`,
+    description: `这批告警未关联到具体镜头或场景（多为历史数据或集级问题），共 ${list.length} 条。仅记录「已知悉」，不会重跑任何生成。`,
     confirmText: `标记 ${list.length} 条已处置`,
     cancelText: '先不标',
     tone: 'warn',
@@ -88,7 +72,7 @@ async function dismissShotAlerts(shot) {
   if (!n) return
   const ok = await confirmDialog({
     title: `标记镜 ${shot.shotNumber || shot.id} 的 ${n} 条告警为已处置`,
-    description: '仅记录「已知悉」，不会重跑接力 / 接缝钩子。如需真正修好，重生该镜即可重跑全链。',
+    description: '仅记录「已知悉」，不会重跑任何生成。如需真正修好，重生该镜即可。',
     confirmText: `标记 ${n} 条已处置`,
     cancelText: '先不标',
     tone: 'warn',
@@ -193,19 +177,16 @@ const shotFilter = ref('all')
 const shotStates = computed(() =>
   allShots.value.map((shot) => {
     const shotVideo = !!(shot.videoUrl || shot.videoGenerated)
-    const alert = seamAlert(shot)
-    return { shot, shotVideo, hasVideo: shotVideo, alert }
+    return { shot, shotVideo, hasVideo: shotVideo }
   })
 )
 const filterCounts = computed(() => ({
   all: shotStates.value.length,
-  alert: shotStates.value.filter((x) => x.alert).length,
   pending: shotStates.value.filter((x) => !x.hasVideo).length,
   done: shotStates.value.filter((x) => x.shotVideo).length,
 }))
 const visibleShots = computed(() => {
   const list = shotStates.value
-  if (shotFilter.value === 'alert') return list.filter((x) => x.alert).map((x) => x.shot)
   if (shotFilter.value === 'pending') return list.filter((x) => !x.hasVideo).map((x) => x.shot)
   if (shotFilter.value === 'done') return list.filter((x) => x.shotVideo).map((x) => x.shot)
   return list.map((x) => x.shot)
@@ -213,7 +194,6 @@ const visibleShots = computed(() => {
 
 const shotFilterChips = computed(() => [
   { key: 'all', label: '全部', n: filterCounts.value.all, activeClass: 'bg-bg-elevated text-text-primary', tip: '全部镜头' },
-  { key: 'alert', label: '待处理', n: filterCounts.value.alert, activeClass: 'bg-danger/15 text-danger ring-1 ring-inset ring-danger/25', tip: '接缝异常，需要处置' },
   { key: 'pending', label: '未出片', n: filterCounts.value.pending, activeClass: 'bg-bg-elevated text-text-primary', tip: '本镜还没有成片' },
   { key: 'done', label: '单独出片', n: filterCounts.value.done, activeClass: 'bg-ok/15 text-ok ring-1 ring-inset ring-ok/25', tip: '本镜已独立生成视频' },
 ])
@@ -368,11 +348,11 @@ async function generateAllVideos() {
   const eng = videoEngine.value
   const ok = await confirmDialog({
     title: `批量出片 ${pending.length} 个镜头`,
-    description: '串行逐镜生成，中途可在卡片上看到每个镜头的进度。',
+    description: '任务队列执行（最多 2 个并行，其余排队），可刷新页面，进度实时可查。',
     details: [
       { label: '镜头数', value: `${pending.length} 个（共约 ${totalSec}s）` },
       { label: '引擎', value: eng.label },
-      { label: '计费', value: eng.coinLow != null ? `约 ${eng.coinLow}~${eng.coinHigh} 币/条` : '按 RunningHub 计费', tone: 'warn' },
+      { label: '计费', value: engineCostText(eng), tone: 'warn' },
     ],
     confirmText: '开始批量出片',
     cancelText: '先不生成',
@@ -496,6 +476,7 @@ async function handleCompose() {
     })
     if (r?.success && r.url) {
       composeResult.value = r
+      loadCompositions()
       const missing = r.missingShots || []
       if (missing.length) {
         const shown = missing.slice(0, 10).join('、')
@@ -518,6 +499,20 @@ async function handleCompose() {
 function closeComposeResult() {
   composeResult.value = null
 }
+
+// ── 成片历史：拼片产物已入服务端库，刷新后仍可回放下载 ──
+const compositions = ref([])
+async function loadCompositions() {
+  if (!store.currentEpisodeId) return
+  try {
+    const r = await api.getCompositions(store.currentEpisodeId)
+    compositions.value = r?.compositions || []
+  } catch {  }
+}
+function compositionTime(row) {
+  const d = new Date(String(row.created_at || '').replace(' ', 'T'))
+  return Number.isNaN(d.getTime()) ? String(row.created_at || '') : d.toLocaleString('zh-CN', { hour12: false })
+}
 const composeFilename = computed(() => {
   const stamp = new Date()
   const s = `${stamp.getFullYear()}${String(stamp.getMonth() + 1).padStart(2, '0')}${String(stamp.getDate()).padStart(2, '0')}_${String(stamp.getHours()).padStart(2, '0')}${String(stamp.getMinutes()).padStart(2, '0')}`
@@ -534,6 +529,7 @@ function onGlobalKeydown(e) {
 onMounted(() => {
   window.addEventListener('keydown', onGlobalKeydown)
   store.loadAlerts()
+  loadCompositions()
   alertPoll = setInterval(() => {
     if (store.generatingVideoIds.length || store.systemAlertCount) store.loadAlerts()
   }, 8000)
@@ -555,7 +551,7 @@ onBeforeUnmount(() => {
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
       </svg>
       <span class="min-w-0 flex-1 text-[12px] leading-relaxed text-warn">
-        有 <b class="font-mono">{{ store.systemAlertCount }}</b> 条系统告警未处置{{ alertSourceSuffix }}：多为生成后的自动验收未通过，成片已生成但那几项没有结论
+        有 <b class="font-mono">{{ store.systemAlertCount }}</b> 条系统告警未处置{{ alertSourceSuffix }}：多为生成/回写环节的异常提示
       </span>
       <button
         v-if="unattachedAlerts.length"
@@ -606,13 +602,13 @@ onBeforeUnmount(() => {
         <div class="flex shrink-0 flex-wrap items-center gap-2">
           <div
             class="flex h-8 items-center rounded-control border px-2.5"
-            :class="videoEngine.value !== 'h3v4' ? 'border-accent/40 bg-accent/10' : 'border-border bg-bg-card'"
+            :class="!videoEngine.isDefault ? 'border-accent/40 bg-accent/10' : 'border-border bg-bg-card'"
             :title="`出片引擎：${videoEngine.label} · ${videoEngine.desc}`"
           >
             <select
               v-model="store.videoModel"
               class="cursor-pointer bg-transparent text-[12px] outline-none"
-              :class="videoEngine.value !== 'h3v4' ? 'text-accent' : 'text-text-primary'"
+              :class="!videoEngine.isDefault ? 'text-accent' : 'text-text-primary'"
             >
               <option v-for="eng in VIDEO_ENGINES" :key="eng.value" :value="eng.value">
                 {{ eng.label }}
@@ -655,7 +651,7 @@ onBeforeUnmount(() => {
                     <select
                       v-model="selectedBgm"
                       class="h-7 max-w-[160px] rounded-control border border-border bg-bg-secondary px-2 text-micro text-text-secondary outline-none transition hover:border-border-light"
-                      title="BGM 音频文件请放进 server/uploads/bgm/ 目录（mp3/wav/m4a 等）"
+                      title="选择已上传的背景音乐（支持 mp3 / wav / m4a 等音频格式）"
                     >
                       <option value="">无 BGM</option>
                       <option v-for="f in bgmFiles" :key="f" :value="f">{{ f }}</option>
@@ -688,7 +684,7 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="border-t border-border/60 bg-bg-secondary/50 px-3.5 py-2 text-micro leading-relaxed text-text-muted">
-                当前引擎 {{ videoEngine.label }}（{{ videoEngine.desc }}），按 RunningHub 计费
+                当前引擎 {{ videoEngine.label }}（{{ videoEngine.desc }}），{{ engineCostText(videoEngine) }}
               </div>
             </div>
           </div>
@@ -758,6 +754,39 @@ onBeforeUnmount(() => {
             <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
             下载成片
           </a>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="compositions.length" class="shrink-0 px-6 pt-1 pb-2">
+      <div class="rounded-card border border-border/60 bg-bg-card">
+        <div class="flex items-center justify-between border-b border-border/60 px-4 py-2">
+          <span class="text-[12px] font-medium text-text-secondary">历史成片（{{ compositions.length }}）</span>
+          <button
+            class="rounded-control px-2 py-0.5 text-micro text-text-muted transition hover:bg-bg-hover hover:text-text-primary"
+            @click="loadCompositions"
+          >刷新</button>
+        </div>
+        <div class="divide-y divide-border/50">
+          <div
+            v-for="c in compositions"
+            :key="c.id"
+            class="flex items-center gap-3 px-4 py-2"
+          >
+            <video :src="c.url" controls preload="metadata" class="h-12 w-20 shrink-0 rounded-control bg-black object-cover" />
+            <div class="min-w-0 flex-1">
+              <div class="truncate font-mono text-micro text-text-primary">{{ c.url.split('/').pop() }}</div>
+              <div class="mt-0.5 text-micro text-text-muted">{{ c.shot_count }} 镜 · {{ c.total_seconds }}s · {{ compositionTime(c) }}</div>
+            </div>
+            <a
+              :href="c.url"
+              download
+              class="flex h-7 shrink-0 items-center gap-1 rounded-control border border-border px-2.5 text-micro text-text-secondary transition hover:border-border-light hover:text-text-primary"
+            >
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+              下载
+            </a>
+          </div>
         </div>
       </div>
     </div>
@@ -886,9 +915,7 @@ onBeforeUnmount(() => {
           class="group relative flex overflow-hidden rounded-panel border bg-bg-card transition-all duration-200"
           :class="[
             isList ? 'flex-row items-stretch gap-3 p-2' : 'flex-col',
-            seamAlert(shot)
-              ? 'border-danger/45 shadow-card ring-1 ring-inset ring-danger/15'
-              : 'border-border/50 shadow-card hover:border-border/90 hover:shadow-card-hover',
+            'border-border/50 shadow-card hover:border-border/90 hover:shadow-card-hover',
             selectedSet.has(shot.id) ? 'border-accent/60 ring-2 ring-inset ring-accent/45' : '',
           ]"
           @click="onCardClick(shot)"
@@ -974,21 +1001,6 @@ onBeforeUnmount(() => {
               <div
                 :class="isList
                   ? 'flex flex-wrap items-center gap-1'
-                  : 'absolute left-2 top-2 z-[6] flex max-w-[calc(100%-16px)] flex-col items-start gap-1'"
-              >
-                <span
-                  v-if="seamAlert(shot)"
-                  :title="seamTip(shot)"
-                  class="flex h-5 max-w-full items-center gap-1 rounded-full bg-danger px-2 text-micro font-medium text-white"
-                >
-                  <svg class="h-3 w-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" /></svg>
-                  <span class="truncate">{{ shot.seamCheck?.checkType === 'openerTone' ? `色调跑偏 R-B${shot.seamCheck?.rb}` : `衔接异常${shot.seamCheck?.cctDiffK != null ? ` CCT差${shot.seamCheck.cctDiffK}K` : ''}` }}</span>
-                </span>
-              </div>
-
-              <div
-                :class="isList
-                  ? 'flex flex-wrap items-center gap-1'
                   : 'absolute right-2 top-2 z-[6] flex max-w-[calc(100%-16px)] flex-col items-end gap-1'"
               >
                 <span
@@ -1004,7 +1016,7 @@ onBeforeUnmount(() => {
                   class="flex h-5 items-center gap-1 rounded-full bg-danger px-2 text-micro font-medium text-white"
                 >
                   <svg class="h-3 w-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-                  未验收 {{ shotErrAlerts(shot).length }}
+                  告警 {{ shotErrAlerts(shot).length }}
                 </span>
               </div>
             </div>

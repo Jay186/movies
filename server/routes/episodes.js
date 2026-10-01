@@ -1,12 +1,9 @@
 import { Router } from 'express'
+import { UPLOADS_URL_SLASH, UPLOADS_PREFIX_RE, uploadsUrl, serverDir, uploadsDir } from '../paths.js'
 import fs from 'fs'
 import path from 'path'
 
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true })
-
 import { removeLocalUploads as removeLocalUploadsShared, filterUnreferencedUploadUrls } from '../ai/shared.js'
-const removeLocalUploads = (urls) => removeLocalUploadsShared(urls, uploadsDir)
-
 import { query, queryOne, execute, transaction } from '../db.js'
 import { ensureStandardScript } from '../ai/scriptFormat.js'
 import { scriptHash } from '../scriptHash.js'
@@ -16,71 +13,62 @@ import {
   updateProjectCharacter,
   syncProjectCharacterToEpisodes,
 } from '../characterLibrary.js'
-import { backfillShotAssets, backfillSceneByTitle } from '../ai/assetBackfill.js'
+import { backfillShotAssets, backfillSceneByTitle, backfillShotSpaceFromScene } from '../ai/assetBackfill.js'
 import { classifyShotCombat } from '../ai/shotClassifier.js'
 import { currentBaselineUrlForGroup } from '../ai/sceneAnchors.js'
 import { parseDialogue, serializeDialogue } from '../ai/dialogue.js'
 import { resolveAlertsByShot, recordAlert, clearAlertsByRef } from '../ai/alerts.js'
-import { runLightingChecks } from '../ai/lightingCheckRuntime.js'
+import { cancelJobsForShots } from '../jobs/videoJobRunner.js'
 import {
   snapshotBeforeExtract,
   computeExtractDiff,
   applyKeepForScenes,
   applyKeepForProps,
 } from '../ai/extractGuard.js'
-import { clearQcIgnores, persistQcToShots } from './qc.js'
-import { validateStoryboard } from '../ai/storyboardValidator.js'
+import { snapshotAssetStatesForNames, restoreAssetStates } from '../ai/assetPipeline.js'
 import { regenerateShot } from '../ai/doubao.js'
 import { config } from '../config.js'
-import { ASSET_TYPES } from '../ai/assetTypes.js'
+import { ASSET_META, uploadRefEpisodeSql } from '../ai/assetTypes.js'
 import { fingerprintOf, normalizeSceneGrouping } from '../ai/sceneAnchors.js'
-import { serverDir, uploadsDir } from '../paths.js'
+import { syncEpisodeEnglish, shotEnglishStale } from '../ai/shotEnglish.js'
+import {
+  FIELD_SOURCE,
+  buildFieldSourcesForInput,
+  buildPromptProvenanceForInput,
+  buildStructuralFieldsForInput,
+  buildShotRelationGraph,
+  ensureShotUid,
+  mergeFieldSources,
+  normalizeStoryboardDocument,
+  parseRelatedShots,
+  resolveStoryboardSource,
+} from '../storyboard/model.js'
+import { validateStoryboardImport, formatStoryboardValidationError } from '../ai/storyboardContractValidator.js'
+
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true })
+const removeLocalUploads = (urls) => removeLocalUploadsShared(urls, uploadsDir)
 
 const router = Router()
 
-const STATE_COLS = ['asset_type', 'asset_key', 'state_key', 'label_zh', 'description', 'description_en', 'image_url', 'is_default', 'source']
-
-function snapshotAssetStatesForNames(assetType, names) {
-  if (!config.assetState?.enabled) return []
-  if (!ASSET_TYPES.includes(assetType)) return []
-  const keys = [...new Set((names || []).map((n) => String(n || '').trim()).filter(Boolean))]
-  if (!keys.length) return []
-  try {
-    const out = []
-    for (const k of keys) {
-      const rows = query(
-        `SELECT ${STATE_COLS.join(', ')} FROM asset_states WHERE asset_type = ? AND asset_key = ?`,
-        [assetType, k]
-      )
-      out.push(...rows)
-    }
-    return out
-  } catch (e) {
-    console.warn(`[episodes] 状态行快照失败（不阻断保存）: ${e.message}`)
-    return []
-  }
+function applyShotMetadataUpdate(shotId, input = {}) {
+  const values = { ...buildStructuralFieldsForInput(input), ...buildPromptProvenanceForInput(input) }
+  const entries = Object.entries(values).filter(([, value]) => value !== undefined)
+  if (!entries.length) return
+  const setSql = entries.map(([column]) => `${column} = COALESCE(?, ${column})`).join(', ')
+  execute(`UPDATE shots SET ${setSql} WHERE id = ?`, [...entries.map(([, value]) => value), shotId])
 }
 
-function restoreAssetStates(rows) {
-  if (!config.assetState?.enabled) return 0
-  if (!Array.isArray(rows) || !rows.length) return 0
-  let n = 0
-  try {
-    for (const r of rows) {
-      execute(
-        `INSERT OR IGNORE INTO asset_states (${STATE_COLS.join(', ')})
-         VALUES (${STATE_COLS.map(() => '?').join(', ')})`,
-        STATE_COLS.map((c) => r[c])
-      )
-      n++
-    }
-  } catch (e) {
-    console.warn(`[episodes] 状态行回迁失败（不阻断保存）: ${e.message}`)
-  }
-  return n
-}
+const SHOT_VERSION_META_COLS = new Set(['version', 'edited_by', 'field_sources_json'])
 
-const SHOT_VERSION_META_COLS = new Set(['version', 'edited_by'])
+// 英文版后台同步（2026-10-01）：分镜保存/编辑后 fire-and-forget 触发，
+// 只编译"中文变了或英文缺失"的镜（指纹判新鲜，其余零成本跳过），不阻塞保存响应。
+// 编译失败的镜由出片任务内自愈兜底（compileShotEnglish 重试），此处只尽力而为。
+function scheduleEnglishSync(episodeId) {
+  if (!episodeId) return
+  setImmediate(() => {
+    syncEpisodeEnglish(episodeId).catch((e) => console.warn(`[shotEnglish] 集 ${episodeId} 后台同步异常:`, e.message))
+  })
+}
 
 // shot_versions.shot_number 是后加迁移列：老库在迁移执行前可能尚未存在，探测一次并缓存
 let _svNumberColCache = null
@@ -126,6 +114,8 @@ function forceSnapshotShot(shotId, episodeId, reason, editedBy) {
 
 // world_state_in 是派生字段：按时间轴顺序回填为上一镜的 world_state_out（首镜无上一镜则为空串）
 // 供镜间衔接检查器（#8）与单镜重生成（#2）使用；保存与单镜编辑后都需要刷新
+// world_state_in_en 同源派生自上一镜 world_state_out_en：英文副本必须与中文严格同源，
+// 否则本镜首帧约束的英文与上一镜末帧的中文描述会指向两个不同状态（2026-09-27）
 function refreshWorldStateIn(episodeId) {
   execute(
     `UPDATE shots SET world_state_in = COALESCE((
@@ -135,9 +125,17 @@ function refreshWorldStateIn(episodeId) {
          AND (s2.start_time < shots.start_time
               OR (s2.start_time = shots.start_time AND s2.id < shots.id))
        ORDER BY s2.start_time DESC, s2.id DESC LIMIT 1
+     ), ''),
+     world_state_in_en = COALESCE((
+       SELECT s2.world_state_out_en FROM shots s2
+       JOIN storyboard_scenes ss2 ON ss2.id = s2.storyboard_scene_id
+       WHERE ss2.episode_id = ?
+         AND (s2.start_time < shots.start_time
+              OR (s2.start_time = shots.start_time AND s2.id < shots.id))
+       ORDER BY s2.start_time DESC, s2.id DESC LIMIT 1
      ), '')
      WHERE storyboard_scene_id IN (SELECT id FROM storyboard_scenes WHERE episode_id = ?)`,
-    [episodeId, episodeId]
+    [episodeId, episodeId, episodeId]
   )
 }
 
@@ -216,27 +214,18 @@ router.delete('/:id', (req, res) => {
   if (!episode) return res.status(404).json({ error: '集不存在' })
   const countRow = queryOne('SELECT COUNT(*) AS c FROM episodes WHERE project_id = ?', [episode.project_id])
   if (countRow.c <= 1) return res.status(400).json({ error: '项目至少保留 1 集，无法删除最后一集' })
-  const ownedSceneIds = query('SELECT id FROM scenes WHERE episode_id = ?', [episode.id]).map((r) => r.id)
-  const ownedPropIds = query('SELECT id FROM props WHERE episode_id = ?', [episode.id]).map((r) => r.id)
-
-  const rows = query(
-    `SELECT c.image_url u FROM characters c WHERE c.episode_id = ?
-     UNION ALL SELECT c2.audio_url FROM characters c2 WHERE c2.episode_id = ?
-     UNION ALL SELECT p.image_url FROM props p WHERE p.episode_id = ?
-     UNION ALL SELECT sc.image_url FROM scenes sc WHERE sc.episode_id = ?
-     UNION ALL SELECT s.storyboard_url FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id WHERE ss.episode_id = ?
-     UNION ALL SELECT s.frame_url FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id WHERE ss.episode_id = ?
-     UNION ALL SELECT s.frame_url2 FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id WHERE ss.episode_id = ?
-     UNION ALL SELECT s.blocking_url FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id WHERE ss.episode_id = ?
-     UNION ALL SELECT s.video_url FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id WHERE ss.episode_id = ?
-     UNION ALL SELECT s.continuity_url FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id WHERE ss.episode_id = ?
-     UNION ALL SELECT ss2.grid_image_url FROM storyboard_scenes ss2 WHERE ss2.episode_id = ?`,
-    [episode.id, episode.id, episode.id, episode.id, episode.id, episode.id, episode.id, episode.id, episode.id, episode.id, episode.id]
-  )
+  const { sql: refSql, paramCount } = uploadRefEpisodeSql()
+  const rows = paramCount ? query(refSql, new Array(paramCount).fill(episode.id)) : []
+  // 先取出本集名下各类型资产的 id（删集后再查可能已被其他清理逻辑影响）
+  const ownedAssetIds = Object.entries(ASSET_META).map(([assetType, meta]) => [
+    assetType,
+    query(`SELECT ${meta.idField} FROM ${meta.table} WHERE episode_id = ?`, [episode.id]).map((r) => r[meta.idField]),
+  ])
   execute('DELETE FROM episodes WHERE id = ?', [episode.id])
 
   try {
-    for (const [assetType, ids] of [['scene', ownedSceneIds], ['prop', ownedPropIds]]) {
+    // 资产历史按类型清理：类型清单来自 ASSET_META，新增资产类型不用改这里
+    for (const [assetType, ids] of ownedAssetIds) {
       if (!ids.length) continue
       execute(
         `DELETE FROM asset_image_history WHERE asset_type = ? AND asset_id IN (${ids.map(() => '?').join(',')})`,
@@ -244,6 +233,8 @@ router.delete('/:id', (req, res) => {
       )
     }
     execute('DELETE FROM ai_calls WHERE episode_id = ?', [episode.id])
+    execute('DELETE FROM video_jobs WHERE episode_id = ?', [episode.id])
+    execute('DELETE FROM compose_outputs WHERE episode_id = ?', [episode.id])
     clearAlertsByRef('episode', [episode.id])
   } catch (e) {
     console.warn(`[episodes] 无外键表清理失败（删除已生效，仅残留日志/历史）: ${e.message}`)
@@ -333,6 +324,7 @@ router.get('/:id', (req, res) => {
       soundEffects: shot.sound_effects || '',
       cameraMovement: shot.camera_movement || '',
       cameraAngle: shot.camera_angle || '',
+      cameraElevation: shot.camera_elevation || '',
       overallSoundscape: shot.overall_soundscape || '',
       nonDiegeticMusic: shot.non_diegetic_music || '',
       integratedMultimodalDescription: shot.integrated_multimodal_description || '',
@@ -348,6 +340,8 @@ router.get('/:id', (req, res) => {
       })(),
       worldStateIn: shot.world_state_in || '',
       worldStateOut: shot.world_state_out || '',
+      // 英文版待准备标记：分镜列表黄点用（1=待准备，出片时会自动补齐）
+      englishPending: shotEnglishStale(shot) ? 1 : 0,
       dialogue: (() => {
         const lines = parseDialogue(shot.dialogue)
         return lines.length ? lines : null
@@ -362,6 +356,25 @@ router.get('/:id', (req, res) => {
       seamCheck: (() => {
         try { return shot.seam_check ? JSON.parse(shot.seam_check) : null } catch { return null }
       })(),
+      fieldSources: (() => {
+        try { return shot.field_sources_json ? JSON.parse(shot.field_sources_json) : {} } catch { return {} }
+      })(),
+      shotUid: shot.shot_uid || '',
+      beatId: shot.beat_id || '',
+      coverageId: shot.coverage_id || '',
+      relationType: shot.relation_type || '',
+      relatedShots: parseRelatedShots(shot.related_shots_json),
+      composition: shot.composition || '',
+      lens: shot.lens || '',
+      depthOfField: shot.depth_of_field || '',
+      transitionIn: shot.transition_in || '',
+      transitionOut: shot.transition_out || '',
+      colorLighting: shot.color_lighting || '',
+      spaceType: shot.space_type || '',
+      spaceEvidence: shot.space_evidence || '',
+      promptProviderId: shot.prompt_provider_id || '',
+      compiledPrompt: shot.compiled_prompt || '',
+      promptCompiledAt: shot.prompt_compiled_at || null,
       anchorSnapshot: (() => {
         try { return shot.anchor_refs_snapshot ? JSON.parse(shot.anchor_refs_snapshot) : null } catch { return null }
       })(),
@@ -393,7 +406,6 @@ router.get('/:id', (req, res) => {
     assetsScriptFp: episode.assets_script_fp || '',
     storyboardScriptFp: episode.storyboard_script_fp || '',
     storyboardSource: episode.storyboard_source || 'generated',
-    directorNotes: episode.director_notes || '',
     aiChatHistory,
     characters,
     props,
@@ -410,11 +422,41 @@ router.get('/:id', (req, res) => {
   })
 })
 
-router.put('/:id/director-notes', (req, res) => {
-  const { director_notes } = req.body
-  if (director_notes === undefined) return res.status(400).json({ error: 'director_notes 必填' })
-  execute('UPDATE episodes SET director_notes = ? WHERE id = ?', [String(director_notes), req.params.id])
-  res.json({ success: true })
+router.get('/:id/storyboard-graph', (req, res) => {
+  const episode = queryOne('SELECT id FROM episodes WHERE id = ?', [req.params.id])
+  if (!episode) return res.status(404).json({ error: '集不存在' })
+  const scenes = query('SELECT id, scene_number, title FROM storyboard_scenes WHERE episode_id = ? ORDER BY scene_number', [req.params.id])
+  const sceneIds = scenes.map((scene) => scene.id)
+  const shotsByScene = new Map()
+  if (sceneIds.length) {
+    const placeholders = sceneIds.map(() => '?').join(', ')
+    const shots = query(
+      `SELECT id, storyboard_scene_id, shot_uid, shot_number, beat_id, coverage_id, relation_type, related_shots_json
+       FROM shots WHERE storyboard_scene_id IN (${placeholders}) ORDER BY start_time, id`,
+      sceneIds,
+    )
+    for (const shot of shots) {
+      const list = shotsByScene.get(shot.storyboard_scene_id) || []
+      list.push({
+        ...shot,
+        shotUid: shot.shot_uid || '',
+        shotNumber: shot.shot_number || '',
+        beatId: shot.beat_id || '',
+        coverageId: shot.coverage_id || '',
+        relationType: shot.relation_type || '',
+        relatedShots: parseRelatedShots(shot.related_shots_json),
+      })
+      shotsByScene.set(shot.storyboard_scene_id, list)
+    }
+  }
+  const document = {
+    scenes: scenes.map((scene) => ({
+      ...scene,
+      sceneNumber: scene.scene_number,
+      shots: shotsByScene.get(scene.id) || [],
+    })),
+  }
+  res.json({ success: true, graph: buildShotRelationGraph(document) })
 })
 
 router.put('/:id/script', async (req, res) => {
@@ -483,7 +525,7 @@ router.post('/:id/script/preview', async (req, res) => {
 })
 
 router.post('/:id/characters', (req, res) => {
-  const { characters = [], source = 'edit', decision = '' } = req.body
+  const { characters = [], source = 'edit', decision = '', mergeStrategy = 'preserve' } = req.body
   if (!Array.isArray(characters) || characters.length === 0) {
     return res.status(400).json({ error: '角色列表不能为空，已拒绝保存以保护现有数据' })
   }
@@ -492,7 +534,7 @@ router.post('/:id/characters', (req, res) => {
     req.params.id,
     episode?.project_id || null,
     characters,
-    { source, decision, guard: source === 'extract' }
+    { source, decision, guard: source === 'extract', mergeStrategy }
   )
   if (guardResult?.risk) return res.json(guardResult)
 
@@ -582,6 +624,8 @@ router.post('/:id/scenes', (req, res) => {
         title_en: s.titleEn ?? old?.title_en ?? '',
         summary_en: s.summaryEn ?? old?.summary_en ?? '',
         lighting_en: s.lightingEn ?? old?.lighting_en ?? '',
+        space_type: (s.spaceType || s.space_type) || old?.space_type || '',
+        space_evidence: (s.spaceEvidence || s.space_evidence) || old?.space_evidence || '',
       }
     })
     const report = computeExtractDiff({ table: 'scenes', oldRows, incoming: incomingRows })
@@ -594,7 +638,6 @@ router.post('/:id/scenes', (req, res) => {
     snapshotBeforeExtract({ episodeId, trigger: 'extract-scenes', tables: ['scenes'] })
   }
 
-  const lightingQueue = []
   transaction(() => {
     const oldEn = new Map(
       query('SELECT title, title_en, summary_en, lighting_en, location FROM scenes WHERE episode_id = ?', [episodeId])
@@ -626,6 +669,12 @@ router.post('/:id/scenes', (req, res) => {
         ?? name
       const finalTitleEn = s.titleEn ?? old?.title_en ?? ''
       const finalSummaryEn = s.summaryEn ?? old?.summary_en ?? ''
+      const finalSpaceType = (s.spaceType || s.space_type)
+        || (source === 'extract' ? old?.space_type : undefined)
+        || ''
+      const finalSpaceEvidence = (s.spaceEvidence || s.space_evidence)
+        || (source === 'extract' ? old?.space_evidence : undefined)
+        || ''
 
       let target = null
       const rawId = Number(s.id)
@@ -643,25 +692,18 @@ router.post('/:id/scenes', (req, res) => {
         // 只改描述不动图时保留快照，让「描述改过→图过时」的判定继续成立
         const imgChanged = String(imgUrl || '').split('?')[0] !== String(target.image_url || '').split('?')[0]
         execute(
-          'UPDATE scenes SET scene_number = ?, title = ?, summary = ?, image_url = ?, prop_names = ?, title_en = ?, summary_en = ?, lighting_en = ?, location = ?, gen_context = CASE WHEN ? THEN \'\' ELSE gen_context END WHERE id = ?',
-          [i + 1, name, finalSummary, imgUrl, JSON.stringify(propNames), finalTitleEn, finalSummaryEn, finalLightingEn, finalLocation, imgChanged ? 1 : 0, target.id]
+          'UPDATE scenes SET scene_number = ?, title = ?, summary = ?, image_url = ?, prop_names = ?, title_en = ?, summary_en = ?, lighting_en = ?, location = ?, space_type = ?, space_evidence = ?, gen_context = CASE WHEN ? THEN \'\' ELSE gen_context END WHERE id = ?',
+          [i + 1, name, finalSummary, imgUrl, JSON.stringify(propNames), finalTitleEn, finalSummaryEn, finalLightingEn, finalLocation, finalSpaceType, finalSpaceEvidence, imgChanged ? 1 : 0, target.id]
         )
         finalSceneId = target.id
       } else {
         inserted++
         const ins = execute(
-          'INSERT INTO scenes (episode_id, scene_number, title, summary, image_url, prop_names, title_en, summary_en, lighting_en, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [episodeId, i + 1, name, finalSummary, imgUrl, JSON.stringify(propNames), finalTitleEn, finalSummaryEn, finalLightingEn, finalLocation]
+          'INSERT INTO scenes (episode_id, scene_number, title, summary, image_url, prop_names, title_en, summary_en, lighting_en, location, space_type, space_evidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [episodeId, i + 1, name, finalSummary, imgUrl, JSON.stringify(propNames), finalTitleEn, finalSummaryEn, finalLightingEn, finalLocation, finalSpaceType, finalSpaceEvidence]
         )
         finalSceneId = Number(ins.lastInsertRowid) || null
       }
-      lightingQueue.push({
-        name,
-        sceneId: finalSceneId,
-        sceneNumber: i + 1,
-        summary: finalSummary,
-        lightingEn: finalLightingEn,
-      })
     }
 
     const deletedRows = oldRowsTx.filter((r) => !seenOldIds.has(r.id))
@@ -692,9 +734,6 @@ router.post('/:id/scenes', (req, res) => {
 
   const result = query('SELECT * FROM scenes WHERE episode_id = ? ORDER BY scene_number', [episodeId])
 
-  runLightingChecks(lightingQueue, episodeId, recordAlert)
-    .catch((e) => console.warn('[lightingCheck] 后置校验整体异常（已忽略）:', e.message))
-
   res.json(result)
 })
 
@@ -710,36 +749,53 @@ router.post('/:id/extract-info', (req, res) => {
 })
 
 router.post('/:id/storyboard', (req, res) => {
-  const { storyboardScenes = [], storyboard_confirmed, storyboard_source } = req.body
+  const { storyboardScenes: incomingStoryboardScenes = [], storyboard_confirmed, storyboard_source } = req.body
+  const defaultFieldSource = resolveStoryboardSource(storyboard_source)
+  const storyboardScenes = normalizeStoryboardDocument({ scenes: incomingStoryboardScenes, source: defaultFieldSource }).scenes
   if (!Array.isArray(storyboardScenes) || storyboardScenes.length === 0) {
     return res.status(400).json({ error: 'storyboardScenes 不能为空' })
   }
 
-  // 保存前 QC 终检（2026-09-24 事故修复：带病数据无任何拦截直接入库——30 条警告含 6 条
-  // 位置瞬移照存不误，出片翻车后才回头查因）。默认只告警不阻断（console.warn），
-  // SAVE_QC_BLOCK_ON_ERROR=1 升级为 409 硬阻断。QC 检查自身失败不阻断保存。
-  try {
-    const episodeId = req.params.id
-    const qcAssets = {
-      characters: query('SELECT name FROM characters WHERE episode_id = ?', [episodeId]).map((r) => r.name),
-      scenes: query('SELECT title FROM scenes WHERE episode_id = ?', [episodeId]).map((r) => r.title),
-      props: query('SELECT name FROM props WHERE episode_id = ?', [episodeId]).map((r) => r.name),
+  const episode = queryOne('SELECT id FROM episodes WHERE id = ?', [req.params.id])
+  if (!episode) return res.status(404).json({ error: '集不存在' })
+
+  const episodeCharacters = query('SELECT name, image_url FROM characters WHERE episode_id = ?', [req.params.id])
+  const episodeScenes = query('SELECT scene_number, title, space_type, space_evidence, image_url FROM scenes WHERE episode_id = ?', [req.params.id])
+  const episodeProps = query('SELECT name, image_url FROM props WHERE episode_id = ?', [req.params.id])
+  const episodeAssetNames = {
+    characters: episodeCharacters.map((r) => r.name),
+    scenes: episodeScenes.map((r) => r.title),
+    props: episodeProps.map((r) => r.name),
+  }
+  const sceneSpaceByNumber = new Map(episodeScenes.map((row) => [Number(row.scene_number), row]))
+  for (const [sceneIndex, scene] of storyboardScenes.entries()) {
+    const sceneNumber = Number(scene.sceneNumber ?? scene.scene_number ?? sceneIndex + 1)
+    const sceneContext = sceneSpaceByNumber.get(sceneNumber) || episodeScenes.find((row) => {
+      const title = String(scene.title || '').trim()
+      const candidate = String(row.title || '').trim()
+      return title && candidate && (title === candidate || title.includes(candidate) || candidate.includes(title))
+    })
+    for (const shot of scene.shots || []) {
+      backfillShotAssets(shot, episodeAssetNames)
+      backfillSceneByTitle(shot, scene.title, episodeAssetNames.scenes)
+      backfillShotSpaceFromScene(shot, sceneContext)
     }
-    const qc = validateStoryboard({ scenes: storyboardScenes }, qcAssets, {})
-    const qcErrors = (qc.errors?.length || 0) + (qc.codedErrors?.length || 0)
-    if (qcErrors > 0) {
-      const preview = [...(qc.errors || []), ...(qc.codedErrors || [])]
-        .slice(0, 3)
-        .map((e) => String(e?.message || e).slice(0, 90))
-        .join('；')
-      const message = `[storyboard-save] 分镜入库 QC 硬错误 ${qcErrors} 条：${preview}`
-      if (config.storyboard?.saveQcBlockOnError) {
-        return res.status(409).json({ error: `分镜 QC 未过（${qcErrors} 条硬错误，SAVE_QC_BLOCK_ON_ERROR 已开启阻断）：${preview}` })
-      }
-      console.warn(message + '（未阻断：SAVE_QC_BLOCK_ON_ERROR 未开启）')
-    }
-  } catch (qcErr) {
-    console.warn('[storyboard-save] 保存前 QC 检查执行失败（不阻断保存）:', qcErr.message)
+  }
+  const validation = validateStoryboardImport({ scenes: storyboardScenes }, {
+    characters: episodeCharacters,
+    scenes: episodeScenes,
+    props: episodeProps,
+    requireReferenceImages: true,
+    requireStyleDeclaration: true,
+  })
+  const wantsConfirmed = storyboard_confirmed === true || storyboard_confirmed === 1 || storyboard_confirmed === '1' || storyboard_confirmed === 'true'
+  if (wantsConfirmed && !validation.ok) {
+    return res.status(422).json({
+      error: formatStoryboardValidationError(validation),
+      code: 'STORYBOARD_CONTRACT_INVALID',
+      errors: validation.errors,
+      warnings: validation.warnings,
+    })
   }
 
   transaction(() => {
@@ -748,7 +804,7 @@ router.post('/:id/storyboard', (req, res) => {
     const existingScenes = query('SELECT id, scene_number FROM storyboard_scenes WHERE episode_id = ?', [episodeId])
     const sceneIdByNum = new Map(existingScenes.map((s) => [s.scene_number, s.id]))
     const existingShots = query(
-      `SELECT s.id, s.storyboard_scene_id, s.shot_number, s.description
+      `SELECT s.id, s.shot_uid, s.storyboard_scene_id, s.shot_number, s.description
        FROM shots s JOIN storyboard_scenes ss ON s.storyboard_scene_id = ss.id
        WHERE ss.episode_id = ?
        ORDER BY ss.scene_number, s.start_time, s.id`,
@@ -756,11 +812,12 @@ router.post('/:id/storyboard', (req, res) => {
     )
 
     const episodeAssetNames = {
-      characters: query('SELECT name FROM characters WHERE episode_id = ?', [episodeId]).map((r) => r.name),
-      scenes: query('SELECT title FROM scenes WHERE episode_id = ?', [episodeId]).map((r) => r.title),
-      props: query('SELECT name FROM props WHERE episode_id = ?', [episodeId]).map((r) => r.name),
+      characters: episodeCharacters.map((r) => r.name),
+      scenes: episodeScenes.map((r) => r.title),
+      props: episodeProps.map((r) => r.name),
     }
     const shotIdByKey = new Map(existingShots.map((s) => [`${s.storyboard_scene_id}:${s.shot_number}`, s.id]))
+    const shotIdByUid = new Map(existingShots.filter((s) => s.shot_uid).map((s) => [s.shot_uid, s.id]))
     // 兜底定位（镜号重排/本地镜号漂移时，避免把既有镜头误判成「新增+删除」而重建，令版本链断裂）
     // 分两级，均要求既有镜头尚未被认领、且同场次：
     //   1) 描述精确匹配 —— 内容未改动的镜头稳定命中（重排场景下最可靠）
@@ -771,7 +828,6 @@ router.post('/:id/storyboard', (req, res) => {
 
     const keepSceneIds = new Set()
     const keepShotIds = new Set()
-
     for (let si = 0; si < storyboardScenes.length; si++) {
       const s = storyboardScenes[si]
       const sceneNumber = si + 1
@@ -792,7 +848,9 @@ router.post('/:id/storyboard', (req, res) => {
         const shot = s.shots[shi]
         const shotNumber = shot.shotNumber || shot.shot_number || `${sceneNumber}-${shi + 1}`
         const desc = String(shot.description || '').trim()
-        let shotId = shotIdByKey.get(`${sceneId}:${shotNumber}`)
+        const incomingShotUid = shot.shotUid || shot.shot_uid || ''
+        let shotId = incomingShotUid ? shotIdByUid.get(incomingShotUid) : null
+        if (shotId == null) shotId = shotIdByKey.get(`${sceneId}:${shotNumber}`)
         // 内容优先：镜号命中行的描述与本次提交不符、而同场次另有未认领镜头描述精确匹配时，
         // 说明镜号不可信（重排/漂移），改认内容一致的那个，避免把既有镜头覆盖成别的镜
         if (shotId != null && desc) {
@@ -829,8 +887,10 @@ router.post('/:id/storyboard', (req, res) => {
         }
         if (frozenByLock) continue
 
+        // 确定性回填已在校验前完成；这里再次调用仅覆盖锁定/并发场景下的输入保护。
         backfillShotAssets(shot, episodeAssetNames)
         backfillSceneByTitle(shot, sceneTitle, episodeAssetNames.scenes)
+        backfillShotSpaceFromScene(shot, sceneSpaceByNumber.get(sceneNumber))
 
         // is_combat：显式布尔 → 1/0；显式 0/1 → 原值；否则 INSERT 走 classifyShotCombat 兜底、
         // UPDATE 传 null（配合 COALESCE 保留库中旧值）。与 /full 路径（generate-script.js）判定口径一致。
@@ -840,7 +900,7 @@ router.post('/:id/storyboard', (req, res) => {
               ? shot.is_combat
               : (shotId == null ? (classifyShotCombat(shot) ? 1 : 0) : null))
         const fields = [
-          shot.duration || 8,
+          shot.duration || config.storyboard?.defaultDuration || 8,
           shot.description || '',
           JSON.stringify(shot.characters || []),
           JSON.stringify(shot.sceneAssets || []),
@@ -872,15 +932,27 @@ router.post('/:id/storyboard', (req, res) => {
           shot.infoPoints?.length ? JSON.stringify(shot.infoPoints)
             : (shot.info_points?.length ? JSON.stringify(shot.info_points) : null),
           shot.worldStateOut || shot.world_state_out || null,
+          shot.worldStateOutEn || shot.world_state_out_en || null,
         ]
+        const hasExplicitFieldSources = shot.fieldSources && Object.keys(shot.fieldSources).length > 0
+        const incomingFieldSources = hasExplicitFieldSources
+          ? mergeFieldSources({}, shot.fieldSources)
+          : buildFieldSourcesForInput(shot, defaultFieldSource)
+        const existingFieldSources = shotId == null
+          ? {}
+          : queryOne('SELECT field_sources_json FROM shots WHERE id = ?', [shotId])?.field_sources_json
+        const fieldSourcesValue = JSON.stringify(mergeFieldSources(existingFieldSources, incomingFieldSources))
 
         if (shotId == null) {
           const r = execute(
-            `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, storyboard_url, frame_url, blocking_url, video_url, video_generated, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out, qc_status, qc_report)
+            `INSERT INTO shots (storyboard_scene_id, shot_number, duration, description, characters, scene_assets, prop_assets, storyboard_url, frame_url, blocking_url, video_url, video_generated, shot_type, start_time, end_time, action_note, sound_effects, dialogue, camera_movement, overall_soundscape, non_diegetic_music, integrated_multimodal_description, final_frame, is_combat, camera_angle, purpose, goal, emotion_tone, info_points, world_state_out, world_state_out_en, field_sources_json)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [sceneId, shotNumber, ...fields, camAngle || '', ...narrativeFields, shot.qcStatus || '', shot.qcReport || '']
+            [sceneId, shotNumber, ...fields, camAngle || '', ...narrativeFields, fieldSourcesValue]
           )
-          keepShotIds.add(r.lastInsertRowid)
+          const newShotId = r.lastInsertRowid
+          execute('UPDATE shots SET shot_uid = ? WHERE id = ?', [ensureShotUid(incomingShotUid), newShotId])
+          applyShotMetadataUpdate(newShotId, shot)
+          keepShotIds.add(newShotId)
         } else {
           const planValue = shot.blockingPlan ? JSON.stringify(shot.blockingPlan) : ''
           const frameUrl2Value = shot.frameUrl2 !== undefined ? shot.frameUrl2 : ''
@@ -888,9 +960,10 @@ router.post('/:id/storyboard', (req, res) => {
           const keyframeUrlValue = shot.keyframeUrl !== undefined ? shot.keyframeUrl : ''
           withShotVersionSnapshot(shotId, episodeId, 'save_overwrite', 'save', () => {
             execute(
-              `UPDATE shots SET duration=?, description=?, characters=?, scene_assets=?, prop_assets=?, storyboard_url=?, frame_url=?, blocking_url=?, video_url=?, video_generated=?, shot_type=?, start_time=?, end_time=?, action_note=?, sound_effects=?, dialogue=?, camera_movement=?, overall_soundscape=COALESCE(NULLIF(?, ''), overall_soundscape), non_diegetic_music=COALESCE(NULLIF(?, ''), non_diegetic_music), integrated_multimodal_description=?, final_frame=?, is_combat=COALESCE(?, is_combat), camera_angle=COALESCE(?, camera_angle), purpose=COALESCE(?, purpose), goal=COALESCE(?, goal), emotion_tone=COALESCE(?, emotion_tone), info_points=COALESCE(?, info_points), world_state_out=COALESCE(?, world_state_out), blocking_plan=?, frame_url2=?, continuity_url=?, keyframe_url=? WHERE id=?`,
-              [...fields, camAngle, ...narrativeFields, planValue, frameUrl2Value, continuityUrlValue, keyframeUrlValue, shotId]
+              `UPDATE shots SET duration=?, description=?, characters=?, scene_assets=?, prop_assets=?, storyboard_url=?, frame_url=?, blocking_url=?, video_url=?, video_generated=?, shot_type=?, start_time=?, end_time=?, action_note=?, sound_effects=?, dialogue=?, camera_movement=?, overall_soundscape=COALESCE(NULLIF(?, ''), overall_soundscape), non_diegetic_music=COALESCE(NULLIF(?, ''), non_diegetic_music), integrated_multimodal_description=?, final_frame=?, is_combat=COALESCE(?, is_combat), camera_angle=COALESCE(?, camera_angle), purpose=COALESCE(?, purpose), goal=COALESCE(?, goal), emotion_tone=COALESCE(?, emotion_tone), info_points=COALESCE(?, info_points), world_state_out=COALESCE(?, world_state_out), world_state_out_en=COALESCE(?, world_state_out_en), blocking_plan=?, frame_url2=?, continuity_url=?, keyframe_url=?, field_sources_json=? WHERE id=?`,
+              [...fields, camAngle, ...narrativeFields, planValue, frameUrl2Value, continuityUrlValue, keyframeUrlValue, fieldSourcesValue, shotId]
             )
+            applyShotMetadataUpdate(shotId, shot)
           })
           keepShotIds.add(shotId)
         }
@@ -925,6 +998,7 @@ router.post('/:id/storyboard', (req, res) => {
       prunedSceneIds.push(s)
       prunedSceneShotIds.push(...sceneShotIds)
     }
+    cancelJobsForShots([...prunedShotIds, ...prunedSceneShotIds])
     clearAlertsByRef('scene', prunedSceneIds)
     clearAlertsByRef('shot', prunedSceneShotIds)
     execute(
@@ -962,11 +1036,11 @@ router.post('/:id/storyboard', (req, res) => {
   }
   const normalizedSource = storyboard_source === 'imported' ? 'imported' : 'generated'
   execute('UPDATE episodes SET storyboard_source = ? WHERE id = ?', [normalizedSource, req.params.id])
-  if (storyboard_confirmed !== undefined) {
-    execute('UPDATE episodes SET storyboard_confirmed = ? WHERE id = ?', [storyboard_confirmed ? 1 : 0, req.params.id])
-  }
-  persistQcToShots(req.params.id)
-  res.json({ success: true })
+  const confirmed = storyboard_confirmed === true || storyboard_confirmed === 1 || storyboard_confirmed === '1' || storyboard_confirmed === 'true'
+  // 草稿始终保持未确认；只有通过完整契约校验的提交才能进入确认态。
+  execute('UPDATE episodes SET storyboard_confirmed = ? WHERE id = ?', [confirmed && validation.ok ? 1 : 0, req.params.id])
+  scheduleEnglishSync(req.params.id)
+  res.json({ success: true, validation, storyboard_confirmed: confirmed && validation.ok })
 })
 
 router.delete('/:id/storyboard', (req, res) => {
@@ -982,13 +1056,13 @@ router.delete('/:id/storyboard', (req, res) => {
       for (const id of droppedShotIds) forceSnapshotShot(id, episodeId, 'storyboard_reset', 'save')
       if (droppedShotIds.length) console.log(`[storyboard-reset] 删除前已快照 ${droppedShotIds.length} 个镜头进 shot_versions`)
       for (const id of droppedShotIds) execute('DELETE FROM shots WHERE id = ?', [id])
+      cancelJobsForShots(droppedShotIds)
       clearAlertsByRef('shot', droppedShotIds)
       const droppedSceneIds = query('SELECT id FROM storyboard_scenes WHERE episode_id = ?', [episodeId]).map((r) => r.id)
       execute('DELETE FROM storyboard_scenes WHERE episode_id = ?', [episodeId])
       clearAlertsByRef('scene', droppedSceneIds)
       execute('UPDATE episodes SET storyboard_script_fp = NULL, storyboard_confirmed = 0, storyboard_source = ? WHERE id = ?', ['generated', episodeId])
     })
-    clearQcIgnores(episodeId)
     res.json({ success: true })
   } catch (e) {
     console.error('[清空分镜失败]', e)
@@ -1010,6 +1084,7 @@ router.put('/:id/shots/:shotId', (req, res) => {
     emotion_tone, emotionTone,
     info_points, infoPoints,
     world_state_out, worldStateOut,
+    world_state_out_en, worldStateOutEn,
   } = req.body
   console.log('[/episodes/:id/shots/:shotId] update', { episodeId: req.params.id, shotId: req.params.shotId, hasStoryboardUrl: !!storyboard_url, hasFrameUrl: !!frame_url, hasFrameUrl2: frame_url2 !== undefined, hasBlockingUrl: !!blocking_url, hasBlockingPlan: blocking_plan !== undefined })
 
@@ -1052,7 +1127,14 @@ router.put('/:id/shots/:shotId', (req, res) => {
     emotion_tone ?? emotionTone ?? null,
     infoPointsValue,
     world_state_out ?? worldStateOut ?? null,
+    world_state_out_en ?? worldStateOutEn ?? null,
   ]
+  const manualFieldSources = JSON.stringify(mergeFieldSources(
+    queryOne('SELECT field_sources_json FROM shots WHERE id = ?', [req.params.shotId])?.field_sources_json,
+    buildFieldSourcesForInput(req.body, FIELD_SOURCE.MANUAL),
+  ))
+  // 契约五件套已退役（2026-10-01）：不再写入。英文新鲜度由 english_source_fp 指纹管理，
+  // 编辑后的英文同步由 scheduleEnglishSync 负责。
   withShotVersionSnapshot(req.params.shotId, req.params.id, 'manual_edit', 'manual', () => {
     execute(
       `UPDATE shots SET
@@ -1084,8 +1166,10 @@ router.put('/:id/shots/:shotId', (req, res) => {
          goal = COALESCE(?, goal),
          emotion_tone = COALESCE(?, emotion_tone),
          info_points = COALESCE(?, info_points),
-         world_state_out = COALESCE(?, world_state_out)
-       WHERE id = ?`,
+        world_state_out = COALESCE(?, world_state_out),
+        world_state_out_en = COALESCE(?, world_state_out_en),
+        field_sources_json = ?
+      WHERE id = ?`,
       [storyboard_url, frame_url, frame_url2, blocking_url, video_url, video_generated, description, duration,
         shot_type, start_time, end_time, action_note, sound_effects, dialogue,
         camera_movement, overall_soundscape, non_diegetic_music,
@@ -1094,9 +1178,11 @@ router.put('/:id/shots/:shotId', (req, res) => {
         is_combat !== undefined ? (is_combat ? 1 : 0) : null,
         locked !== undefined ? (locked ? 1 : 0) : null,
         (camera_angle !== undefined ? camera_angle : cameraAngle) || null,
-        ...narrativeValues,
-        req.params.shotId]
+        ...narrativeValues, manualFieldSources,
+        req.params.shotId,
+      ]
     )
+    applyShotMetadataUpdate(req.params.shotId, req.body)
   })
   // 时轴顺延（#4）：duration/start_time/end_time 任一被编辑时，重算本镜 end_time 并平移后续镜
   const timelineTouched = duration !== undefined || start_time !== undefined || end_time !== undefined
@@ -1105,9 +1191,38 @@ router.put('/:id/shots/:shotId', (req, res) => {
     if (shiftedCount) console.log(`[PUT shot] 时轴顺延：后续 ${shiftedCount} 镜已平移`)
   }
   refreshWorldStateIn(req.params.id)
-  persistQcToShots(req.params.id)
+  scheduleEnglishSync(req.params.id)
   const shot = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
-  res.json(shot)
+  // 单镜编辑可能破坏整集契约；合法编辑保留确认态，失败则自动撤销，阻止旧确认状态绕过 H3 门禁。
+  const episodeRows = query(
+    `SELECT s.*, ss.scene_number, ss.title AS scene_title
+       FROM shots s JOIN storyboard_scenes ss ON ss.id = s.storyboard_scene_id
+      WHERE ss.episode_id = ? ORDER BY ss.scene_number, s.start_time, s.id`,
+    [req.params.id]
+  )
+  const editValidation = validateStoryboardImport(
+    { scenes: (() => {
+      const byScene = new Map()
+      for (const row of episodeRows) {
+        const key = Number(row.scene_number)
+        if (!byScene.has(key)) byScene.set(key, { sceneNumber: key, title: row.scene_title, shots: [] })
+        byScene.get(key).shots.push(row)
+      }
+      return [...byScene.values()]
+    })() },
+    {
+      characters: query('SELECT name, image_url FROM characters WHERE episode_id = ?', [req.params.id]),
+      scenes: query('SELECT title, image_url FROM scenes WHERE episode_id = ?', [req.params.id]),
+      props: query('SELECT name, image_url FROM props WHERE episode_id = ?', [req.params.id]),
+      requireReferenceImages: true,
+      requireStyleDeclaration: true,
+    }
+  )
+  const currentEpisode = queryOne('SELECT storyboard_confirmed FROM episodes WHERE id = ?', [req.params.id])
+  if (currentEpisode?.storyboard_confirmed && !editValidation.ok) {
+    execute('UPDATE episodes SET storyboard_confirmed = 0 WHERE id = ?', [req.params.id])
+  }
+  res.json({ ...shot, storyboardConfirmed: !!(currentEpisode?.storyboard_confirmed && editValidation.ok), validation: editValidation })
 })
 
 // ---- 单镜重生成 + 版本链（#2）----
@@ -1140,7 +1255,7 @@ function getEpisodeAssetsForAi(episodeId) {
     [episodeId]
   )
   const scenes = query(
-    'SELECT title, title_en, summary, summary_en, image_url, prop_names, lighting_en FROM scenes WHERE episode_id = ?',
+    'SELECT title, title_en, summary, summary_en, image_url, prop_names, lighting_en, space_type FROM scenes WHERE episode_id = ?',
     [episodeId]
   ).map((s) => {
     let propNames = []
@@ -1208,6 +1323,7 @@ router.post('/:id/shots/:shotId/regenerate', async (req, res) => {
       emotionTone: row.emotion_tone,
       infoPoints: parseJsonArraySafe(row.info_points),
       worldStateOut: row.world_state_out,
+      worldStateOutEn: row.world_state_out_en,
     },
     prev,
     next,
@@ -1220,7 +1336,6 @@ router.post('/:id/shots/:shotId/regenerate', async (req, res) => {
   let regen
   try {
     regen = await regenerateShot(ctx, assets, project?.art_style || config.defaultArtStyle, {
-      directorNotes: episode.director_notes || '',
       styleCategory: project?.style_category || '',
     })
   } catch (e) {
@@ -1239,6 +1354,11 @@ router.post('/:id/shots/:shotId/regenerate', async (req, res) => {
       }))
     : null
 
+  const aiFieldSources = JSON.stringify(mergeFieldSources(
+    row.field_sources_json,
+    buildFieldSourcesForInput(shot, FIELD_SOURCE.AI),
+  ))
+
   withShotVersionSnapshot(req.params.shotId, req.params.id, 'regenerate', 'ai', () => {
     execute(
       `UPDATE shots SET
@@ -1251,9 +1371,12 @@ router.post('/:id/shots/:shotId/regenerate', async (req, res) => {
          purpose = COALESCE(?, purpose), goal = COALESCE(?, goal),
          emotion_tone = COALESCE(?, emotion_tone), info_points = COALESCE(?, info_points),
          world_state_out = COALESCE(?, world_state_out),
+         world_state_out_en = COALESCE(?, world_state_out_en),
          dialogue = ?, characters = ?, scene_assets = ?, prop_assets = ?,
          frame_url = '', frame_url2 = '', continuity_url = '', keyframe_url = '',
-         blocking_url = '', blocking_plan = NULL, video_url = '', video_generated = 0, video_prompt_override = ''
+         blocking_url = '', blocking_plan = NULL, video_url = '', video_generated = 0, video_prompt_override = '',
+         compiled_prompt = '', prompt_provider_id = '', prompt_compiled_at = NULL,
+         field_sources_json = ?
        WHERE id = ?`,
       [
         shot.description || '', shot.shotType || '', shot.cameraMovement || '',
@@ -1266,14 +1389,16 @@ router.post('/:id/shots/:shotId/regenerate', async (req, res) => {
         shot.emotionTone || null,
         shot.infoPoints?.length ? JSON.stringify(shot.infoPoints) : null,
         shot.worldStateOut || null,
+        shot.worldStateOutEn || null,
         dialogueList?.length ? serializeDialogue(dialogueList) : null,
-        JSON.stringify(shot.characters || []), JSON.stringify(shot.sceneAssets || []), JSON.stringify(shot.propAssets || []),
+        JSON.stringify(shot.characters || []), JSON.stringify(shot.sceneAssets || []), JSON.stringify(shot.propAssets || []), aiFieldSources,
         req.params.shotId,
       ]
     )
+    applyShotMetadataUpdate(req.params.shotId, shot)
   })
   refreshWorldStateIn(req.params.id)
-  persistQcToShots(req.params.id)
+  scheduleEnglishSync(req.params.id)
   const updated = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
   res.json({ success: true, shot: updated })
 })
@@ -1318,12 +1443,16 @@ router.get('/:id/shots/:shotId/versions', (req, res) => {
 
 // 版本内容字段清单：回退时恢复"内容 + 衍生产出物"，不恢复时轴位置/锁定/结构字段
 const SHOT_RESTORE_CONTENT_COLS = [
-  'description', 'shot_type', 'camera_movement', 'camera_angle', 'action_note', 'sound_effects',
+  'description', 'shot_type', 'camera_movement', 'camera_angle', 'camera_elevation', 'action_note', 'sound_effects',
   'overall_soundscape', 'non_diegetic_music', 'integrated_multimodal_description', 'final_frame',
-  'is_combat', 'purpose', 'goal', 'emotion_tone', 'info_points', 'world_state_out',
+  'is_combat', 'purpose', 'goal', 'emotion_tone', 'info_points', 'world_state_out', 'world_state_out_en',
   'dialogue', 'characters', 'scene_assets', 'prop_assets',
   'frame_url', 'frame_url2', 'continuity_url', 'keyframe_url', 'blocking_url', 'blocking_plan',
   'video_url', 'video_generated', 'video_prompt_override',
+  'beat_id', 'coverage_id', 'relation_type', 'related_shots_json',
+  'composition', 'lens', 'depth_of_field', 'transition_in', 'transition_out', 'color_lighting',
+  'space_type', 'space_evidence',
+  'prompt_provider_id', 'compiled_prompt', 'prompt_compiled_at',
 ]
 
 // 回退到指定版本快照：先快照当前值（回退本身可撤销），再用快照覆盖内容与产出物
@@ -1353,34 +1482,42 @@ router.post('/:id/shots/:shotId/versions/:versionId/restore', (req, res) => {
     return res.status(422).json({ error: '版本快照数据损坏，无法回退' })
   }
 
+  let restoredDuration = null
   withShotVersionSnapshot(req.params.shotId, req.params.id, 'version_restore', 'manual', () => {
     const sets = SHOT_RESTORE_CONTENT_COLS.map((c) => `${c} = ?`).join(', ')
     const values = SHOT_RESTORE_CONTENT_COLS.map((c) => snapshot[c] ?? null)
+    const restoredFieldSources = JSON.stringify(mergeFieldSources(
+      current.field_sources_json,
+      buildFieldSourcesForInput(snapshot, FIELD_SOURCE.VERSION_RESTORE),
+    ))
     // duration 属于内容属性：恢复并同步本镜 end_time（后续镜时轴由顺延逻辑/质检处理）
-    const restoredDuration = Number.isFinite(Number(snapshot.duration)) ? Number(snapshot.duration) : null
+    restoredDuration = Number.isFinite(Number(snapshot.duration)) ? Number(snapshot.duration) : null
     const setClause = restoredDuration != null
-      ? `${sets}, duration = ?, end_time = ? + start_time`
-      : sets
-    const tail = restoredDuration != null ? [restoredDuration, restoredDuration] : []
+      ? `${sets}, field_sources_json = ?, duration = ?, end_time = ? + start_time`
+      : `${sets}, field_sources_json = ?`
+    const tail = restoredDuration != null
+      ? [restoredFieldSources, restoredDuration, restoredDuration]
+      : [restoredFieldSources]
     execute(
       `UPDATE shots SET ${setClause} WHERE id = ?`,
       [...values, ...tail, req.params.shotId]
     )
   })
+  if (restoredDuration != null && Number(restoredDuration) !== Number(current.duration)) {
+    shiftFollowingShots(req.params.id, req.params.shotId, current.end_time)
+  }
   refreshWorldStateIn(req.params.id)
-  persistQcToShots(req.params.id)
   const updated = queryOne('SELECT * FROM shots WHERE id = ?', [req.params.shotId])
   res.json({ success: true, shot: updated })
 })
-
 
 function moveUploadsToTrash(urls, trashDir) {
   const root = path.resolve(uploadsDir)
   let moved = 0
   for (const u of urls || []) {
-    if (!u || !String(u).startsWith('/uploads/')) continue
+    if (!u || !String(u).startsWith(UPLOADS_URL_SLASH)) continue
     try {
-      const rel = decodeURIComponent(String(u).split(/[?#]/)[0]).replace(/^\/uploads\//, '')
+      const rel = decodeURIComponent(String(u).split(/[?#]/)[0]).replace(UPLOADS_PREFIX_RE, '')
       const abs = path.resolve(root, rel)
       if (abs === root || !abs.startsWith(root + path.sep)) continue
       if (!fs.existsSync(abs)) continue
@@ -1397,7 +1534,6 @@ function moveUploadsToTrash(urls, trashDir) {
   }
   return moved
 }
-
 
 function deleteShotVideos(episodeId, rawShotIds) {
   const skipped = []
@@ -1472,7 +1608,6 @@ router.post('/:episodeId/shots/video-delete', (req, res) => {
   }
 })
 
-
 router.post('/:id/characters/:characterId/audio', (req, res) => {
   try {
     const { audioBase64 } = req.body
@@ -1492,7 +1627,7 @@ router.post('/:id/characters/:characterId/audio', (req, res) => {
 
     fs.writeFileSync(filepath, Buffer.from(base64Data, 'base64'))
 
-    const audioUrl = `/uploads/${filename}`
+    const audioUrl = `${uploadsUrl(filename)}`
 
     const target = queryOne('SELECT * FROM characters WHERE id = ?', [req.params.characterId])
     if (target?.project_character_id) {

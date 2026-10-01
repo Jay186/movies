@@ -1,10 +1,9 @@
 import path from 'node:path'
+import { UPLOADS_URL_SLASH, uploadsUrl, uploadsDir } from './paths.js'
 import fs from 'node:fs'
 import { query, execute } from './db.js'
 import { insecureDownload, isPlausibleMp4, queryTaskOutput } from './ai/runninghub.js'
 import { recordAlert } from './ai/alerts.js'
-import { uploadsDir } from './paths.js'
-
 
 const WINDOW_MS = 50 * 60 * 1000   
 const INTERVAL_MS = 5 * 60 * 1000  
@@ -108,8 +107,8 @@ function salvageShotRow(row, buf) {
   const filename = `shot_${row.shot_id}_salvage_${Date.now()}.mp4`
   fs.mkdirSync(uploadsDir, { recursive: true })
   fs.writeFileSync(path.join(uploadsDir, filename), buf)
-  const res = execute(`UPDATE shots SET video_url = ?, video_generated = 1 WHERE id = ? AND (video_url IS NULL OR video_url NOT LIKE '/uploads/%')`,
-    [`/uploads/${filename}`, row.shot_id])
+  const res = execute(`UPDATE shots SET video_url = ?, video_generated = 1 WHERE id = ? AND (video_url IS NULL OR video_url NOT LIKE '${UPLOADS_URL_SLASH}%')`,
+    [`${uploadsUrl(filename)}`, row.shot_id])
   if (res.changes > 0) {
     execute(`UPDATE salvage_queue SET status = 'done', last_attempt_at = ? WHERE id = ?`, [new Date().toISOString(), row.id])
     recordAlert({ episodeId: row.episode_id, shotId: row.shot_id, shotNumber: row.shot_number, source: 'salvage', level: 'info',

@@ -1,10 +1,13 @@
+// RunningHub 分镜网格（四宫格）出图：workflow_id 走「AI 模型配置」的视频通道（热生效），
+// 节点映射 nodeMap 属代码资产，保持读 config。
 import { config } from '../config.js'
+import { resolveWorkflowId } from '../modelConfig.js'
 import { runWorkflow, uploadImageV2 } from './runninghub.js'
 
 export async function generateShotGridApp({ prompt, refs = [], usageContext = {}, aspectRatio: aspectRatioOpt } = {}) {
-  const workflowId = config.runninghub.workflows.shotGridApp
+  const workflowId = resolveWorkflowId('shotGridApp')
   const mapping = config.runninghub.nodeMap.shotGridApp
-  if (!workflowId) return { success: false, error: 'RunningHub 四宫格 AI 应用（shotGridApp）未配置 id' }
+  if (!workflowId) return { success: false, error: '分镜网格出图未配置：请在「AI 模型配置」的「视频通道」里添加并启用 shotGridApp 工作流' }
   if (!mapping) return { success: false, error: 'RunningHub 四宫格 AI 应用（shotGridApp）未配置节点映射' }
 
   const aspectRatio = aspectRatioOpt || config.runninghub.shotGrid?.aspectRatio || '16:9'

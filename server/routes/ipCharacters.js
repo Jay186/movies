@@ -1,9 +1,10 @@
 import { Router } from 'express'
+import { uploadsUrl, uploadsDir } from '../paths.js'
 import fs from 'fs'
 import path from 'path'
 import { query } from '../db.js'
 import { removeLocalUploads, filterUnreferencedUploadUrls } from '../ai/shared.js'
-import { uploadsDir } from '../paths.js'
+
 import {
   listIpCharacters,
   getIpCharacter,
@@ -85,7 +86,7 @@ router.post('/:id/audio', (req, res) => {
 
     const filename = `ip_audio_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`
     fs.writeFileSync(path.join(uploadsDir, filename), Buffer.from(base64Data, 'base64'))
-    updateIpCharacter(id, { audio_url: `/uploads/${filename}`, audioUrl: `/uploads/${filename}` })
+    updateIpCharacter(id, { audio_url: `${uploadsUrl(filename)}`, audioUrl: `${uploadsUrl(filename)}` })
     res.json(getIpCharacter(id))
   } catch (e) {
     console.error('[IP AUDIO UPLOAD ERROR]', e)

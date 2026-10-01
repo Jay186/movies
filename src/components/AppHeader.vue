@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/project'
 import EpisodeSwitcher from './EpisodeSwitcher.vue'
+import AiModelConfigDrawer from './AiModelConfigDrawer.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -10,6 +11,7 @@ const store = useProjectStore()
 const showGuide = ref(false)
 const guideMessage = ref('')
 const guideTarget = ref('')
+const showModelConfig = ref(false)
 
 const steps = [
   { key: 'script', label: '剧本', path: '/script' },
@@ -149,10 +151,25 @@ function confirmGuide() {
     </nav>
 
     <div class="flex shrink-0 items-center gap-3">
+      <button
+        class="relative flex h-8 w-8 items-center justify-center rounded-btn transition"
+        :class="showModelConfig ? 'bg-bg-hover text-accent' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'"
+        title="AI 模型配置"
+        aria-label="AI 模型配置"
+        @click="showModelConfig = true"
+      >
+        <span class="absolute right-1 top-1 h-[7px] w-[7px] animate-pulse rounded-full bg-accent ring-2 ring-bg-primary" />
+        <svg class="h-[17px] w-[17px]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      </button>
       <div class="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-bg-hover text-[12px] text-text-secondary">
         我
       </div>
     </div>
+
+    <AiModelConfigDrawer :open="showModelConfig" @close="showModelConfig = false" />
 
     <Teleport to="body">
       <div

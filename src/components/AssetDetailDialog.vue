@@ -46,6 +46,23 @@
           <div class="mt-1.5 text-[11px] text-text-muted">以当前形象为底图，形象不变只改指令部分；新版本自动入历史，描述自动同步</div>
         </div>
 
+        <div v-if="genRecords.length" class="mb-6 rounded-xl border border-border bg-bg-secondary p-3">
+          <button type="button" class="flex w-full items-center justify-between" @click="showGenHistory = !showGenHistory">
+            <span class="text-xs font-medium text-text-secondary">最近生成记录 <span class="font-normal text-text-muted">— 点开看系统每次让 AI 画了什么</span></span>
+            <svg class="h-4 w-4 text-text-muted transition-transform" :class="showGenHistory ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+          </button>
+          <div v-if="showGenHistory" class="mt-3 space-y-2">
+            <div v-for="(r, i) in genRecords.slice(0, 5)" :key="i" class="rounded-lg border border-border bg-bg-card p-2.5">
+              <div class="flex items-center justify-between gap-2 text-[11px]">
+                <span class="truncate text-text-muted">{{ r.model || '未知模型' }}</span>
+                <span class="shrink-0" :class="r.success ? 'text-ok' : 'text-danger'">{{ r.success ? '成功' : (r.error_msg || r.error_family || '失败') }}</span>
+              </div>
+              <div class="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-all text-[11px] leading-relaxed text-text-secondary">{{ r.prompt }}</div>
+              <div class="mt-1 text-[10px] text-text-muted">{{ r.created_at }}</div>
+            </div>
+          </div>
+        </div>
+
         <div class="mb-4">
           <div v-if="!editingName" class="flex items-center gap-2 group cursor-pointer" @click="editingName=true">
             <span class="text-2xl font-bold text-white">{{ editName || '未命名' }}</span>
@@ -59,29 +76,28 @@
           <textarea v-model="editDescription" rows="8" class="w-full resize-none rounded-lg border border-border bg-bg-secondary px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="详细描述，用于 AI 生图"></textarea>
         </div>
 
-        <div v-if="type === 'scene'" class="mb-4">
-          <label class="mb-1.5 block text-xs font-medium text-text-secondary">场景光影常量（英文，出片跨镜锁定光照）</label>
-          <textarea v-model="editLightingEn" rows="3" class="w-full resize-none rounded-lg border border-border bg-bg-secondary px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="光源方位 + 色温 + 时间氛围，全英文 25 词以内。例：low slanting sunlight from the left, cold clear daylight, faint glints on the snow。留空 = 不注入"></textarea>
-          <div class="mt-1 text-[11px] leading-relaxed text-text-muted">同一场景所有镜头的出片 prompt 与分镜图环境冻结声明会逐字复用这一句，钉死色温/光照方向；改动它 = 全场景生效。必须全英文，含中文不会注入。</div>
+        <div v-if="type === 'scene'" class="mb-4 rounded-xl border border-border bg-bg-secondary p-3">
+          <div class="text-xs font-medium text-text-secondary">光照</div>
+          <div class="mt-1 text-[11px] leading-relaxed text-text-muted">同一地点的所有场景由系统按空间组自动统一光照，保持画面一致，无需单独设置。</div>
         </div>
 
         <div class="mb-4 rounded-xl border border-border bg-bg-secondary p-3">
-          <div class="mb-2 text-xs font-medium text-text-secondary">英文常量（H3 提示词必填，为空会退回中文名）</div>
+          <div class="mb-2 text-xs font-medium text-text-secondary">英文常量（出片提示词必填，为空会退回中文名）</div>
 
           <template v-if="type === 'character'">
-            <input v-model="editNameEn" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="角色英文名，例：Bubu" />
-            <textarea v-model="editDescriptionEn" rows="3" class="w-full resize-none rounded-lg border border-border bg-bg-card px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="角色英文外貌描述，模块2 逐字复用。例：a light-brown bear dumpling with small round brown ears, small black dot eyes"></textarea>
+            <input v-model="editNameEn" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="角色英文名，例：角色的英文名称" />
+            <textarea v-model="editDescriptionEn" rows="3" class="w-full resize-none rounded-lg border border-border bg-bg-card px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="角色英文外貌描述，出片提示词逐字复用。例：体型 + 外观特征 + 穿着，全英文，不含剧情信息"></textarea>
           </template>
 
           <template v-else-if="type === 'prop'">
-            <input v-model="editNameEn" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="道具英文名，例：giant snowball" />
-            <textarea v-model="editDescriptionEn" rows="3" class="w-full resize-none rounded-lg border border-border bg-bg-card px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="道具英文描述，模块2 逐字复用。例：a giant rolled snowball, packed snow with faint trail lines"></textarea>
+            <input v-model="editNameEn" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="道具英文名，例：道具的英文名称" />
+            <textarea v-model="editDescriptionEn" rows="3" class="w-full resize-none rounded-lg border border-border bg-bg-card px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="道具英文描述，出片提示词逐字复用。例：材质 + 形状 + 颜色 + 明显特征，全英文，不含剧情信息"></textarea>
           </template>
 
           <template v-else-if="type === 'scene'">
-            <input v-model="editLocation" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="场景地点，例：冰河浅滩" />
-            <input v-model="editTitleEn" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="场景英文名，例：Snowy Mountain Path" />
-            <textarea v-model="editSummaryEn" rows="3" class="w-full resize-none rounded-lg border border-border bg-bg-card px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="场景英文环境描述，模块3 逐字复用。例：a narrow snow-covered mountain path with a cliff edge on the right"></textarea>
+            <input v-model="editLocation" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="场景地点，例：场景发生的地点" />
+            <input v-model="editTitleEn" type="text" class="mb-2 w-full rounded-lg border border-border bg-bg-card px-3 py-2 text-sm text-white outline-none transition focus:border-accent/50" placeholder="场景英文名，例：场景地点的英文名称" />
+            <textarea v-model="editSummaryEn" rows="3" class="w-full resize-none rounded-lg border border-border bg-bg-card px-3 py-2 text-sm leading-relaxed text-white outline-none transition focus:border-accent/50" placeholder="场景英文环境描述，出片提示词逐字复用。例：地形 + 周边物件 + 空间关系，全英文，不含剧情信息"></textarea>
           </template>
 
           <div class="mt-1.5 text-[11px] leading-relaxed text-text-muted">出片提示词为全英文，这些字段为空时系统会静默改用中文名 → 中文会混进英文提示词。留空不会清空已有值（同名资产自动继承）。</div>
@@ -104,6 +120,7 @@ import { ref, watch, nextTick, computed } from 'vue'
 import { useProjectStore } from '../stores/project'
 import { api } from '../services/api'
 import { confirmDialog, toastError, toastInfo } from '../services/dialog'
+import { ASSET_TYPE_LABEL } from '../constants/assetTypes'
 
 const props = defineProps({
   visible: Boolean,
@@ -117,8 +134,7 @@ const store = useProjectStore()
 const editName = ref('')
 const editRole = ref('配角')
 const editDescription = ref('')
-const editLightingEn = ref('')
-const editNameEn = ref('')          
+const editNameEn = ref('')
 const editDescriptionEn = ref('')   
 const editTitleEn = ref('')         
 const editSummaryEn = ref('')       
@@ -129,6 +145,8 @@ const nameInput = ref(null)
 const history = ref([])
 const restoringId = ref(null)
 const editInstruction = ref('')
+const genRecords = ref([])
+const showGenHistory = ref(false)
 const generating = computed(() => store.generatingAssetIds.includes(props.asset?.id))
 
 const sourceLabel = { generate: '生成', edit: '改造', upload: '上传', initial: '初始' }
@@ -144,8 +162,16 @@ async function loadHistory() {
   } catch { history.value = [] }
 }
 
+async function loadGenRecords() {
+  if (!props.asset?.id) { genRecords.value = []; return }
+  try {
+    const r = await api.assetHistory(props.type, props.asset.id)
+    genRecords.value = (r.records || []).filter((x) => x.prompt)
+  } catch { genRecords.value = [] }
+}
+
 watch(() => [props.visible, props.asset?.id], ([v]) => {
-  if (v) loadHistory()
+  if (v) { loadHistory(); loadGenRecords() }
 }, { immediate: true })
 
 async function restoreVersion(h) {
@@ -200,18 +226,14 @@ async function submitEdit() {
   }
 }
 
-const typeLabel = {
-  character: '角色',
-  scene: '场景',
-  prop: '道具',
-}
+// 中文标签走 constants/assetTypes 单一事实源，组件内不再各写一份映射
+const typeLabel = ASSET_TYPE_LABEL
 
 watch(() => props.asset, (val) => {
   if (val) {
     editName.value = val.name || ''
     editRole.value = val.role || '配角'
     editDescription.value = val.description || ''
-    editLightingEn.value = val.lightingEn || ''
     editNameEn.value = val.nameEn || val.name_en || ''
     editDescriptionEn.value = val.descriptionEn || val.description_en || ''
     editTitleEn.value = val.titleEn || val.title_en || ''
@@ -236,7 +258,6 @@ function save() {
     role: editRole.value,
     description: editDescription.value,
   }
-  if (props.type === 'scene') payload.lightingEn = editLightingEn.value.trim()
   if (props.type === 'character') {
     payload.nameEn = editNameEn.value.trim()
     payload.descriptionEn = editDescriptionEn.value.trim()

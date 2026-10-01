@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { UPLOADS_URL_SLASH, uploadsUrl, uploadsDir } from '../paths.js'
 import path from 'node:path'
 import fs from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -6,23 +7,23 @@ import { query, queryOne, execute } from '../db.js'
 
 import { buildSceneGridPrompt, buildShotGridPrompt, buildShotGridContentApp, allocateShotRefs, splitSceneGrid } from '../ai/directorRequest.js'
 import { insecureDownload } from '../ai/runninghub.js'
-import { assertScriptConfirmed, assertNotStale, assertNoStylePoison } from '../ai/guards.js'
+import { assertScriptConfirmed, assertNotStale } from '../ai/guards.js'
 import { generateShotGridApp } from '../ai/rhShotGrid.js'
-import { reviewFrameImage } from '../ai/frameReview.js'
-import { reviewSceneImage, buildSceneRetryNote } from '../ai/sceneReview.js'
-import { recordAlert, resolveAlertsByShot, resolveAlertsByScene } from '../ai/alerts.js'
+import { recordAlert } from '../ai/alerts.js'
 import { resolvePropName } from '../ai/propNameMatch.js'
 import { buildAnchorRefsForScene, buildShotAnchorInjection, resolveSceneSpatialGroup, listSceneSpatialGroups, collectGroupLayoutMaterials, layoutMaterialsFingerprint, registerLayoutAnchor, getLayoutAnchor, getLayoutAnchorHistory, restoreLayoutAnchor, ensureSceneAnalysis, lockCurrentGrouping, unlockGrouping, describeGroupLocks, getLayoutRoute, setLayoutRoute, normalizeSceneGrouping } from '../ai/sceneAnchors.js'
 import { bareUrl } from '../ai/shared.js'
 import { swapSceneLightingNote, ANCHOR_PRIORITY_NOTE, buildLayoutImagePrompt } from '../ai/sceneAnchorPrompt.js'
 import { isSpatialSeriesAnchor, LAYOUT_ANCHOR_TYPE, SPATIAL_ANCHOR_TYPE } from '../ai/anchorTypes.js'
 import { buildElementNote, buildSharedEnvNote, ELEMENT_NOTE_TAG, SHARED_ENV_NOTE_TAG } from '../ai/anchorTypes.js'
-import { reviewLayoutImage, buildLayoutRetryNote, MAX_LAYOUT_ATTEMPTS } from '../ai/layoutReview.js'
+import { extractAssetStyle, extractCharacterStyle } from '../ai/assetStyleFilter.js'
 import { acquireSpatialGroupLock, releaseSpatialGroupLock } from '../ai/spatialGroupLock.js'
-import { generateImage, generateStoryboardImage, resolveProvider, resolutionForModel } from '../ai/image.js'
+import { generateImage, generateStoryboardImage } from '../ai/image.js'
 import { config } from '../config.js'
+import { ASSET_TYPES, ASSET_META, assetLabel, assetTable, assetDescField } from '../ai/assetTypes.js'
 import { mergeMasterIntoEpisodeCharacters, syncProjectCharacterToEpisodes } from '../characterLibrary.js'
-import { uploadsDir } from '../paths.js'
+
+import { normalizeReferenceSet } from '../ai/referenceSet.js'
 
 const router = Router()
 
@@ -106,6 +107,17 @@ function loadStylePrompt(episodeId) {
   return stylePrompt
 }
 
+// 画风约束必须与前端 buildAssetImagePrompt 的过滤策略对齐（均按资产类型做维度过滤）：
+// 场景/道具剔除人物维度（空场景不该出现角色特征），
+// 角色剔除环境/镜头维度（纯白背景标准三视图不能被镜头语言与背景空间带跑）。
+// 过滤后为空时回退全文，避免画风约束整个丢失。
+function buildAssetStyleNote(episodeId, type) {
+  const full = String(loadStylePrompt(episodeId) || '').trim()
+  if (!full) return ''
+  const stylePrompt = (type === 'character' ? extractCharacterStyle(full) : extractAssetStyle(full)) || full
+  return `【服务端画风约束】本资产必须统一采用以下项目画风：${stylePrompt}。线条、上色、光影、质感与该画风一致，不得偏离；画风只约束视觉表现，不改变资产的主体、结构、机位或场景语义。`
+}
+
 function loadGridAssets(episodeId, shots) {
   const charRowsAll = mergeMasterIntoEpisodeCharacters(
     query('SELECT id, name, description, image_url FROM characters WHERE episode_id = ?', [episodeId])
@@ -129,11 +141,11 @@ function loadGridAssets(episodeId, shots) {
 fs.mkdirSync(uploadsDir, { recursive: true })
 
 async function persistRemoteAsset(url, filename) {
-  if (!url || url.startsWith('/uploads/')) return url
+  if (!url || url.startsWith(UPLOADS_URL_SLASH)) return url
   try {
     const buf = await insecureDownload(url)
     fs.writeFileSync(path.join(uploadsDir, filename), buf)
-    return `/uploads/${filename}`
+    return `${uploadsUrl(filename)}`
   } catch (e) {
     console.warn(`[persistRemoteAsset] 落本地失败（${filename}），保留原 URL:`, e.message)
     return url
@@ -161,6 +173,21 @@ const STYLE_ANCHOR_NOTE =
   '禁止继承其中的内容、构图、人物、光照，更不得继承其季节、天气、植被与整体色温倾向；' +
   '必须严格保留本段文字描述中的季节、气候与环境特征（如冰雪、寒冷、雾气等）。' +
   '画面内容、空间与光照一律以本段文字描述为准。）'
+
+// 场景图一律是「无人物空镜」。历史坑：场景描述常写成第一人称视角（「站在…眼前是…」），
+// 生图模型把隐含主语当成真人画进画面，场景图里就冒出角色。这里统一追加硬约束消歧。
+// 第二个历史坑：只消歧"人物"不锚定"机位高度"，模型把「微俯视」自由发挥成航拍俯瞰，
+// 近景地面被画成无信息材质平铺（开阔平台场景实证），所以一并锚定机位与前景密度。
+const SCENE_NO_PERSON_TAG = '【空镜硬约束】'
+const SCENE_NO_PERSON_NOTE =
+  SCENE_NO_PERSON_TAG +
+  '本图是场景环境空镜头，画面中禁止出现任何人物、人影、剪影或人物局部（手、脚、背影等）；' +
+  '描述中若出现「站在」「眼前是」「望去」「俯视」「仰视」等以人物视角或第一人称口吻的表述，' +
+  '一律只理解为对本图机位、视角与拍摄高度的说明，不得据此画出人物或任何人类形象；' +
+  '机位高度一律取观察者站立高度（约1.5至2米）的低机位，微俯视的俯角不得超过30度，' +
+  '严禁拔高为航拍、俯瞰或高空全景视角；' +
+  '画面下方三分之一的近景地面必须呈现描述中具名地面的具体形态、边界与走向' +
+  '（如平台、窄道、坡面、滩地等），禁止把碎石、冰雪、草地等材质无差别地平铺成无信息肌理。'
 
 function buildAnchorNote(frontCount) {
   if (frontCount <= 0) return STYLE_ANCHOR_NOTE
@@ -393,7 +420,7 @@ router.post('/image', async (req, res) => {
           ? `标准 ${arShort} 竖幅构图的单一完整场景`
           : `标准 ${arShort} 横幅构图的单一完整场景`
       framePrompt += `\n（注意：参考图中每张角色设定图都是同一个角色的多视角展示（正面/侧面/背面/细节标注格），仅用于锁定该角色的外形、配色与服饰，绝对不要把不同视角画成多个角色；设定图中的文字标注、细节小格一律不要出现在画面里。最终画面必须是${frameWording}：把所有角色放进同一个场景中自然互动，每个角色只出现一次，禁止复制、重复任何角色，禁止分栏、拼贴、并排多格或超宽全景长图。）`
-      framePrompt += '\n【比例约束】所有出场角色（包括 @角色甲、@角色乙 等）体型大小必须符合场景参考图的真实空间尺度，与门窗、地面、茶几等环境元素保持合理比例，禁止放大某个角色或缩小其他角色导致比例失调（刻意的特写镜头除外）。多个角色共处一景时，它们之间的相对大小也必须符合实际空间关系，禁止把"说话者"画得明显大于"沉默者"。'
+      framePrompt += '\n【比例约束】所有出场角色（包括 @角色甲、@角色乙 等）体型大小必须符合场景参考图的真实空间尺度，与场景内的固定陈设、地面等环境元素保持合理比例，禁止放大某个角色或缩小其他角色导致比例失调（刻意的特写镜头除外）。多个角色共处一景时，它们之间的相对大小也必须符合实际空间关系，禁止把"说话者"画得明显大于"沉默者"。'
       const durationSec = Number(shot?.duration) || 0
       const dualKeyframe = !isKeyframe && durationSec >= FRAME_DUAL_KEYFRAME_SEC
       const keyframePrompt = isKeyframe
@@ -412,8 +439,6 @@ router.post('/image', async (req, res) => {
       } else {
         console.log('[/generate/image] frame single-shot', { shotId, durationSec })
       }
-      const reviewEnabled = config.storyboard?.frameReview !== false
-      const reviewRetry = reviewEnabled ? Math.max(0, config.storyboard?.frameReviewRetry ?? 1) : 0
       const promptPerKey = isKeyframe
         ? [keyframePrompt]
         : dualKeyframe
@@ -426,60 +451,23 @@ router.post('/image', async (req, res) => {
         return i === 0 ? 'frame_url' : 'frame_url2'
       }
 
-      const generateVerifyOne = async (promptText, idx) => {
-        let last = null
-        for (let attempt = 0; attempt <= reviewRetry; attempt++) {
-          const stamp = Date.now()
-          const filename = `shot_${shotId}_${fileTag}_${stamp}_${idx}_a${attempt}.png`
-          const gen = await generateStoryboardImage(promptText, refs, { filename, provider })
-          if (!gen?.success || !gen.url) return { error: gen?.error || '生成失败' }
-          const storedUrl = await persistRemoteAsset(gen.url, filename)
-          const review = reviewEnabled
-            ? await reviewFrameImage(storedUrl, { episodeId: shot.episode_id, shotId, attempt })
-            : { verdict: 'skip', defects: [], summary: '' }
-          last = { url: storedUrl, review }
-          if (review.verdict !== 'fail') return last
-          if (attempt < reviewRetry) {
-            console.log(`[/generate/image] 镜 ${shotId} 第 ${idx + 1} 张验收不合格，自动重抽 ${attempt + 1}/${reviewRetry}：`,
-              (review.defects || []).map((d) => d.type).join(',') || review.summary)
-          } else {
-            console.warn(`[/generate/image] 镜 ${shotId} 第 ${idx + 1} 张重抽后仍不合格，沿用当前结果（不阻塞出图）：`,
-              (review.defects || []).map((d) => d.type).join(',') || review.summary)
-            recordAlert({
-              source: 'frameReview',
-              level: 'warn',
-              episodeId: shot.episode_id,
-              shotId: Number(shotId),
-              shotNumber: shot.shot_number || '',
-              message: `镜 ${shot.shot_number || shotId} 分镜图重抽 ${reviewRetry} 次后仍不合格（${(review.defects || []).map((d) => d.type).join(',') || review.summary}），当前图带伤上岗——建议人工改提示词后重出，或确认接受。`,
-              detail: JSON.stringify({ defects: review.defects || [], summary: review.summary || '' }),
-            })
-          }
-        }
-        return last
+      const generateOne = async (promptText, idx) => {
+        const filename = `shot_${shotId}_${fileTag}_${Date.now()}_${idx}.png`
+        const gen = await generateStoryboardImage(promptText, refs, { filename, provider })
+        if (!gen?.success || !gen.url) return { error: gen?.error || '生成失败' }
+        const storedUrl = await persistRemoteAsset(gen.url, filename)
+        return { url: storedUrl }
       }
 
-      const settled = await Promise.allSettled(promptPerKey.map((p, idx) => generateVerifyOne(p, idx)))
+      const settled = await Promise.allSettled(promptPerKey.map((p, idx) => generateOne(p, idx)))
       const urls = []
-      const reviews = []
       let lastError = ''
-      let retriedCount = 0
       for (let i = 0; i < settled.length; i++) {
         const s = settled[i]
         const val = s.status === 'fulfilled' ? s.value : { error: s.reason?.message || String(s.reason) }
         if (val?.url) {
           execute(`UPDATE shots SET ${columnForIndex(i)} = ? WHERE id = ?`, [val.url, shotId])
           urls.push(val.url)
-          if (val.review?.verdict === 'fail') retriedCount++
-          if (val.review?.verdict !== 'fail') {
-            resolveAlertsByShot(Number(shotId), 'frame-regen', 'frameReview')
-          }
-          reviews.push({
-            index: i,
-            verdict: val.review?.verdict || 'skip',
-            defects: val.review?.defects || [],
-            summary: val.review?.summary || '',
-          })
         } else {
           lastError = val?.error || '生成失败'
         }
@@ -489,14 +477,24 @@ router.post('/image', async (req, res) => {
       }
       console.log('[/generate/image] frame batch done', { shotId, imageType, okCount: urls.length, error: lastError || 'none' })
       if (urls.length) {
+        const referenceSet = normalizeReferenceSet({
+          shotId,
+          episodeId: shot.episode_id,
+          images: refs.map((url, index) => ({
+            url,
+            kind: index < charImages.length ? 'character' : (index === charImages.length && sceneImage ? (sceneImageIsAnchor ? 'baseline' : 'scene') : (anchorLayoutUrl && url === anchorLayoutUrl ? 'layout' : 'prop')),
+          })),
+          anchor: anchorSnapshot || {},
+          uploadsDir,
+        })
         // 出图依据快照：有锚/无锚/降级都如实落库（失败不出图不写），供④分镜页面板展示
         if (anchorSnapshot) {
           execute('UPDATE shots SET anchor_refs_snapshot = ? WHERE id = ?', [JSON.stringify(anchorSnapshot), shotId])
         }
         result = {
           success: true, url: urls[0], urls, imageType,
-          dualKeyframe: !!dualKeyframe && urls.length > 1, reviews, retriedCount,
-          anchorSnapshot: anchorSnapshot || null,
+          dualKeyframe: !!dualKeyframe && urls.length > 1,
+          referenceSet,
           anchor: anchorSnapshot ? {
             anchored: Boolean(anchorSnapshot.scene?.baseline_url),
             degraded: Boolean(anchorSnapshot.degraded),
@@ -523,7 +521,7 @@ router.post('/image', async (req, res) => {
     res.json(result)
   } catch (err) {
     console.error('[/generate/image] error', { shotId, error: err.message })
-    res.status(500).json({ error: err.message })
+    res.status(err.status || 500).json({ error: err.message })
   } finally {
     imageJobsInflight.delete(jobKey)
   }
@@ -537,11 +535,6 @@ router.post('/shot-grid', async (req, res) => {
   const sceneRow = queryOne('SELECT episode_id FROM storyboard_scenes WHERE id = ?', [shot.storyboard_scene_id])
   if (!sceneRow) return res.status(404).json({ error: '镜头所属场次不存在' })
   const episodeId = sceneRow.episode_id
-  try {
-    assertNoStylePoison({ ...shot, episode_id: episodeId }, req.body.allowStyleShift)
-  } catch (err) {
-    return res.status(err.status || 400).json({ error: err.message })
-  }
   const shotGridJobKey = Number(shotId)
   const existingGridJob = shotGridJobs.get(shotGridJobKey)
   if (existingGridJob?.state === 'running' && Date.now() - existingGridJob.startedAt <= SHOT_GRID_STALE_MS) {
@@ -656,13 +649,11 @@ router.post('/shot-grid', async (req, res) => {
           prompt += `\n（注意：@${anchorInjection.sceneTitle || '本场景'}的布局示意图（俯视）仅用于锁定空间位置关系与物体相对方位，不代表实际视角与光影。）`
         }
       }
-      const resolution = resolutionForModel(model)
       result = await generateStoryboardImage(prompt, localRefs, {
         filename: `shot_${shotId}_grid_${Date.now()}.png`,
-        provider: provider || 'visionary',
+        provider,
         model: model || undefined,
         size: '1:1',
-        resolution,
       })
     }
     if (promptResult.warnings?.length) result.warnings = promptResult.warnings
@@ -679,28 +670,6 @@ router.post('/shot-grid', async (req, res) => {
           degraded: Boolean(anchorSnapshot.degraded),
           baselineUrl: anchorSnapshot.scene?.baseline_url || '',
           layoutUrl: anchorSnapshot.scene?.layout_url || '',
-        }
-      }
-      // 四宫格验收（grid 模式：逐格评残 + 格间一致性）：一次验收不重抽，不合格落告警由人工处置
-      if (config.storyboard?.frameReview !== false) {
-        try {
-          const review = await reviewFrameImage(storedUrl, { episodeId, shotId: shot.id, grid: true })
-          result.review = { verdict: review.verdict, defects: review.defects || [], summary: review.summary || '' }
-          if (review.verdict === 'fail') {
-            recordAlert({
-              source: 'frameReview',
-              level: 'warn',
-              episodeId,
-              shotId: shot.id,
-              shotNumber: shot.shot_number || '',
-              message: `镜 ${shot.shot_number || shot.id} 四宫格验收不合格（${(review.defects || []).map((d) => d.type).join(',') || review.summary}）——未自动重抽，建议人工复核或重出`,
-              detail: JSON.stringify({ defects: review.defects || [], summary: review.summary || '' }),
-            })
-          } else if (review.verdict !== 'fail') {
-            resolveAlertsByShot(Number(shot.id), 'frame-regen', 'frameReview')
-          }
-        } catch (e) {
-          console.warn('[/generate/shot-grid] 四宫格验收失败（不阻塞出图）:', e.message)
         }
       }
       console.log('[/generate/shot-grid] saved frame_url for shot', shotId)
@@ -722,7 +691,7 @@ router.post('/shot-grid', async (req, res) => {
       startedAt: shotGridJobs.get(shotGridJobKey)?.startedAt || Date.now(),
       finishedAt: Date.now(), error: err.message,
     })
-    res.status(500).json({ error: err.message })
+    res.status(err.status || 500).json({ error: err.message })
   }
 })
 
@@ -745,10 +714,9 @@ router.post('/scene-grid', async (req, res) => {
 
     const result = await generateStoryboardImage(prompt, refs, {
       filename: `scene_${sceneId}_grid_${Date.now()}.png`,
-      provider: provider || 'visionary',
+      provider,
       model: model || undefined,
       size: '1:1',
-      resolution: resolutionForModel(model),
     })
     if (result.success && result.url) {
       const storedUrl = await persistRemoteAsset(result.url, `scene_${sceneId}_grid_${Date.now()}.png`)
@@ -768,23 +736,36 @@ router.post('/scene-grid', async (req, res) => {
     res.json(result)
   } catch (err) {
     console.error('[/generate/scene-grid] error:', err)
-    res.status(500).json({ error: err.message })
+    res.status(err.status || 500).json({ error: err.message })
   }
+})
+
+// 按资产查最近的生成记录（含实际发送的提示词）——「图不满意时看系统到底说了什么」。
+router.get('/asset-history', (req, res) => {
+  const { type, id } = req.query
+  if (!type || !id) return res.status(400).json({ error: 'type, id 必填' })
+  const meta = ASSET_META[type]
+  if (!meta) return res.status(400).json({ error: `type 必须是 ${ASSET_TYPES.join('/')}` })
+  const rows = query(
+    `SELECT model, prompt, success, error_family, error_msg, latency_ms, created_at
+     FROM ai_calls
+     WHERE task = ?
+     ORDER BY id DESC
+     LIMIT 20`,
+    [`asset-${type}-${id}`]
+  )
+  res.json({ records: rows })
 })
 
 router.post('/asset-image', async (req, res) => {
   const { type, id, prompt, provider, refImageUrl, editInstruction } = req.body
   if (!type || !id || !prompt) return res.status(400).json({ error: 'type, id, prompt 必填' })
 
-  const validTypes = {
-    character: { table: 'characters', idField: 'id' },
-    scene: { table: 'scenes', idField: 'id' },
-    prop: { table: 'props', idField: 'id' },
-  }
-  if (!validTypes[type]) return res.status(400).json({ error: 'type 必须是 character/scene/prop' })
+  // 类型 → 表 / 列全部走 ASSET_META 单一事实源，新增资产类型只加数据不改进这里。
+  const meta = ASSET_META[type]
+  if (!meta) return res.status(400).json({ error: `type 必须是 ${ASSET_TYPES.join('/')}` })
 
-  const assetCols = type === 'scene' ? 'id, episode_id, scene_number, summary' : 'id, episode_id'
-  const asset = queryOne(`SELECT ${assetCols} FROM ${validTypes[type].table} WHERE id = ?`, [id])
+  const asset = queryOne(`SELECT ${meta.listCols} FROM ${meta.table} WHERE id = ?`, [id])
   if (!asset) return res.status(404).json({ error: '资产不存在' })
   try {
     assertScriptConfirmed(asset.episode_id)
@@ -843,7 +824,7 @@ router.post('/asset-image', async (req, res) => {
       .map((u) => String(u).split('?')[0].trim()).filter(Boolean)
     const anchorRefs = [...refList]
     if (!anchorRefs.length) {
-      let curUrl = (queryOne(`SELECT image_url FROM ${validTypes[type].table} WHERE id = ?`, [id])?.image_url || '').split('?')[0]
+      let curUrl = (queryOne(`SELECT image_url FROM ${assetTable(type)} WHERE id = ?`, [id])?.image_url || '').split('?')[0]
       if (type === 'character') {
         const mc = queryOne('SELECT project_character_id FROM characters WHERE id = ?', [id])
         if (mc?.project_character_id) {
@@ -854,11 +835,11 @@ router.post('/asset-image', async (req, res) => {
     }
     const liveRefs = anchorRefs.filter(isLiveRefUrl)
     const uniqueName = `asset-${type}-${safeId}-${Date.now()}.png`
-    const subject = type === 'character' ? '角色' : type === 'scene' ? '场景' : '道具'
-    const imgOpts = { filename: uniqueName, provider }
+    const subject = assetLabel(type)
+    const imgOpts = { filename: uniqueName, provider, usageContext: { episodeId: asset.episode_id, task: `asset-${type}-${id}` } }
     if (type === 'character') {
-      const { provider: rp } = resolveProvider({ provider })
-      const assetSize = config.image[rp]?.assetSize
+      // 角色资产图沿用生图通道的资产尺寸（启明星 OpenAI 兼容通道的 .env seed 源为 config.image.zikl）
+      const assetSize = config.image.zikl.assetSize
       if (assetSize) imgOpts.size = assetSize
     }
     const styleAnchor = (type === 'scene' || type === 'prop') ? resolveStyleAnchorUrl(asset.episode_id) : ''
@@ -898,21 +879,36 @@ router.post('/asset-image', async (req, res) => {
       }
     }
 
+    const styleNote = buildAssetStyleNote(asset.episode_id, type)
     let promptFinal = String(prompt || '')
+    if (styleNote && !promptFinal.includes('【服务端画风约束】')) promptFinal += `。${styleNote}`
     if (type === 'scene') {
       const elNote = buildElementNote(sceneElements)
       if (elNote && !promptFinal.includes(ELEMENT_NOTE_TAG)) promptFinal += elNote
       const envNote = buildSharedEnvNote(sceneSharedEnv)
       if (envNote && !promptFinal.includes(SHARED_ENV_NOTE_TAG)) promptFinal += envNote
+      if (!promptFinal.includes(SCENE_NO_PERSON_TAG)) promptFinal += SCENE_NO_PERSON_NOTE
     }
 
-    const sceneReviewEnabled = type === 'scene' && config.storyboard?.sceneReview === true
-    const sceneReviewRetry = sceneReviewEnabled ? Math.max(0, config.storyboard?.sceneReviewRetry ?? 1) : 0
-    const sceneReviewCtx = {
-      elements: sceneElements,
-      sharedEnv: sceneSharedEnv,
-      spatialRole: sceneSpatialRole,
-      hasLayout: sceneAnchorRefs.length > 0 && hasSpatialRef,
+    // —— scene 专用参考图装配 ——
+    // 参考图按角色排序：基准图（空间+光照锚）→ 布局图（位置关系锚）→ 本场旧图（仅画风质感）→ 画风锚图，
+    // 并生成逐张编号的角色注记。旧版把本场旧图放参考图1，还写「以参考图1为视角、构图基准，
+    // 严格保持一致」，每场都被锁死在上一版构图上（组内越画越像），与「本场机位」的文字视角要求
+    // 直接冲突；这里改为视角一律以本场文字描述为准，旧图只允许贡献笔触与质感。
+    const isSceneAsset = type === 'scene'
+    let sceneOrderedRefs = []
+    let sceneRefNotes = ''
+    if (isSceneAsset) {
+      const pushSceneRef = (url, role) => {
+        const u = String(url || '').split('?')[0].trim()
+        if (!u || !isLiveRefUrl(u) || sceneOrderedRefs.includes(u)) return
+        sceneOrderedRefs.push(u)
+        sceneRefNotes += `（参考图${sceneOrderedRefs.length}为${role}。）`
+      }
+      pushSceneRef(sceneGenBaselineFp, '人审基准图（与本场同一物理空间）：各物体的形态、朝向与彼此的相对位置关系必须与它保持连续，但透视关系、前后景层次、画面占比、取景范围、视角、机位高度、景别一律以本场文字描述为准，严禁照搬它的构图；光照以共有环境注记中的组级光照常量为准')
+      pushSceneRef(sceneGenLayoutFp, '布局示意图（俯视/轴测示意画法）：只约束各物体的相对位置、朝向与距离比例，严禁继承它的示意画法与俯视视角')
+      pushSceneRef(liveRefs[0] || '', '本场上一版图：只用于保持画风笔触、线条与材质质感，严禁继承它的视角、构图与光照')
+      pushSceneRef(anchorLive, '画风锚图：只取笔触、上色、线条与材质质感四项技法，严禁继承其内容、构图、季节、天气与整体色温倾向')
     }
 
     let result
@@ -924,17 +920,19 @@ router.post('/asset-image', async (req, res) => {
       ? `特别注意：${sceneAnchorHints.join('；')}。${hasSpatialRef ? ANCHOR_PRIORITY_NOTE : ''}`
       : ''
     if (refList.length && liveRefs.length) {
-      const instruction = String(editInstruction || basePrompt).trim()
+      let instruction = String(editInstruction || basePrompt).trim()
+      if (styleNote && !instruction.includes('【服务端画风约束】')) instruction += `。${styleNote}`
+      if (isSceneAsset && !instruction.includes(SCENE_NO_PERSON_TAG)) instruction += SCENE_NO_PERSON_NOTE
       const saRefs = sceneAnchorRefs.slice(0, Math.max(0, config.asset.maxRefs - liveRefs.length))
       const editPrompt =
         `以参考图中的${subject}为唯一形象基准，` +
-        `严格保持其物种/体型/毛色/五官/表情风格/配色/描边等一切既有特征完全不变，` +
+        `严格保持其外形/结构/五官/表情风格/配色/描边等一切既有特征完全不变，` +
         `仅按以下要求修改画面：${instruction}。` +
         sceneHintNote +
         (anchorLive
           ? `除该修改外，其余形象细节与参考图保持一致，不要新增参考图中不存在的元素。` + buildAnchorNote(liveRefs.length + saRefs.length)
           : `除该修改外，其余所有细节与参考图保持一致，不要新增参考图中不存在的元素。`)
-      result = await generateStoryboardImage(editPrompt, [...liveRefs, ...saRefs, ...(anchorLive ? [anchorLive] : [])], { filename: fileName, provider })
+      result = await generateStoryboardImage(editPrompt, [...liveRefs, ...saRefs, ...(anchorLive ? [anchorLive] : [])], imgOptsAttempt)
     } else if (refList.length) {
       const refs2 = [...sceneAnchorRefs, ...(anchorLive ? [anchorLive] : [])]
       if (!refs2.length) {
@@ -944,9 +942,15 @@ router.post('/asset-image', async (req, res) => {
           ? `以参考图${anchorLive ? `1~${sceneAnchorRefs.length}` : ''}为【空间与道具锚点】，严格保持同一物理空间的结构、地标物体形态与光照方向连续；按以下描述绘制：`
           : ''
         const p2 = lead + basePrompt + sceneHintNote + (anchorLive ? buildAnchorNote(sceneAnchorRefs.length) : '')
-        result = await generateStoryboardImage(p2, refs2, { filename: fileName, provider })
+        result = await generateStoryboardImage(p2, refs2, imgOptsAttempt)
       }
     } else if (liveRefs.length) {
+      if (isSceneAsset && sceneOrderedRefs.length) {
+        const sceneRedrawPrompt =
+          `按本场文字描述重绘场景图，视角、机位高度、景别与画面主体占比一律以本场文字描述为准，与同组其它场景的构图区分开。` +
+          `按以下描述绘制：${basePrompt}。${sceneRefNotes}`
+        result = await generateStoryboardImage(sceneRedrawPrompt, sceneOrderedRefs, imgOptsAttempt)
+      } else {
       const saRefs = sceneAnchorRefs.slice(0, Math.max(0, config.asset.maxRefs - liveRefs.length))
       const saRoleNote = saRefs.length
         ? `（参考图${liveRefs.length + 1}${saRefs.length > 1 ? `~${liveRefs.length + saRefs.length}` : ''}为【同空间邻场锚点】：` +
@@ -960,75 +964,52 @@ router.post('/asset-image', async (req, res) => {
             : buildAnchorNote(liveRefs.length))
         : ''
       const redrawPrompt = anchorLive
-        ? `以参考图1中的${subject}为视角、构图与空间基准，严格保持其视角、空间布局、物体位置、物种/体型/比例/毛色/五官/配色与描边特征不变，` +
+        ? `以参考图1中的${subject}为视角、构图与空间基准，严格保持其视角、空间布局、物体位置、外形/结构/比例/五官/配色与描边特征不变，` +
           `按以下要求重绘一张规范的设定图：${basePrompt}。` +
           sceneHintNote + saRoleNote +
           `禁止改变参考图1中${subject}的视角、空间结构与形象特征，禁止自由发挥添加参考图中不存在的元素。` +
           styleRoleNote
-        : `以参考图1中的${subject}为视角、构图与形象基准，严格保持其视角、构图、物种/体型/比例/毛色/五官/配色/描边与画风完全一致，` +
+        : `以参考图1中的${subject}为视角、构图与形象基准，严格保持其视角、构图、外形/结构/比例/五官/配色/描边与画风完全一致，` +
           `按以下要求重绘一张规范的设定图：${basePrompt}。` +
           sceneHintNote + saRoleNote +
           `禁止改变参考图1中${subject}的任何视角、形象特征与画风，禁止自由发挥添加参考图中不存在的特征。`
-      result = await generateStoryboardImage(redrawPrompt, [...liveRefs, ...saRefs, ...(anchorLive ? [anchorLive] : [])], { filename: fileName, provider })
+      result = await generateStoryboardImage(redrawPrompt, [...liveRefs, ...saRefs, ...(anchorLive ? [anchorLive] : [])], imgOptsAttempt)
+      }
     } else if (anchorLive) {
+      if (isSceneAsset && sceneOrderedRefs.length) {
+        const sceneFreshPrompt =
+          `按本场文字描述绘制一张全新的场景环境空镜头，视角、机位高度、景别与画面主体占比一律以本场文字描述为准。` +
+          `按以下描述绘制：${basePrompt}。${sceneRefNotes}`
+        result = await generateStoryboardImage(sceneFreshPrompt, sceneOrderedRefs, imgOptsAttempt)
+      } else {
       const anchorOnlyPrompt =
         `按以下描述绘制一张全新的环境空镜头：${basePrompt}。` +
         sceneHintNote +
         buildAnchorNote(sceneAnchorRefs.length)
       const allRefs = [...sceneAnchorRefs, anchorLive]
-      result = await generateStoryboardImage(anchorOnlyPrompt, allRefs, { filename: fileName, provider })
+      result = await generateStoryboardImage(anchorOnlyPrompt, allRefs, imgOptsAttempt)
+      }
     } else if (sceneAnchorRefs.length) {
       const sceneAnchorPrompt =
-        `以参考图为【空间与道具锚点】，严格保持其中场景的空间布局、物体形态、光照方向一致；` +
-        `按以下描述绘制当前视角：${basePrompt}。` +
-        sceneHintNote +
-        `禁止改变参考图中已有物体的形态与位置关系，禁止自由发挥添加参考图中不存在的元素。`
-      result = await generateStoryboardImage(sceneAnchorPrompt, sceneAnchorRefs, { filename: fileName, provider })
+        `按本场文字描述绘制场景环境空镜头，视角、机位高度、景别与画面主体占比一律以本场文字描述为准。` +
+        `按以下描述绘制：${basePrompt}。${sceneRefNotes}`
+      result = await generateStoryboardImage(sceneAnchorPrompt, sceneOrderedRefs, imgOptsAttempt)
     } else {
       result = await generateImage(basePrompt, imgOptsAttempt)
     }
     return result
     }   
 
-    let sceneReviews = []
-    let lastRetryNote = ''
-    for (let attempt = 0; attempt <= sceneReviewRetry; attempt++) {
-      const attemptName = attempt === 0 ? uniqueName : uniqueName.replace(/\.png$/, `_a${attempt}.png`)
-      result = await runSceneGeneration(attempt === 0 ? '' : lastRetryNote, attemptName)
-      if (!result?.success) break
-      if (!sceneReviewEnabled) break
-      const reviewUrl = result.url && String(result.url).startsWith('/uploads/') ? result.url : ''
-      if (!reviewUrl) {
-        console.warn('[/generate/asset-image] 场景质检跳过：生成结果尚未落盘')
-        break
-      }
-      const review = await reviewSceneImage(reviewUrl, {
-        episodeId: asset.episode_id,
-        sceneId: id,
-        sceneNumber: asset.scene_number,
-        ctx: sceneReviewCtx,
-        attempt: attempt + 1,
-      })
-      sceneReviews.push({ attempt: attempt + 1, url: reviewUrl, verdict: review.verdict, defects: review.defects || [], summary: review.summary || '' })
-      if (review.verdict !== 'fail') break
-      if (attempt < sceneReviewRetry) {
-        lastRetryNote = buildSceneRetryNote(review.defects)
-        console.log(`[/generate/asset-image] 场景 ${id} 质检不合格，自动重抽 ${attempt + 1}/${sceneReviewRetry}：`,
-          (review.defects || []).map((d) => d.type).join(',') || review.summary)
-      } else {
-        console.warn(`[/generate/asset-image] 场景 ${id} 重抽后仍不合格，沿用当前结果（不阻塞出图）：`,
-          (review.defects || []).map((d) => d.type).join(',') || review.summary)
-      }
-    }
+    result = await runSceneGeneration('', uniqueName)
     if (result.success) {
       let storedUrl = result.url
-      if (!storedUrl.startsWith('/uploads/')) {
+      if (!storedUrl.startsWith(UPLOADS_URL_SLASH)) {
         let lastErr = null
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             const buf = await insecureDownload(storedUrl)
             fs.writeFileSync(path.join(uploadsDir, uniqueName), buf)
-            storedUrl = `/uploads/${uniqueName}`
+            storedUrl = `${uploadsUrl(uniqueName)}`
             lastErr = null
             break
           } catch (e) {
@@ -1047,8 +1028,8 @@ router.post('/asset-image', async (req, res) => {
         ? (queryOne('SELECT project_character_id FROM characters WHERE id = ?', [id])?.project_character_id || null)
         : id
 
-      const descCol = type === 'scene' ? 'summary' : 'description'
-      const oldRow = queryOne(`SELECT image_url, ${descCol} AS description FROM ${validTypes[type].table} WHERE id = ?`, [id])
+      const descCol = assetDescField(type)
+      const oldRow = queryOne(`SELECT image_url, ${descCol} AS description FROM ${assetTable(type)} WHERE id = ?`, [id])
       let oldDesc = oldRow?.description || ''
       let oldImg = (oldRow?.image_url || '').split('?')[0]
       if (histAssetId && type === 'character') {
@@ -1073,7 +1054,7 @@ router.post('/asset-image', async (req, res) => {
         })
         execute('UPDATE scenes SET image_url = ?, gen_context = ? WHERE id = ?', [cacheBust, genCtx, id])
       } else {
-        execute(`UPDATE ${validTypes[type].table} SET image_url = ? WHERE id = ?`, [cacheBust, id])
+        execute(`UPDATE ${assetTable(type)} SET image_url = ? WHERE id = ?`, [cacheBust, id])
       }
       if (type === 'character' && histAssetId) {
         const newDesc = refList.length && editInstruction
@@ -1097,37 +1078,10 @@ router.post('/asset-image', async (req, res) => {
         ? (queryOne('SELECT description FROM project_characters WHERE id = ?', [histAssetId])?.description || '')
         : undefined
 
-      if (type === 'scene' && sceneReviewEnabled && sceneReviews.length) {
-        const lastReview = sceneReviews[sceneReviews.length - 1]
-        result.sceneReview = {
-          verdict: lastReview.verdict,
-          defects: lastReview.defects,
-          summary: lastReview.summary,
-          attempts: sceneReviews.length,
-          maxAttempts: sceneReviewRetry + 1,
-        }
-        result.sceneReviews = sceneReviews
-        if (lastReview.verdict !== 'fail') {
-          try { resolveAlertsByScene(Number(id), 'scene-regen', 'sceneReview') } catch {  }
-        } else {
-          try {
-            recordAlert({
-              source: 'sceneReview',
-              level: 'warn',
-              episodeId: asset.episode_id,
-              sceneNumber: String(asset.scene_number || ''),
-              sceneId: Number(id),
-              message: `场 ${asset.scene_number || id} 场景图重抽 ${sceneReviewRetry} 次后仍与剧本不符（${(lastReview.defects || []).map((d) => d.type).join(',') || lastReview.summary}），当前图带伤上岗——建议人工确认或改提示词后重出。`,
-              detail: JSON.stringify({ defects: lastReview.defects || [], summary: lastReview.summary || '' }),
-            })
-          } catch {  }
-        }
-      }
-
     }
     res.json(result)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    res.status(err.status || 500).json({ error: err.message })
   } finally {
     releaseSpatialGroupLock(spatialLock)
     imageJobsInflight.delete(jobKey)
@@ -1345,77 +1299,30 @@ router.post('/layout-anchor', async (req, res) => {
     })
     console.log(`[/layout-anchor] 生成布局图 group=${g} 素材: roles=${materials.roles.length} landmarks=${materials.landmarks.length} env=${materials.env.length}`)
 
-    const attempts = []
-    let finalUrl = null
-    let finalReview = null
-    let retryNote = ''
-    for (let attempt = 1; attempt <= MAX_LAYOUT_ATTEMPTS; attempt++) {
-      const p = attempt === 1
-        ? layoutPrompt
-        : buildLayoutImagePrompt({
-            group: g,
-            roles: materials.roles,
-            landmarks: materials.landmarks,
-            env: materials.env,
-            styleText: layoutStyleText,
-            retryNote,
-          })
-      const filename = `layout-${String(g).replace(/[^\w-]/g, '')}-${Date.now()}-a${attempt}.png`
-      const gen = await generateImage(p, { filename, provider })
-      if (!gen?.success || !gen.url) {
-        attempts.push({ attempt, ok: false, error: gen?.error || '生成失败' })
-        if (attempt === MAX_LAYOUT_ATTEMPTS) {
-          return res.json({ success: false, error: gen?.error || '布局图生成失败', attempts })
-        }
-        continue
-      }
-      let storedUrl = gen.url
-      if (!storedUrl.startsWith('/uploads/')) {
-        let lastErr = null
-        for (let d = 1; d <= 3; d++) {
-          try {
-            const buf = await insecureDownload(storedUrl)
-            fs.writeFileSync(path.join(uploadsDir, filename), buf)
-            storedUrl = `/uploads/${filename}`
-            lastErr = null
-            break
-          } catch (e) {
-            lastErr = e
-            console.warn(`[/layout-anchor] 远程图落本地第 ${d} 次失败：`, e.message)
-          }
-        }
-        if (lastErr) {
-          attempts.push({ attempt, ok: false, error: '本地保存失败' })
-          continue
+    const filename = `layout-${String(g).replace(/[^\w-]/g, '')}-${Date.now()}.png`
+    const gen = await generateImage(layoutPrompt, { filename, provider })
+    if (!gen?.success || !gen.url) {
+      return res.json({ success: false, error: gen?.error || '布局图生成失败' })
+    }
+    let storedUrl = gen.url
+    if (!storedUrl.startsWith(UPLOADS_URL_SLASH)) {
+      let lastErr = null
+      for (let d = 1; d <= 3; d++) {
+        try {
+          const buf = await insecureDownload(storedUrl)
+          fs.writeFileSync(path.join(uploadsDir, filename), buf)
+          storedUrl = `${uploadsUrl(filename)}`
+          lastErr = null
+          break
+        } catch (e) {
+          lastErr = e
+          console.warn(`[/layout-anchor] 远程图落本地第 ${d} 次失败：`, e.message)
         }
       }
-      const bare = storedUrl.split('?')[0]
-
-      const review = await reviewLayoutImage(bare, { episodeId: ep, attempt })
-      attempts.push({
-        attempt, ok: true, url: bare,
-        verdict: review.verdict,
-        defects: review.defects || [],
-        skipReason: review.skipReason,
-      })
-
-      finalUrl = bare
-      finalReview = review
-
-      if (review.verdict !== 'fail') {
-        console.log(`[/layout-anchor] 第 ${attempt} 版通过质检（verdict=${review.verdict}）: ${bare}`)
-        break
-      }
-      console.warn(`[/layout-anchor] 第 ${attempt} 版未通过质检：${(review.defects || []).map((d) => d.type).join(',')} — ${review.summary || ''}`)
-      retryNote = buildLayoutRetryNote(review.defects)
-      if (attempt === MAX_LAYOUT_ATTEMPTS) {
-        console.warn(`[/layout-anchor] 已达重试上限 ${MAX_LAYOUT_ATTEMPTS} 次，仍用最后一版（不阻断流程）`)
+      if (lastErr) {
+        return res.json({ success: false, error: '布局图本地保存失败' })
       }
     }
-    if (!finalUrl) {
-      return res.json({ success: false, error: '布局图生成失败（无可用版本）', attempts })
-    }
-    const storedUrl = finalUrl
     const bareStored = storedUrl.split('?')[0]
 
     const rep = queryOne(
@@ -1438,15 +1345,6 @@ router.post('/layout-anchor', async (req, res) => {
       url: bareStored,
       registered: !!reg.registered,
       materials,
-      layoutReview: {
-        verdict: finalReview?.verdict || 'skip',
-        defects: finalReview?.defects || [],
-        summary: finalReview?.summary || '',
-        skipReason: finalReview?.skipReason,
-        attempts: attempts.length,
-        maxAttempts: MAX_LAYOUT_ATTEMPTS,
-      },
-      attempts,
       cacheBust: `${bareStored}?t=${Date.now()}`,
     })
   } catch (err) {
@@ -1533,7 +1431,7 @@ router.post('/layout-anchor/upload', async (req, res) => {
   const name = `layout_${ep}_${safeGroup}_${Date.now()}.${ext}`
   try {
     fs.writeFileSync(path.join(uploadsDir, name), buf)
-    const imageUrl = `/uploads/${name}`
+    const imageUrl = `${uploadsUrl(name)}`
     registerLayoutAnchor(ep, g, imageUrl, {
       description: `空间组「${g}」布局示意图（用户上传）`,
       sourceFingerprint: '',
@@ -1616,8 +1514,8 @@ router.delete('/scene-groups/locks', (req, res) => {
 
 router.get('/asset-image/history', (req, res) => {
   const { type, id } = req.query
-  const assetTables = { character: 'characters', scene: 'scenes', prop: 'props' }
-  if (!type || !id || !assetTables[type]) return res.status(400).json({ error: 'type, id 必填' })
+  
+  if (!type || !id || !assetTable(type)) return res.status(400).json({ error: 'type, id 必填' })
 
   let histAssetId = Number(id)
   let currentImg = ''
@@ -1630,8 +1528,8 @@ router.get('/asset-image/history', (req, res) => {
     currentImg = (master?.image_url || '').split('?')[0]
     currentDesc = master?.description || ''
   } else {
-    const descCol2 = type === 'scene' ? 'summary' : 'description'
-    const row = queryOne(`SELECT image_url, ${descCol2} AS description FROM ${assetTables[type]} WHERE id = ?`, [id])
+    const descCol2 = assetDescField(type)
+    const row = queryOne(`SELECT image_url, ${descCol2} AS description FROM ${assetTable(type)} WHERE id = ?`, [id])
     currentImg = (row?.image_url || '').split('?')[0]
     currentDesc = row?.description || ''
   }
@@ -1653,8 +1551,8 @@ router.get('/asset-image/history', (req, res) => {
 
 router.post('/asset-image/restore', (req, res) => {
   const { type, id, historyId } = req.body
-  const assetTables = { character: 'characters', scene: 'scenes', prop: 'props' }
-  if (!type || !id || !historyId || !assetTables[type]) return res.status(400).json({ error: 'type, id, historyId 必填' })
+  
+  if (!type || !id || !historyId || !assetTable(type)) return res.status(400).json({ error: 'type, id, historyId 必填' })
 
   try {
     let histAssetId = Number(id)
@@ -1673,10 +1571,10 @@ router.post('/asset-image/restore', (req, res) => {
         [cacheBust, hist.description, histAssetId])
       syncProjectCharacterToEpisodes(histAssetId)
     } else {
-      const descCol = type === 'scene' ? 'summary' : 'description'
+      const descCol = assetDescField(type)
       // 换回历史版本是用户主动拍板：置空 gen_context，不参与过时判定
       const ctxCol = type === 'scene' ? ', gen_context = \'\'' : ''
-      execute(`UPDATE ${assetTables[type]} SET image_url = ?, ${descCol} = ?${ctxCol} WHERE id = ?`, [cacheBust, hist.description, id])
+      execute(`UPDATE ${assetTable(type)} SET image_url = ?, ${descCol} = ?${ctxCol} WHERE id = ?`, [cacheBust, hist.description, id])
     }
     console.log('[/asset-image/restore] restored', { type, histAssetId, historyId })
     res.json({ success: true, url: cacheBust, description: hist.description })

@@ -8,6 +8,7 @@ const QUERY_TIMEOUT_MS = 120000
 const MEDIA_TIMEOUT_MS = 600000
 const COMBAT_VIDEO_TIMEOUT_MS = 900000
 const VIDEO_TIMEOUT_MS = 1200000
+const CONNECT_TEST_TIMEOUT_MS = 30000
 
 async function request(path, options = {}) {
   const timeoutMs = Number(options.timeout) > 0 ? Number(options.timeout) : DEFAULT_TIMEOUT_MS
@@ -71,6 +72,7 @@ export const api = {
 
   getEpisodes: (projectId) => request(`/episodes/project/${projectId}`),
   getEpisode: (id) => request(`/episodes/${id}`),
+  getStoryboardGraph: (id) => request(`/episodes/${id}/storyboard-graph`),
   createEpisode: (projectId, data = {}) =>
     request('/episodes', { method: 'POST', body: { project_id: projectId, ...data } }),
   updateEpisodeTitle: (id, title) =>
@@ -112,10 +114,14 @@ export const api = {
   getShotGridJobs: () => request('/generate/shot-grid/status'),
   generateImage: (data) => request('/generate/image', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS }),
   getImageJobsInflight: () => request('/generate/image/inflight'),
-  generateVideoCombat: (data) => request('/generate/video-v3', { method: 'POST', body: data, timeout: COMBAT_VIDEO_TIMEOUT_MS }),
-  generateVideoV4: (data) => request('/generate/video-v4', { method: 'POST', body: data, timeout: VIDEO_TIMEOUT_MS }),
-  getVideoV3JobsInflight: () => request('/generate/video-v3/inflight'),
-  getVideoV4JobsInflight: () => request('/generate/video-v4/inflight'),
+  // 出片任务化：提交接口只做校验+建单，毫秒级返回 jobId；结果走 getVideoJobs 轮询
+  getShotDurationLimits: () => request('/generate/video/duration-limits', { timeout: QUERY_TIMEOUT_MS }),
+  generateVideoCombat: (data) => request('/generate/video-v3', { method: 'POST', body: data, timeout: QUERY_TIMEOUT_MS }),
+  generateVideoV4: (data) => request('/generate/video-v4', { method: 'POST', body: data, timeout: QUERY_TIMEOUT_MS }),
+  getVideoJobs: (episodeId, activeOnly = false) =>
+    request(`/generate/video-jobs?episodeId=${encodeURIComponent(episodeId)}${activeOnly ? '&activeOnly=1' : ''}`, { timeout: POLL_TIMEOUT_MS }),
+  getCompositions: (episodeId) =>
+    request(`/generate/video/compositions?episodeId=${encodeURIComponent(episodeId)}`, { timeout: QUERY_TIMEOUT_MS }),
   composeVideo: (data) => request('/generate/video/compose', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS }),
   getBgmList: () => request('/generate/bgm-list'),
   getAlerts: (params = {}) => {
@@ -130,6 +136,7 @@ export const api = {
   deleteShotsVideo: (episodeId, shotIds) =>
     request(`/episodes/${episodeId}/shots/video-delete`, { method: 'POST', body: { shotIds } }),
   generateAssetImage: (data, options = {}) => request('/generate/asset-image', { method: 'POST', body: data, timeout: MEDIA_TIMEOUT_MS, signal: options.signal }),
+  assetHistory: (type, id) => request(`/generate/asset-history?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}`, { timeout: QUERY_TIMEOUT_MS }),
   getSceneSpatialGroups: (episodeId) =>
     request(`/generate/scene-spatial-groups?episodeId=${encodeURIComponent(episodeId)}`, { timeout: QUERY_TIMEOUT_MS }),
   getSpatialGroupReviewStatus: (episodeId) =>
@@ -167,13 +174,6 @@ export const api = {
     request(`/episodes/${episodeId}/extract-info`, { method: 'POST', body: { assetsScriptFp } }),
   generateBlocking: (data) => request('/generate/blocking', { method: 'POST', body: data, timeout: LLM_TIMEOUT_MS }),
 
-  getQcReport: (episodeId, includeIgnored = false) =>
-    request(`/generate/qc-report?episodeId=${encodeURIComponent(episodeId)}${includeIgnored ? '&includeIgnored=1' : ''}`),
-  qcFix: (data) => request('/generate/qc-fix', { method: 'POST', body: data, timeout: LLM_LONG_TIMEOUT_MS }),
-  qcIgnore: (data) => request('/generate/qc-ignore', { method: 'POST', body: data }),
-  qcUnignore: (data) => request('/generate/qc-unignore', { method: 'POST', body: data }),
-  getQcIgnores: (episodeId) => request(`/generate/qc-ignores?episodeId=${encodeURIComponent(episodeId)}`),
-
   getTask: (taskId) => request(`/tasks/${taskId}`),
 
   getLibraryAssets: (type, page = 1, size = 32, keyword = '', source = 'library') =>
@@ -197,6 +197,23 @@ export const api = {
   createStyle: (data) => request('/styles', { method: 'POST', body: data }),
   updateStyle: (key, data) => request(`/styles/${encodeURIComponent(key)}`, { method: 'PATCH', body: data }),
   deleteStyle: (key) => request(`/styles/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+
+  getModelConfig: () => request('/model-config'),
+  getModelImageOptions: () => request('/model-config/image-models'),
+  getAvailableModels: (refresh = false) =>
+    request(`/model-config/available-models${refresh ? '?refresh=1' : ''}`),
+  updateModelAccount: (key, data) =>
+    request(`/model-config/account/${encodeURIComponent(key)}`, { method: 'PUT', body: data }),
+  updateModelText: (data) => request('/model-config/text', { method: 'PUT', body: data }),
+  createModelEntry: (data) => request('/model-config/entries', { method: 'POST', body: data }),
+  updateModelEntry: (id, data) =>
+    request(`/model-config/entries/${encodeURIComponent(id)}`, { method: 'PUT', body: data }),
+  deleteModelEntry: (id) =>
+    request(`/model-config/entries/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  setModelEntryDefault: (id) =>
+    request(`/model-config/entries/${encodeURIComponent(id)}/default`, { method: 'POST', body: {} }),
+  testModelConnection: (target) =>
+    request('/model-config/test-connection', { method: 'POST', body: { target }, timeout: CONNECT_TEST_TIMEOUT_MS }),
 
   getProjectCharacters: (projectId) => request(`/project-characters?projectId=${projectId}`),
   updateProjectCharacter: (id, data) => request(`/project-characters/${id}`, { method: 'PUT', body: data }),

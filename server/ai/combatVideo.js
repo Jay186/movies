@@ -1,15 +1,16 @@
 import path from 'node:path'
+import { uploadsUrl, uploadsDir } from '../paths.js'
 import fs from 'node:fs'
 import { runWorkflow, uploadMediaFileName, insecureDownload } from './runninghub.js'
 import { config } from '../config.js'
-import { uploadsDir } from '../paths.js'
-
 
 const BLANK_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
 
-const IDEA_TEMPLATE =
-  '根据图像识别适合他的酷炫感和节奏感。需要节奏快，有蓄力和快慢的节奏，然后开头先输出 BUNNY 这个词后再正常输出提示词。\n个人想法输入：'
+// 打斗工作流的提示词模板（含其 LoRA 触发词）与机位约束句均属【工作流契约】，
+// 由 config 提供、env 可覆盖；换工作流 / 换 LoRA 不必改代码。
+const IDEA_TEMPLATE = config.video.combatIdeaTemplate
+const CAMERA_LOCK = config.video.combatCameraLock
 
 const COMBAT_ASPECT_RATIOS = config.video.combatAspectRatios
 const COMBAT_DURATION_MIN = config.video.combatDurationMin
@@ -45,8 +46,6 @@ export async function generateShotVideoCombat(params = {}, options = {}) {
     return { success: false, error: `参考图上传失败: ${e.message}` }
   }
 
-  const CAMERA_LOCK =
-    '全程侧面机位拍摄，镜头与战斗双方连线平行，禁止角色转向镜头或冲向镜头方向移动，禁止面向镜头挥拳。'
   const hasCameraLock = /机位|POV|视角|面向镜头|冲向镜头|转向镜头|镜头固定|固定镜头/.test(ideaText)
   const finalIdeaText = hasCameraLock
     ? ideaText
@@ -76,7 +75,7 @@ export async function generateShotVideoCombat(params = {}, options = {}) {
     const filename = `shot_${shotId}_h3combat_${Date.now()}.mp4`
     fs.mkdirSync(uploadsDir, { recursive: true })
     fs.writeFileSync(path.join(uploadsDir, filename), buf)
-    return { ...result, videoUrl: `/uploads/${filename}` }
+    return { ...result, videoUrl: `${uploadsUrl(filename)}` }
   } catch (e) {
     console.warn(
       `[generateShotVideoCombat] 成片落本地失败（shot ${shotId}），返回 24h 云端 URL:`,

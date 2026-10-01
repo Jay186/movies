@@ -21,7 +21,10 @@ const TABLE_META = {
   },
   scenes: {
     key: 'title',
-    protected: ['summary', 'prop_names', 'image_url', 'title_en', 'summary_en', 'lighting_en', 'location'],
+    // lighting_en 已退出提取契约（光照统一由组级光照常量承载）：
+    // 不再列为保护字段——旧值若是提取期错例（如"冰雪必须冷调"时代的全天阴），
+    // 重提取时必须允许被新值（通常为空）覆盖，否则错误被永久固化。
+    protected: ['summary', 'prop_names', 'image_url', 'title_en', 'summary_en', 'location', 'space_type', 'space_evidence'],
   },
 }
 
@@ -201,8 +204,10 @@ export function applyKeepForScenes(incoming = [], oldRows = []) {
       imageUrl: old.image_url || s.imageUrl || s.image_url || '',
       titleEn: old.title_en || llmStr(s.titleEn, s.title_en),
       summaryEn: old.summary_en || llmStr(s.summaryEn, s.summary_en),
-      lightingEn: old.lighting_en || llmStr(s.lightingEn, s.lighting_en),
+      lightingEn: llmStr(s.lightingEn, s.lighting_en),
       location: old.location ?? s.location ?? s.location_en ?? '',
+      spaceType: old.space_type || s.spaceType || s.space_type || '',
+      spaceEvidence: old.space_evidence || s.spaceEvidence || s.space_evidence || '',
     }
   })
   const have = new Set(incoming.map((s) => norm(s.name || s.title).trim()))
@@ -217,6 +222,8 @@ export function applyKeepForScenes(incoming = [], oldRows = []) {
       summaryEn: old.summary_en || '',
       lightingEn: old.lighting_en || '',
       location: old.location ?? '',
+      spaceType: old.space_type || '',
+      spaceEvidence: old.space_evidence || '',
       __restored: true,
     })
   }

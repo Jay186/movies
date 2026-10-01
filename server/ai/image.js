@@ -1,85 +1,61 @@
-import { config } from '../config.js'
-import { runWorkflow } from './runninghub.js'
 import { ziklGenerateImage, ziklEditImage } from './ziklImage.js'
-import { visionaryGenerateImage, visionaryEditImage } from './visionaryImage.js'
+import { getImageEntry, getDefaultImageEntry, getEffectiveImageAccount } from '../modelConfig.js'
 
-const VISIONARY_MODELS = new Set([
-  'gpt-image-2',
-  'nano-banana-pro',
-  'Nano_Banana_Pro',
-  'nano-banana-pro-cl',
-  'nano-banana-2-lite',
-])
-const VISIONARY_EDIT_MODELS = new Set([
-  'nano-banana-pro',
-  'Nano_Banana_Pro',
-  'nano-banana-pro-cl',
-  'nano-banana-2-lite',
-])
+// 生图通道唯一走「AI 模型配置」的图片条目（OpenAI 兼容聚合网关）。
+// 运行期不再回退 .env：无可用条目或通道未配真实 Key → 抛可读 400，由路由层映射给前端。
+const QMX_PROVIDER = 'qimingxing'
 
-const VISIONARY_RETIRED_MODELS = new Map([
-  ['gpt-image-2', 'nano-banana-pro'],
-])
-
-export function resolutionForModel(model) {
-  const effective = model || config.image.visionary.model
-  return effective === 'gpt-image-2' ? '1K' : config.image.visionary.resolution
+function badRequest(message) {
+  return Object.assign(new Error(message), { status: 400 })
 }
 
-export function resolveProvider(options = {}) {
-  let provider = options.provider || config.image.provider
-  let model = options.model
+function normalizeEntryId(v) {
+  if (typeof v === 'number' && Number.isInteger(v) && v > 0) return v
+  if (typeof v === 'string' && /^\d+$/.test(v.trim())) return Number(v.trim())
+  return null
+}
 
-  if (typeof model === 'string' && model.startsWith('visionary-')) {
-    model = model.slice('visionary-'.length)
-    provider = 'visionary'
+// 入参为 ai_model_entries.id（前端下发的生图条目 id）→ 按条目解析；
+// 旧渠道字符串（非数字条目 id）或找不到条目 / 条目已停用 → 回落默认生图条目；
+// 无可用条目或通道未配 Key → 明确报错，绝不静默套用 .env。
+export function resolveProvider(options = {}) {
+  const id = normalizeEntryId(options.provider) ?? normalizeEntryId(options.model)
+  const picked = id != null ? getImageEntry(id) : null
+  const entry = picked && picked.enabled ? picked : getDefaultImageEntry()
+  if (!entry) {
+    throw badRequest('生图模型未配置：请在「AI 模型配置」的「生图通道」里添加并启用至少一个生图模型')
   }
-  if (provider?.startsWith('visionary-')) {
-    model = provider.slice('visionary-'.length)
-    provider = 'visionary'
-  } else if (VISIONARY_MODELS.has(provider)) {
-    model = provider
-    provider = 'visionary'
+  const account = getEffectiveImageAccount()
+  if (!account.configured) {
+    throw badRequest('生图通道未配置：请在「AI 模型配置」里为「生图通道」填写 API Key')
   }
-  if (provider !== 'visionary' && VISIONARY_MODELS.has(model)) {
-    provider = 'visionary'
+  return {
+    provider: QMX_PROVIDER,
+    model: entry.model_id,
+    entry,
+    baseURL: account.baseURL,
+    apiKey: account.apiKey,
   }
-  if (provider === 'visionary' && VISIONARY_RETIRED_MODELS.has(model)) {
-    const fallback = VISIONARY_RETIRED_MODELS.get(model)
-    console.warn(`[resolveProvider] visionary 模型 ${model} 平台已不受支持（实测 400），自动改用 ${fallback}`)
-    model = fallback
-  }
-  return { provider, model }
 }
 
 export async function generateImage(prompt, options = {}) {
-  const { provider, model } = resolveProvider(options)
-  console.log('[generateImage] provider=', provider, '| model=', model, '| options.provider=', options.provider, '| config.default=', config.image.provider, '| prompt=', String(prompt).slice(0, 60))
-  if (provider === 'runninghub') {
-    return runWorkflow('imageGenerator', { prompt }, options)
-  }
-  if (provider === 'visionary') {
-    return visionaryGenerateImage(prompt, { ...options, model })
-  }
-  return ziklGenerateImage(prompt, options)
+  const resolved = resolveProvider(options)
+  console.log('[generateImage] provider=', resolved.provider, '| model=', resolved.model, '| options.provider=', options.provider, '| prompt=', String(prompt).slice(0, 60))
+  return ziklGenerateImage(prompt, {
+    ...options,
+    baseURL: resolved.baseURL,
+    apiKey: resolved.apiKey,
+    model: resolved.model,
+  })
 }
 
 export async function generateStoryboardImage(prompt, imageList = [], options = {}) {
-  const { provider, model } = resolveProvider(options)
-  let effectiveModel = model
-  if (provider === 'visionary') {
-    const resolvedModel = model || config.image.visionary.model
-    if (!VISIONARY_EDIT_MODELS.has(resolvedModel)) {
-      effectiveModel = 'nano-banana-pro'
-      console.warn(`[generateStoryboardImage] Visionary 模型 ${resolvedModel} 不支持参考图，已自动改用 nano-banana-pro`)
-    }
-  }
-  console.log('[generateStoryboardImage] provider=', provider, '| model=', effectiveModel, '| refs.len=', imageList.length, '| prompt=', String(prompt).slice(0, 60))
-  if (provider === 'visionary') {
-    return visionaryEditImage(imageList, prompt, { ...options, model: effectiveModel })
-  }
-  if (provider === 'runninghub') {
-    console.warn('[generateStoryboardImage] runninghub 无参考图槽，本次图生图实际走 zikl 通道（gpt-image-2）')
-  }
-  return ziklEditImage(imageList, prompt, options)
+  const resolved = resolveProvider(options)
+  console.log('[generateStoryboardImage] provider=', resolved.provider, '| model=', resolved.model, '| refs.len=', imageList.length, '| prompt=', String(prompt).slice(0, 60))
+  return ziklEditImage(imageList, prompt, {
+    ...options,
+    baseURL: resolved.baseURL,
+    apiKey: resolved.apiKey,
+    model: resolved.model,
+  })
 }

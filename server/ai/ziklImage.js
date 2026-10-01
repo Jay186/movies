@@ -1,14 +1,15 @@
 import { config } from '../config.js'
+import { UPLOADS_URL_SLASH, UPLOADS_PREFIX_RE, uploadsUrl, uploadsDir } from '../paths.js'
 import { logAiCall } from './aiLog.js'
 import { insecureDownload } from './runninghub.js'
+import { openaiImagesGenerationsUrl, openaiImagesEditsUrl } from './openaiUrl.js'
 import { mimeFromExt, netErrMsg } from './shared.js'
 import undiciPkg from 'undici'
 const { fetch: undiciFetch, EnvHttpProxyAgent, FormData: UndiciFormData } = undiciPkg
 import fs from 'node:fs'
 import path from 'node:path'
-import { uploadsDir } from '../paths.js'
-import { shrinkRefImage } from './refImage.js'
 
+import { shrinkRefImage } from './refImage.js'
 
 let ziklDispatcher = null
 function getZiklDispatcher() {
@@ -64,13 +65,26 @@ async function shrinkRef(ref) {
   return { ...ref, ...out }
 }
 
+// 运行时凭据解析：apiKey / baseURL / model 一律由调用方（AI 模型配置生效值）传入；
+// 不再回退 .env——缺省即视为未配置，由下方 !apiKey 分支给出可读错误。
+// size / proxy 属请求与网络参数（非凭据），仍走 config。
+function runtimeCredentials(options = {}) {
+  const cfg = config.image.zikl
+  return {
+    apiKey: options.apiKey || '',
+    baseURL: options.baseURL || '',
+    model: options.model || '',
+    size: options.size || cfg.size,
+  }
+}
+
 export async function ziklGenerateImage(prompt, options = {}) {
-  const { apiKey, baseURL, model: defaultModel, size: defaultSize } = config.image.zikl
+  const { apiKey, baseURL, model: defaultModel, size: defaultSize } = runtimeCredentials(options)
   const startedAt = Date.now()
   const ctx = options.usageContext || {}
 
   if (!apiKey) {
-    return { success: false, error: 'ZIKL_API_KEY 未配置，请在 server/.env 设置' }
+    return { success: false, error: '生图账号 API Key 未配置，请在「AI 模型配置」中设置' }
   }
   if (!prompt || !String(prompt).trim()) {
     return { success: false, error: 'prompt 必填' }
@@ -89,7 +103,7 @@ export async function ziklGenerateImage(prompt, options = {}) {
 
   let res
   try {
-    res = await fetchWithRetry(`${baseURL}/v1/images/generations`, {
+    res = await fetchWithRetry(openaiImagesGenerationsUrl(baseURL), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
@@ -97,7 +111,7 @@ export async function ziklGenerateImage(prompt, options = {}) {
   } catch (e) {
     const msg = netErrMsg(e)
     logAiCall({
-      kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image',
+      kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', prompt: body.prompt,
       latencyMs: Date.now() - startedAt, success: false, errorFamily: /超时/.test(msg) ? 'timeout' : 'unknown', errorMsg: msg,
     })
     return { success: false, error: msg }
@@ -111,7 +125,7 @@ export async function ziklGenerateImage(prompt, options = {}) {
       : 'content'
     const msg = `生图失败 (HTTP ${res.status})${errText ? ': ' + errText.slice(0, 300) : ''}`
     logAiCall({
-      kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image',
+      kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', prompt: body.prompt,
       latencyMs: Date.now() - startedAt, success: false, errorFamily: family, errorMsg: msg,
     })
     return { success: false, error: msg }
@@ -122,7 +136,7 @@ export async function ziklGenerateImage(prompt, options = {}) {
     data = await res.json()
   } catch (e) {
     const msg = `生图返回解析失败: ${e.message}`
-    logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
+    logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', prompt: body.prompt, latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
     return { success: false, error: msg }
   }
 
@@ -130,7 +144,7 @@ export async function ziklGenerateImage(prompt, options = {}) {
   const item = items[0]
   if (!item || (!item.b64_json && !item.url)) {
     const msg = '生图返回缺少图片数据'
-    logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
+    logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', prompt: body.prompt, latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
     return { success: false, error: msg }
   }
 
@@ -144,15 +158,13 @@ export async function ziklGenerateImage(prompt, options = {}) {
     fs.writeFileSync(path.join(uploadsDir, filename), buf)
   } catch (e) {
     const msg = `图片落盘失败: ${e.message}`
-    logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', latencyMs: Date.now() - startedAt, success: false, errorFamily: 'unknown', errorMsg: msg })
+    logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', prompt: body.prompt, latencyMs: Date.now() - startedAt, success: false, errorFamily: 'unknown', errorMsg: msg })
     return { success: false, error: msg }
   }
 
-  logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', latencyMs: Date.now() - startedAt, success: true })
-  return { success: true, url: `/uploads/${filename}`, width: item.width, height: item.height }
+  logAiCall({ kind: 'image', model: body.model, episodeId: ctx.episodeId, task: ctx.task || 'image', prompt: body.prompt, latencyMs: Date.now() - startedAt, success: true })
+  return { success: true, url: `${uploadsUrl(filename)}`, width: item.width, height: item.height }
 }
-
-
 
 async function resolveImageBuffer(source) {
   const s = String(source)
@@ -174,8 +186,8 @@ async function resolveImageBuffer(source) {
     return { buffer, filename, mimeType: mimeFromExt(filename) }
   }
 
-  if (s.startsWith('/uploads/')) {
-    const relPath = decodeURIComponent(s.split(/[?#]/)[0]).replace(/^\/uploads\//, '')
+  if (s.startsWith(UPLOADS_URL_SLASH)) {
+    const relPath = decodeURIComponent(s.split(/[?#]/)[0]).replace(UPLOADS_PREFIX_RE, '')
     const filename = path.basename(relPath)
     const buffer = fs.readFileSync(path.join(uploadsDir, relPath))
     return { buffer, filename, mimeType: mimeFromExt(filename) }
@@ -188,11 +200,11 @@ async function resolveImageBuffer(source) {
 }
 
 export async function ziklEditImage(images, prompt, options = {}) {
-  const { apiKey, baseURL, model: defaultModel } = config.image.zikl
+  const { apiKey, baseURL, model: defaultModel } = runtimeCredentials(options)
   const startedAt = Date.now()
   const ctx = options.usageContext || {}
 
-  if (!apiKey) return { success: false, error: 'ZIKL_API_KEY 未配置，请在 server/.env 设置' }
+  if (!apiKey) return { success: false, error: '生图账号 API Key 未配置，请在「AI 模型配置」中设置' }
   if (!Array.isArray(images) || !images.length) return { success: false, error: '图生图缺少参考图' }
   if (!prompt || !String(prompt).trim()) return { success: false, error: 'prompt 必填' }
 
@@ -201,7 +213,7 @@ export async function ziklEditImage(images, prompt, options = {}) {
     refs = await Promise.all((await Promise.all(images.map(resolveImageBuffer))).map(shrinkRef))
   } catch (e) {
     const msg = `参考图读取失败: ${e.message}`
-    logAiCall({ kind: 'image', model: options.model || defaultModel, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
+    logAiCall({ kind: 'image', model: options.model || defaultModel, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', prompt: String(prompt), latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
     return { success: false, error: msg }
   }
 
@@ -222,14 +234,14 @@ export async function ziklEditImage(images, prompt, options = {}) {
 
   let res
   try {
-    res = await fetchWithRetry(`${baseURL}/v1/images/edits`, {
+    res = await fetchWithRetry(openaiImagesEditsUrl(baseURL), {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}` },
       body: formData,
     }, { timeoutMs })
   } catch (e) {
     const msg = netErrMsg(e)
-    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', latencyMs: Date.now() - startedAt, success: false, errorFamily: /超时/.test(msg) ? 'timeout' : 'unknown', errorMsg: msg })
+    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', prompt: String(prompt), latencyMs: Date.now() - startedAt, success: false, errorFamily: /超时/.test(msg) ? 'timeout' : 'unknown', errorMsg: msg })
     return { success: false, error: msg }
   }
 
@@ -240,7 +252,7 @@ export async function ziklEditImage(images, prompt, options = {}) {
       : res.status >= 500 ? 'server'
       : 'content'
     const msg = `图生图失败 (HTTP ${res.status})${errText ? ': ' + errText.slice(0, 300) : ''}`
-    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', latencyMs: Date.now() - startedAt, success: false, errorFamily: family, errorMsg: msg })
+    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', prompt: String(prompt), latencyMs: Date.now() - startedAt, success: false, errorFamily: family, errorMsg: msg })
     return { success: false, error: msg }
   }
 
@@ -249,7 +261,7 @@ export async function ziklEditImage(images, prompt, options = {}) {
     data = await res.json()
   } catch (e) {
     const msg = `图生图返回解析失败: ${e.message}`
-    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
+    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', prompt: String(prompt), latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
     return { success: false, error: msg }
   }
 
@@ -257,7 +269,7 @@ export async function ziklEditImage(images, prompt, options = {}) {
   const item = items[0]
   if (!item || (!item.b64_json && !item.url)) {
     const msg = '图生图返回缺少图片数据'
-    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
+    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', prompt: String(prompt), latencyMs: Date.now() - startedAt, success: false, errorFamily: 'content', errorMsg: msg })
     return { success: false, error: msg }
   }
 
@@ -271,10 +283,10 @@ export async function ziklEditImage(images, prompt, options = {}) {
     fs.writeFileSync(path.join(uploadsDir, filename), buf)
   } catch (e) {
     const msg = `图片落盘失败: ${e.message}`
-    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', latencyMs: Date.now() - startedAt, success: false, errorFamily: 'unknown', errorMsg: msg })
+    logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', prompt: String(prompt), latencyMs: Date.now() - startedAt, success: false, errorFamily: 'unknown', errorMsg: msg })
     return { success: false, error: msg }
   }
 
-  logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', latencyMs: Date.now() - startedAt, success: true })
-  return { success: true, url: `/uploads/${filename}`, width: item.width, height: item.height }
+  logAiCall({ kind: 'image', model, episodeId: ctx.episodeId, task: ctx.task || 'image-edit', prompt: String(prompt), latencyMs: Date.now() - startedAt, success: true })
+  return { success: true, url: `${uploadsUrl(filename)}`, width: item.width, height: item.height }
 }

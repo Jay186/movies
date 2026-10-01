@@ -1,6 +1,6 @@
 import { queryOne } from '../db.js'
 import { scriptHash } from '../scriptHash.js'
-import { findStylePoison } from './storyboardValidator.js'
+import { TYPE_CHARACTER, TYPE_SCENE, TYPE_PROP, assetLabel, assetTable } from './assetTypes.js'
 
 export function assertScriptConfirmed(episodeId) {
   const ep = queryOne('SELECT script_confirmed FROM episodes WHERE id = ?', [episodeId])
@@ -40,10 +40,11 @@ export function assertNotStale(episodeId, kind) {
 // 与 assertNotStale 的区别——后者判「资产是否过期」（指纹比对，fp 为空视为无指纹放行），
 // 本函数判「资产是否存在」。分镜的资产锚（characters/sceneAssets/propAssets）是"按名匹配"已建资产，
 // 空清单会导致镜头无参考图、出片环境与画风漂移，且下游校验多为静默降级，故必须在入口拦截。
+// 表名与中文标签取自 ASSET_META 单一事实源；why 为该类型的守卫说明文案，随类型走。
 const ASSET_CLASSES = [
-  { table: 'characters', label: '角色', why: '角色缺了，characters 字段全空，生图没有人物参考图' },
-  { table: 'scenes', label: '场景', why: '场景缺了，sceneAssets 全空，环境与画风会跟着角色参考图漂' },
-  { table: 'props', label: '道具', why: '道具缺了，propAssets 全空，关键道具会被模型自由发挥' },
+  { table: assetTable(TYPE_CHARACTER), label: assetLabel(TYPE_CHARACTER), why: '角色缺了，characters 字段全空，生图没有人物参考图' },
+  { table: assetTable(TYPE_SCENE), label: assetLabel(TYPE_SCENE), why: '场景缺了，sceneAssets 全空，环境与画风会跟着角色参考图漂' },
+  { table: assetTable(TYPE_PROP), label: assetLabel(TYPE_PROP), why: '道具缺了，propAssets 全空，关键道具会被模型自由发挥' },
 ]
 
 export function assertAssetsExist(episodeId) {
@@ -64,40 +65,6 @@ export function assertAssetsExist(episodeId) {
   }
 }
 
-export function assertNoStylePoison(shot, allowStyleShift) {
-  if (allowStyleShift) return
-  let styleTexts = ''
-  let styleCategory = ''
-  try {
-    const project = queryOne('SELECT art_style FROM projects WHERE id = (SELECT project_id FROM episodes WHERE id = ?)', [shot.episode_id])
-    if (project?.art_style) {
-      styleTexts = project.art_style
-      const sp = queryOne('SELECT prompt, prompt_en, category_key FROM style_presets WHERE label = ? LIMIT 1', [project.art_style])
-      if (sp) {
-        styleTexts += '\n' + (sp.prompt || '') + '\n' + (sp.prompt_en || '')
-        styleCategory = String(sp.category_key || '').trim()
-      }
-    }
-  } catch {  }
-  const hits = findStylePoison(
-    [
-      shot.description,
-      shot.integrated_multimodal_description,
-      shot.final_frame,
-      shot.action_note,
-      shot.blocking_plan,
-      shot.video_prompt_override,
-    ],
-    styleTexts,
-    styleCategory
-  )
-  if (hits.length) {
-    const err = new Error(
-      `本镜文本含风格切换毒词「${hits.join('、')}」：全片画风统一是铁律（历史实锤：整段被拉去写实画风导致返工）。` +
-      `"变强/异变/变身"只能用画面内容表达（体型/毛发/红眼/蒸汽/特效），不能切换画风。` +
-      `请编辑该镜描述/prompt 删除这些词；若本集确属有意切换画风，传 allowStyleShift: true 显式放行。`
-    )
-    err.status = 400
-    throw err
-  }
-}
+// （QC 画风毒词硬门禁 assertNoStylePoison 已随 QC 整体移除：2026-09-26。
+//  画风统一改由提示词规则前置约束——storyboardRules.styleLockRule 引用
+//  storyboardValidator 的毒词词典，把禁用词写进生成规则，不再做事后拦截。）

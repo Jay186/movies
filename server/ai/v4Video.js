@@ -1,15 +1,15 @@
 import path from 'node:path'
+import { uploadsUrl, continuityTailImagePath, uploadsDir, continuityDir } from '../paths.js'
 import fs from 'node:fs'
 import { runWorkflow, uploadMediaFileName, uploadAudioV2, insecureDownload, downloadWithRetry, isPlausibleMp4 } from './runninghub.js'
 import { runFfmpeg } from './ffmpeg.js'
-import { translateShotFields, translateShotSize, translateCameraMovement, translateCameraAngle, translateTone } from './h3PromptTranslator.js'
+import { resolveWorkflowId } from '../modelConfig.js'
+import { translateShotFields, translateShotSize, translateCameraMovement, translateCameraAngle, translateCameraAngleElevation, translateLens, translateTone, translateWorldStateOnly } from './h3PromptTranslator.js'
 import { config } from '../config.js'
-import { clean as cleanShared, pickEnglish, stripResidualCjk, resolveAssetName, truncateStyle, formatCutTimestamp, pickInjectableEnglish, cleanDesc, lowerFirst, resolveDesc, normalizeTone, stripLeadingShotSize, tagSubjectFirstMentions, CJK_DIRTY_RE } from './shared.js'
-import { groupImdModules } from './imdCompiler.js'
+import { clean as cleanShared, pickEnglish, stripResidualCjk, resolveAssetName, truncateStyle, formatCutTimestamp, pickInjectableEnglish, cleanDesc, lowerFirst, resolveDesc, normalizeTone, stripLeadingShotSize, reconcileShotSizeScale, resolvePlaceholderSubjectNames, tagSubjectFirstMentions, identityFeatures, CJK_DIRTY_RE, normalizeCjkPunct } from './shared.js'
 import { parseDialogue } from './dialogue.js'
-import { uploadsDir, continuityDir } from '../paths.js'
-export { pickEnglish, stripResidualCjk }
 
+export { pickEnglish, stripResidualCjk }
 
 const BLANK_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
@@ -36,7 +36,7 @@ function silenceWavDataUri(seconds = 1) {
 }
 const SILENCE_WAV = silenceWavDataUri(1)
 
-function normalizeVideoParams(params = {}) {
+export function normalizeVideoParams(params = {}) {
   return {
     aspectRatio: config.video.combatAspectRatios.includes(params.aspectRatio) ? params.aspectRatio : config.video.defaultAspectRatio,
     megapixels: config.video.megapixels.includes(String(params.megapixels)) ? String(params.megapixels) : config.video.defaultMegapixels,
@@ -91,9 +91,38 @@ const stripEffortSentences = (s) =>
     .join(' ')
 export const cleanVoiceDescription = (s) => deShout(stripEffortSentences(s))
 
+// world_state 是从上一镜派生的状态快照，可能在本镜主体已经变化后仍保留旧角色。
+// 只解析显式的 @主体=状态条目，并与本镜实际挂载的参考资产比对；调用方据此决定
+// 是否把该快照送入 H3。这里不修改分镜数据，也不增加分镜导入阻断规则。
+export function findUndeclaredWorldStateSubjects(worldState, declaredNames = []) {
+  const allowed = new Set(
+    (Array.isArray(declaredNames) ? declaredNames : [declaredNames])
+      .map((name) => String(name || '').trim().toLocaleLowerCase())
+      .filter(Boolean),
+  )
+  const found = []
+  // 状态串通常只在第一项写 @，后续项以「；主体=状态」继续列出；两种都识别。
+  const re = /(?:^|[;；])\s*@?([^=：:;；\n]+?)\s*(?:=|：|:)/g
+  const source = String(worldState || '')
+  let match
+  while ((match = re.exec(source))) {
+    const name = String(match[1] || '').trim()
+    if (!name) continue
+    const key = name.toLocaleLowerCase()
+    if (!allowed.has(key) && !found.some((item) => item.toLocaleLowerCase() === key)) found.push(name)
+  }
+  return found
+}
+
 // 单镜连续负向块（代码层固定注入）：实测证明写进中文描述的规避清单会被翻译层整段丢弃，必须在组装层原文注入。
 // 只放对任意单镜都成立的通用约束（连续单镜/无场景切换/身份连续），不含项目特定内容；config.video.h3SingleTakeBlock 可关
 const H3_SINGLE_TAKE_BLOCK = 'One continuous single take: no camera cuts, no scene change, no time skip; every character keeps its identity, appearance, and position throughout, and the environment stays the same location from start to end.'
+
+// 固定机位构图锁定句（仅 camera_movement=固定 时注入）：借鉴 Runway Gen-4 四维锚定法。
+// SINGLE_TAKE_BLOCK 锁了换镜/换场/身份/位置，唯独没锁 zoom/reframing——模型会在"固定"镜内
+// 自行 zoom out 重新构图（2026-09-25 出片事故：某镜 t≈14.8s 处主体占比 1/2→1/3 缩水）。
+// 仅对固定机位注入，避免与推近/拉远等动态运镜矛盾。
+const STATIC_CAMERA_LOCK = 'Shot on a locked-off tripod with the framing frozen from first frame to last: no zoom in, no zoom out, no reframing, no dolly, no truck — the field of view and image scale stay identical for the entire duration of the shot.'
 
 // 情绪基调（中文 2-6 字）→ 光色/节奏词素：子串命中即用，无匹配不注入（对自由文本零风险）
 const EMOTION_VISUAL_MAP = [
@@ -117,7 +146,6 @@ function emotionVisualOf(tone) {
   return ''
 }
 
-
 export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   const { stylePrompt = '', stylePromptEn = '', styleLabelEn = '', refs = [], audioRefs = [], isCombat = false, translate, speakerIds, retryNote = '', combatNote = '', continuationVideo = false } = ctx
   const tr = typeof translate === 'function' ? translate : translateShotFields
@@ -137,7 +165,7 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
     const h3Limit = config.storyboard?.h3PromptCharLimit ?? 7000
     const budgetSafety = config.video?.h3PromptBudgetSafety ?? 400 // 英译长度波动余量
     const SOUNDSCAPE_MUSIC_RESERVE = 350 // 声景+配乐+段头预留（空翻译骨架量不到）
-    const WORLDSTATE_FINALFRAME_RESERVE = 420 // 站位句 + 末帧兜底翻译的字符预留（数据模型重构 C）
+    const WORLDSTATE_FINALFRAME_RESERVE = 720 // 开场/收尾状态 + 末帧兜底翻译的字符预留
     const EN_WORD_CHARS = 6              // 英文平均词长含空格（实测标定）
     try {
       const skeleton = await buildShotVideoPromptV4(shot, { ...ctx, __skeletonPass: true, translate: async () => ({}) })
@@ -148,6 +176,12 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   }
   // 裁剪量（第二遍组装由函数尾部的超限检测注入）：从扩写尾部按句边界裁掉
   const enforceTrim = Math.max(0, Number(ctx.__enforceTrim) || 0)
+  // 降级上报只在「规范首遍」发生。本函数一次出片会被自身递归调用两次：
+  // ①预算遍（__skeletonPass=true，故意用空翻译量骨架量长度）；②裁剪遍（__enforceTrim>0，超限重组装）。
+  // 两者都是同一镜的重复组装，再上报一次没有新信息，只会把同一条降级刷两遍（原实现只挡了①，
+  // 裁剪遍会把 onDegrade 经 {...ctx} 原样带下去 → 同一 kind 重复入列）。此处用 enforceTrim 判定，
+  // 把②也一并纳入「非首遍」。
+  const canonicalPass = !ctx.__skeletonPass && enforceTrim === 0
   // 句边界尾部裁剪：裁掉 ≥n 字符，向上找最近的句号/分号断口，找不到就硬切
   const trimTailAtSentence = (s, n) => {
     if (!s) return s
@@ -164,7 +198,11 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
 
   const parts = []
 
-  const duration = Math.min(15, Math.max(3, Math.round(Number(shot.duration) || 5)))
+  // 下限 4：MiniMax-H3 官方 duration 取值 4-15 整数秒（platform.minimax.io，2026-09-30 复核）
+  const duration = Math.min(
+    config.video?.shotDurationMax ?? 15,
+    Math.max(config.video?.shotDurationMin ?? 4, Math.round(Number(shot.duration) || config.video?.shotDefaultDuration || 5))
+  )
   const shotStart = Number(shot.start_time) || 0
   // VC（video continuation）在 prompt 层是"参考视频续写"语义：
   // 官方 ref-en §2.3 / L137 / L143——注入上一镜视频作参考就必须声明 <Video 1> 并标 video continuation，
@@ -214,9 +252,20 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
     }
     const typeLabel = r.kind === 'character' ? 'character' : (r.kind === 'prop' ? 'prop' : 'scene/environment')
     const name = resolveAssetName(r.labelEn, r.label) || `reference ${i + 1}`
-    const d = resolveDesc(r.descEn, r.desc)
-    const lighting = r.kind === 'scene' ? cleanDesc(pickEnglish(r.lightingEn)) : ''
-    return `<Subject ${i + 1}> is ${name} (${typeLabel}) from <Picture ${i + 1}>${d ? `, ${d}` : ''}.${lighting ? ` The lighting of this scene is constant: ${lighting}.` : ''}`
+    // 官方 ref-en.txt L68：只用于定义角色/场景/服装/画风的图，不单列 <Picture N> 条目，
+    // 而是在 <Subject N> 定义行内引用 <Picture N> —— 外观由参考图本身承载（图走 RunningHub
+    // 独立 image0~image8 节点，不占官方 ≤7000 字符预算）。故文本只承担 L37 要求的
+    // 「the main features to follow」，不复述生图用的完整外观（实测 478-660 字符/条）。
+    // 完整复述会让 4-5 refs 吃掉 3000-4600 字符，把官方 §5.2 要求的 detailed_description
+    //（350-500 英文词 ≈2200-3100 字符）挤到 1476，是撑爆 7000 的真正成因。
+    // config.video.h3SubjectFullDesc=1 可回退「原样复述」，用于出片质量对比。
+    const rawDesc = resolveDesc(r.descEn, r.desc)
+    const d = config.video?.h3SubjectFullDesc ? rawDesc : identityFeatures(rawDesc)
+    // 场景光照不在此复述：detailed_description 已写「The scene lighting remains constant
+    // throughout」（见下方 shot1 组装），且 summary_en 原文结尾本就自带一遍光照描写——
+    // 此前这里是同一信息的第三遍，纯冗余（每个场景条目约 140 字符）。
+    // 资产描述自带句点，拼接前剥掉再统一由模板补一个，避免 "...body.." 双句点
+    return `<Subject ${i + 1}> is ${name} (${typeLabel}) from <Picture ${i + 1}>${d ? `, ${d.replace(/[.\s]+$/, '')}` : ''}.`
   })
   const audioLines = audioRefs.map((a, i) => {
     const sId = speakerIdMap.get(a.subjectNum)
@@ -273,9 +322,9 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
     }
     if (r.kind === 'continuity') {
       if (continuationVideo) {
-        return `<Picture ${i + 1}> (final frame of <Video 1>, continuity anchor for [Shot 1]): partially_preserved - character positions, postures, orientations, relative sizes, the environment state, and the exact color temperature, lighting direction, and tonal palette from <Video 1> are retained at [Shot 1]'s opening with no color shift; <Video 1>'s motion and action flow carry straight into [Shot 1]; camera viewpoint and composition reframe to [Shot 1]'s described shot size.`
+        return `<Picture ${i + 1}> (final frame of <Video 1>, continuity anchor for [Shot 1]): partially_preserved - character positions, postures, orientations, relative sizes, the environment state, and the exact color temperature, lighting direction, and tonal palette from <Video 1> are retained at [Shot 1]'s opening with no color shift; <Video 1>'s motion and action flow carry straight into [Shot 1]; camera position and composition fully reframe to [Shot 1]'s described shot size AND camera angle — the anchor never preserves the camera viewpoint.`
       }
-      return `<Picture ${i + 1}> (continuity anchor for [Shot 1]): partially_preserved - character positions, postures, orientations, relative sizes, the environment state, and the exact color temperature, lighting direction, and tonal palette from <Picture ${i + 1}> are retained at [Shot 1]'s opening with no color shift; camera viewpoint and composition reframe to [Shot 1]'s described shot size.`
+      return `<Picture ${i + 1}> (continuity anchor for [Shot 1]): partially_preserved - character positions, postures, orientations, relative sizes, the environment state, and the exact color temperature, lighting direction, and tonal palette from <Picture ${i + 1}> are retained at [Shot 1]'s opening with no color shift; camera position and composition fully reframe to [Shot 1]'s described shot size AND camera angle — the anchor never preserves the camera viewpoint.`
     }
     if (r.kind === 'endframe') {
       return `<Picture ${i + 1}> ([Shot 1] last frame): fully_preserved - the video ends on the exact final composition, character positions, and environment state shown in <Picture ${i + 1}>.`
@@ -292,13 +341,21 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
     // 的有效空间。config.video.h3RetentionFullDesc=true 可回退旧行为（出片质量对比用）。
     const d = resolveDesc(r.descEn, r.desc)
     const name = resolveAssetName(r.labelEn, r.label) || `reference ${i + 1}`
+    // 道具「本镜状态」：镜头级外观变化走 retention 的 partially_preserved（官方 ref-en L166
+    // "some defined characteristics are changed"），不进 subject_definitions（那是资产定义，
+    // 只写 main features）。状态串由 createRefCollector 拆分传入（r.stateEn）。
+    const stateEn = cleanDesc(pickEnglish(r.stateEn))
+    const stateClause = stateEn ? `, with ${lowerFirst(stateEn)}` : ''
+    const marker = stateEn ? 'partially_preserved' : 'fully_preserved'
     const body = config.video?.h3RetentionFullDesc
-      ? `${d || 'appearance'} is retained from <Picture ${i + 1}>`
-      : `${name} is retained exactly as defined in <Picture ${i + 1}>`
+      ? `${d || 'appearance'} is retained from <Picture ${i + 1}>${stateClause}`
+      : stateEn
+        ? `${name} is retained from <Picture ${i + 1}>${stateClause}`
+        : `${name} is retained exactly as defined in <Picture ${i + 1}>`
     const multiViewHint = r.kind === 'character'
       ? ` When the character is not front-facing (from behind, facing away, or in profile), use that matching view from <Picture ${i + 1}> instead of the front view.`
       : ''
-    return `<Subject ${i + 1}> (appears in [Shot 1]): fully_preserved - ${body}.${multiViewHint}`
+    return `<Subject ${i + 1}> (appears in [Shot 1]): ${marker} - ${body}.${multiViewHint}`
   }).join('\n')
   // 官方 ref-en.txt §5.4：Do not write (Sx) in retention_analysis —— 说话人 ID 只出现在
   // subject_definitions 与 detailed_description，此处只保留 <Subject N> 引用（同官方范例）。
@@ -310,7 +367,87 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   const characterNames = refs.filter((r) => r.kind === 'character').map((r) => r.label)
   const sceneNames = refs.filter((r) => r.kind !== 'character').map((r) => r.label)
   const voicedNames = audioRefs.map((a) => refs[a.subjectNum - 1]?.label).filter(Boolean)
-  const translated = { ...(await tr(shot, { characterNames, sceneNames, voiceClone: audioRefs.length > 0, voicedNames, wordBudget })) }
+  // A derived world-state snapshot is usable only when every explicit @subject is
+  // represented by an asset mounted on this shot. A stale snapshot must not force
+  // H3 to render an unreferenced character (or reconcile contradictory framing).
+  const declaredWorldStateNames = refs.flatMap((r) => [r.label, r.labelEn]).filter(Boolean)
+  const worldStateInSource = String(shot.world_state_in || shot.worldStateIn || '').trim()
+  const worldStateOutSource = String(shot.world_state_out || shot.worldStateOut || '').trim()
+  const undeclaredWorldStateIn = findUndeclaredWorldStateSubjects(worldStateInSource, declaredWorldStateNames)
+  const undeclaredWorldStateOut = findUndeclaredWorldStateSubjects(worldStateOutSource, declaredWorldStateNames)
+  const worldStateInUsable = undeclaredWorldStateIn.length === 0
+  const worldStateOutUsable = undeclaredWorldStateOut.length === 0
+  if (canonicalPass && (!worldStateInUsable || !worldStateOutUsable)) {
+    const stale = [
+      undeclaredWorldStateIn.length ? `world_state_in: ${undeclaredWorldStateIn.join(', ')}` : '',
+      undeclaredWorldStateOut.length ? `world_state_out: ${undeclaredWorldStateOut.join(', ')}` : '',
+    ].filter(Boolean).join('; ')
+    console.warn(`[v4Video] shot ${shot.id || '?'} 忽略未挂载主体的陈旧 world_state（${stale}）；以本镜 refs/description/final_frame 为准`)
+  }
+  const translationShot = (worldStateInUsable && worldStateOutUsable)
+    ? shot
+    : {
+        ...shot,
+        ...(worldStateInUsable ? {} : { world_state_in: '', worldStateIn: '', world_state_in_en: '', worldStateInEn: '' }),
+        ...(worldStateOutUsable ? {} : { world_state_out: '', worldStateOut: '', world_state_out_en: '', worldStateOutEn: '' }),
+      }
+  const translated = { ...(await tr(translationShot, { characterNames, sceneNames, voiceClone: audioRefs.length > 0, voicedNames, wordBudget })) }
+  if (!worldStateInUsable) translated.world_state_en = ''
+  if (!worldStateOutUsable) translated.world_state_end_en = ''
+
+  // 库内英文副本兜底（2026-09-27）：world_state 的英文源有两条路——分镜阶段落库的英文副本，
+  // 与出片时的 LLM 翻译。翻译器内部已做「副本优先」，但那只覆盖「翻译器正常返回」的情形：
+  // 翻译器整体失败（LLM 掉线 / 两次含中文降级 / 异常）时返回的是空壳，副本跟着一起丢——
+  // 而副本是**数据**，本就不该依赖 LLM 通路是否可用。此处做组装层兜底：
+  // 翻译产物为空时直接把库内副本填回去，让首帧/末帧构图约束在任何 LLM 状态下都成立。
+  // 实测口径：修复前 LLM 掉线时 1-2/1-3 的首尾约束整句消失（"开场句(无)、收尾句(无)"）。
+  const copyInEn = String(shot.world_state_in_en || shot.worldStateInEn || '').trim()
+  const copyOutEn = String(shot.world_state_out_en || shot.worldStateOutEn || '').trim()
+  if (worldStateInUsable && !String(translated.world_state_en || '').trim() && copyInEn && !CJK_DIRTY_RE.test(copyInEn)) {
+    translated.world_state_en = copyInEn
+  }
+  if (worldStateOutUsable && !String(translated.world_state_end_en || '').trim() && copyOutEn && !CJK_DIRTY_RE.test(copyOutEn)) {
+    translated.world_state_end_en = copyOutEn
+  }
+
+  // 首尾状态独立翻译通道（2026-09-27 治本）：库内英文副本只有 15/19 镜（worldStateOutEn 是
+  // LLM 自由字段，吐不吐看运气），而主翻译批次是大 batch（description/action/声景/配乐/语气
+  // 一起送），一旦整体失败或含中文降级，首尾约束就跟着一起丢——上一镜末态在本镜被重置，
+  // 镜间主体/朝向漂移（实测 1-2→1-3 跳帧）。
+  // 关键点：world_state_in/out 是**本镜构图的第一硬约束**，不该被大 batch 的成败绑架。
+  // 此处用 translateWorldStateOnly（最小请求、独立超时、独立重试）单独补齐——
+  // 中文源在、英文仍空时才触发，恰好命中「副本缺失 且 主批次没翻出来」这一条断裂路径；
+  // 已有英文（副本或主批次）时零开销、零行为变化。预算遍（__skeletonPass）不触发，
+  // 避免为量长度白跑一次 LLM 调用（那是纯浪费，且骨架遍本就不产出 prompt）。
+  if (!ctx.__skeletonPass) {
+    const needIn = worldStateInUsable && !String(translated.world_state_en || '').trim() && worldStateInSource
+    const needOut = worldStateOutUsable && !String(translated.world_state_end_en || '').trim() && worldStateOutSource
+    if (needIn || needOut) {
+      // 依赖注入点：测试可传 ctx.worldStateTranslator 替换真实 LLM 通道，
+      // 否则单测会发出真实 LLM 请求，结果受网络/并发环境影响（全量跑 flaky 的实锤根因）。
+      const wsTranslate = typeof ctx.worldStateTranslator === 'function' ? ctx.worldStateTranslator : translateWorldStateOnly
+      try {
+        const ws = await wsTranslate(
+          needIn ? worldStateInSource : '',
+          needOut ? worldStateOutSource : '',
+          { characterNames, sceneNames, shot },
+        )
+        if (needIn && String(ws.world_state_en || '').trim() && !CJK_DIRTY_RE.test(ws.world_state_en)) {
+          translated.world_state_en = ws.world_state_en
+        }
+        if (needOut && String(ws.world_state_end_en || '').trim() && !CJK_DIRTY_RE.test(ws.world_state_end_en)) {
+          translated.world_state_end_en = ws.world_state_end_en
+        }
+        if (ws.failed && canonicalPass) {
+          console.warn(`[v4Video] shot ${shot.id || '?'} 首尾状态独立翻译失败：本镜首帧/末帧构图约束仍缺失（库内无英文副本），镜间衔接有漂移风险`)
+        }
+      } catch (e) {
+        if (canonicalPass) {
+          console.warn(`[v4Video] shot ${shot.id || '?'} 首尾状态独立翻译异常：${e.message}`)
+        }
+      }
+    }
+  }
 
   const zhNameToEn = new Map()
   for (const r of refs) {
@@ -329,40 +466,24 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   translated.soundscape_en = zhNamesToEn(translated.soundscape_en)
   translated.music_en = zhNamesToEn(translated.music_en)
   translated.tone_en = zhNamesToEn(translated.tone_en)
+  translated.world_state_en = zhNamesToEn(translated.world_state_en)
+  translated.world_state_end_en = zhNamesToEn(translated.world_state_end_en)
 
   const shotSize = translateShotSize(shot.shot_type)
   const cameraMove = translateCameraMovement(shot.camera_movement)
-  const cameraAngle = translateCameraAngle(shot.camera_angle)
+  const cameraAngle = translateCameraAngleElevation(shot.camera_angle, shot.camera_elevation ?? shot.cameraElevation)
+  const lensClause = translateLens(shot.lens)
   const voiceClone = audioRefs.length > 0
   const rawAction = cleanDesc(pickEnglish(translated.action_note_en) || stripResidualCjk(translated.action_note_en) || pickEnglish(shot.action_note))
   const rawVisual = cleanDesc(pickEnglish(translated.description_en) || stripResidualCjk(translated.description_en) || pickEnglish(shot.description))
 
-  // —— IMD 直连（数据模型重构 C）：分镜成品的 integratedMultimodalDescription 含逐字精确的
-  // 动作时间轴（m4 At 时刻表 + m5 道具专属），经 LLM 翻译扩写会弱化节拍、丢失时刻精度。
-  // IMD 为纯英文时直接提取动作模块作为 actionDesc，字面直达 H3。
-  // 模块取舍：m1（景别/运镜）由上方官方映射承担更规范；m2（角色外形）/m3（环境冻结）由
-  // subject_definitions/retention_analysis 参考图承担；m6（末帧）由 finalFrame 句承担——均不重复引入。
-  // airlock 段【不进出片】（2026-09-24 修复）：它是出图侧的落幅复刻语义，出片侧已由 continuity
-  // 锚图 + "begins from <Picture N>" 承接句承担；其冻结文本（holds for N seconds / no walking /
-  // no turning...）直灌 H3 会压死整镜动作——1-2 七秒冻结、碎石滚落表演拍全丢即此根因。
-  // IMD 缺失、含中文或无动作模块时回落翻译器的 action_note_en，行为与旧版一致。
-  let imdAction = ''
-  const imdRaw = String(shot.integratedMultimodalDescription || shot.integrated_multimodal_description || '').replace(/@/g, '').trim()
-  if (imdRaw && !CJK_DIRTY_RE.test(imdRaw)) {
-    try {
-      const keep = groupImdModules(imdRaw).filter((g) => ['m4', 'm5'].includes(g.kind))
-      if (keep.length) {
-        // 平化为一行（官方 detailed_description 为连续段落格式），并剥尾部句号（拼接处统一加）
-        imdAction = keep.map((g) => g.lines.join(' ')).join(' ').replace(/\s{2,}/g, ' ').trim().replace(/[.。]+\s*$/, '')
-      }
-    } catch { imdAction = '' }
-  }
-
-  let actionDesc = imdAction || (voiceClone ? cleanVoiceDescription(rawAction) : rawAction)
+  let actionDesc = voiceClone ? cleanVoiceDescription(rawAction) : rawAction
   let visualDesc = voiceClone ? cleanVoiceDescription(rawVisual) : rawVisual
-  // 确定性裁剪（第二遍组装）：扩写尾部按句边界裁——头部（首帧锚定/空间关系）优先保留，
-  // 尾部是扩写的"结果反应"铺陈，裁它对一致性伤害最小。
+
+  // 视频链路不读取 IMD。若作者字段没有可靠英文编译结果，保留为空并由语义门禁阻断；
+  // 不从图像提示词的 M2/M4 旁路猜测视频叙事或动作。
   if (enforceTrim > 0) {
+
     let trimLeft = enforceTrim
     const tVisual = trimTailAtSentence(visualDesc, trimLeft)
     trimLeft -= visualDesc.length - tVisual.length
@@ -420,26 +541,82 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   const ddParts = []
   if (style) ddParts.push(`The target video is in a cinematic, ${style} style.`)
   if (combatNote) ddParts.push(pickEnglish(combatNote) ? cleanDesc(combatNote) + '.' : '')
-  // 站位信息（首帧构图硬约束，数据模型重构 C）：翻译器按规则 8 逐字忠实的 world_state_en，
-  // 声明为 0.00s 必须成立的画面构成——修复"角色站位写在死字段、出片首帧缺人"的根因。
-  const worldStateEn = cleanDesc(String(translated.world_state_en || '').trim())
+  // 首尾状态分别声明为 0.00s 与结束时必须成立的画面状态，避免把 world_state_out
+  // 误当开场状态后，上一镜末态在本镜被重置。
+  // 首尾状态是「谁在画面哪、什么姿态、面向哪」的直陈事实，先做中文标点归一
+  // （「：」「·」直接进英文 prompt 是非法标点，见 shared.normalizeCjkPunct 注释），
+  // 再 cleanDesc 收尾。放在此处而非翻译器：无论英文来自库内副本还是 LLM 盲翻都要过这一道。
+  // 占位角色名归一（2026-09-27）：英文副本里的 Character A/B 换成中文 @主体名对应的真实英文标签
+  // （zhNamesToEn 已含本镜参考图的中→英映射）。中文源是本镜主体的权威，占位名只是 LLM 自造占位。
+  const worldStateEn = cleanDesc(normalizeCjkPunct(resolvePlaceholderSubjectNames(
+    String(translated.world_state_en || '').trim(),
+    worldStateInUsable ? worldStateInSource : '',
+    zhNamesToEn,
+  )))
+  const worldStateEndEn = cleanDesc(normalizeCjkPunct(resolvePlaceholderSubjectNames(
+    String(translated.world_state_end_en || '').trim(),
+    worldStateOutUsable ? worldStateOutSource : '',
+    zhNamesToEn,
+  )))
+  // 首帧/末帧构图硬约束的英文源现为三级兜底（2026-09-27 起）：① 分镜阶段落库的英文副本
+  // （world_state_in_en/out_en，翻译器内副本优先 + 上方组装层副本回填）；② 主翻译批次；
+  // ③ translateWorldStateOnly 独立小通道（最小请求、独立超时重试，不被大 batch 成败绑架）。
+  // 仍做「中文→英文位置/朝向词表」的确定性兜底是刻意不为：实测中文排版有歧义（「面向画面深处」
+  // 同时含位置词与朝向词，规则解析会误判，错误约束比没有约束更糟）。三级都断时只保证「不静默」：
+  // 如实上报降级。
+  if (canonicalPass) {
+    // 库内英文副本（world_state_in_en/out_en）已由 translateShotFields 优先并入 worldStateEn，
+    // 此处只在「中文源存在但英文最终为空」时才报降级——即分镜阶段没产出英文副本、
+    // 且本次 LLM 翻译也没救回来。已落库英文的镜不再重复报警（它根本没走翻译链路）。
+    const hasEnInCopy = Boolean(String(shot.world_state_in_en || '').trim())
+    const hasEnOutCopy = Boolean(String(shot.world_state_out_en || '').trim())
+    if (worldStateInUsable && !worldStateEn && worldStateInSource && !hasEnInCopy) {
+      ctx.onDegrade?.({ kind: 'worldstate-in-lost', source: 'needs-llm-translate', text: '', shotId: shot.id ?? null })
+    }
+    if (worldStateOutUsable && !worldStateEndEn && worldStateOutSource && !hasEnOutCopy) {
+      ctx.onDegrade?.({ kind: 'worldstate-out-lost', source: 'needs-llm-translate', text: '', shotId: shot.id ?? null })
+    }
+  }
   const sbIdx = refs.findIndex((r) => r.kind === 'storyboard')
   const ctIdx = refs.findIndex((r) => r.kind === 'continuity')
   const efIdx = refs.findIndex((r) => r.kind === 'endframe')
   let shot1 = `[Shot 1] A ${shotSize}`
-  if (visualDesc) shot1 += `, ${lowerFirst(stripLeadingShotSize(visualDesc))}`
+  // 景别尺度收敛（2026-09-27 治本）：shot_type 是分镜阶段的权威景别决策，
+  // LLM 扩写的 description 若自带更极端的景别词（如 shot_type=特写、描述写 extreme close-up），
+  // 拼出的 "A close-up, extreme close-up ..." 会让同一条 prompt 出现两个互相打架的尺度，
+  // 与末帧要求（拍脸+表情）叠加后模型只能挤变形。此处按 shot_type 档位把更极端的词降回同档，
+  // 让尺度只有一个权威来源——是产线数据的确定性归一，不是事后校验。
+  if (visualDesc) shot1 += `, ${lowerFirst(stripLeadingShotSize(reconcileShotSizeScale(visualDesc, shotSize)))}`
   shot1 += '.'
   if (worldStateEn) shot1 += ` The opening frame at 0.00s must show exactly: ${worldStateEn}.`
   if (sceneLighting) shot1 += ` The scene lighting remains constant throughout: ${sceneLighting}.`
   if (sbIdx >= 0) shot1 += ` The camera viewpoint, subject placement, and composition of this shot follow <Picture ${sbIdx + 1}>.`
   if (ctIdx >= 0) {
     shot1 += continuationVideo
-      ? ` The shot begins from <Picture ${ctIdx + 1}>, the final frame of <Video 1>: character positions, postures, orientations, the environment state, and the exact color temperature, lighting direction, and tonal palette continue with no color shift; <Video 1>'s motion and action flow carry straight into [Shot 1]; camera viewpoint and composition reframe to [Shot 1]'s described shot size.`
-      : ` The shot begins from <Picture ${ctIdx + 1}>, the previous shot's final frame: character positions, postures, orientations, the environment state, and the exact color temperature, lighting direction, and tonal palette continue with no color shift; camera viewpoint and composition reframe to [Shot 1]'s described shot size.`
+      ? ` The shot begins from <Picture ${ctIdx + 1}>, the final frame of <Video 1>: character positions, postures, orientations, the environment state, and the exact color temperature, lighting direction, and tonal palette continue with no color shift; <Video 1>'s motion and action flow carry straight into [Shot 1]; camera position and composition fully reframe to [Shot 1]'s described shot size AND camera angle — the anchor never preserves the camera viewpoint.`
+      : ` The shot begins from <Picture ${ctIdx + 1}>, the previous shot's final frame: character positions, postures, orientations, the environment state, and the exact color temperature, lighting direction, and tonal palette continue with no color shift; camera position and composition fully reframe to [Shot 1]'s described shot size AND camera angle — the anchor never preserves the camera viewpoint.`
   }
   if (cameraAngle) shot1 += ` ${cameraAngle.charAt(0).toUpperCase()}${cameraAngle.slice(1)}.`
+  if (lensClause) shot1 += ` ${lensClause.charAt(0).toUpperCase()}${lensClause.slice(1)}.`
   if (cameraMove) shot1 += ` The camera ${cameraMove}.`
   if (actionDesc) shot1 += ` ${actionDesc}.`
+  // H3 常把宽景中的多个时间点压缩成单一行走动作。把动作拍点提升为硬约束，
+  // 明确每个时间点都必须在同一条连续镜头内完成，并保留角色之间的依附关系。
+  if (actionDesc && /(?:at\s+\d|\d+(?:\.\d+)?s|拍点|时间轴)/i.test(String(shot.action_note || shot.actionNote || visualDesc || ''))) {
+    shot1 += ` Every timed action beat listed above is mandatory and must be visibly performed at its stated time; do not skip, merge, or replace any beat with generic walking or idle motion. Preserve all described riding, holding, and attachment relationships while performing the beats.`
+  }
+  // 软接续镜会继承上一镜仍在场的角色参考图。明确要求这些角色继续存在，
+  // 同时允许近景只露出局部，避免模型把未列入本镜动作描述的角色误判为离场。
+  const continuityCharacterRefs = refs.filter((r) => r.kind === 'character')
+  if (ctIdx >= 0 && continuityCharacterRefs.length > 1) {
+    const names = continuityCharacterRefs.map((r) => resolveAssetName(r.labelEn, r.label)).filter(Boolean)
+    if (names.length > 1) {
+      shot1 += ` The characters ${names.join(' and ')} remain physically present from the previous shot and retain their established positions and attachment relationship; in this reframed close view they may be partially occluded by the foreground subject, but they must not disappear, be replaced, or detach from it.`
+    }
+  }
+  if (worldStateEndEn) {
+    shot1 += ` By the final frame, the blocking and object state must be exactly: ${worldStateEndEn}. This is a mandatory state change; the shot must not fall back to its opening state.`
+  }
   // 情绪基调 → 光色/节奏词素（导演字段接入出片的第一落点）
   if (config.video?.h3EmotionToneVisual !== false) {
     const emotionVisual = emotionVisualOf(shot.emotion_tone || shot.emotionTone)
@@ -459,6 +636,7 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   }
   ddParts.push(shot1)
   if (config.video?.h3SingleTakeBlock !== false) ddParts.push(H3_SINGLE_TAKE_BLOCK)
+  if (/static shot/i.test(cameraMove)) ddParts.push(STATIC_CAMERA_LOCK)
   if (dlgLines.length) ddParts.push(dlgLines.join(' '))
 
   const retryNoteEn = pickInjectableEnglish(retryNote)
@@ -476,6 +654,12 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
   parts.push(tagSubjectFirstMentions(ddParts.join(' '), taggableSubjects))
 
   let soundscapeEn = pickEnglish(translated.soundscape_en) || stripResidualCjk(translated.soundscape_en) || pickEnglish(shot.overall_soundscape)
+  // 与 world_state 同类：overall_soundscape 的英文源同样只有 LLM 翻译一条路（库内 36/36 镜是中文源）。
+  // LLM 掉线时整段为空——官方 base-en.txt §4.6 禁止在非静音镜写 N/A，故只能空着；
+  // 但「空着」必须让用户知道，否则声景信息无声消失（本镜声音只剩台词行）。
+  if (canonicalPass && !soundscapeEn && String(shot.overall_soundscape || '').trim()) {
+    ctx.onDegrade?.({ kind: 'soundscape-lost', source: 'needs-llm-translate', text: '', shotId: shot.id ?? null })
+  }
   parts.push('overall_soundscape:')
   // 官方 base-en.txt §4.6：overall_soundscape 的 N/A 仅在"用户明确要求全片静音"时使用。
   // 项目无「全片静音」字段，故空值时不写 N/A（写 N/A 会被误判为静音镜）。
@@ -509,7 +693,7 @@ export async function buildShotVideoPromptV4(shot = {}, ctx = {}) {
 
 async function extractLastFrameForContinuity(shotId, absVideo) {
   fs.mkdirSync(continuityDir, { recursive: true })
-  const outPath = path.join(continuityDir, `shot_${shotId}_last.jpg`)
+  const outPath = continuityTailImagePath(shotId)
   try {
     await runFfmpeg(['-y', '-sseof', '-0.05', '-i', absVideo, '-update', '1', '-frames:v', '1', outPath])
     if (!fs.existsSync(outPath) || fs.statSync(outPath).size === 0) throw new Error('尾帧抽取输出为空')
@@ -560,7 +744,7 @@ async function ensurePlaceholderVideo() {
 export async function generateShotVideoV4(params = {}, options = {}) {
   const { prompt, refs = [], audioRefs = [], shotId = 'x' } = params
   if (!prompt || !String(prompt).trim()) return { success: false, error: '出片提示词（prompt）不能为空' }
-  if (!config.runninghub?.workflows?.h3V4vc) return { success: false, error: '出片工作流未配置：RH_H3_V4_VC_WORKFLOW_ID 为空（V5 视频参考版是唯一出片工作流，须在 server/.env 配置）' }
+  if (!resolveWorkflowId('h3V4vc')) return { success: false, error: '出片工作流未配置：请在「AI 模型配置」的「视频通道」里添加并启用 h3V4vc（全能V5）工作流' }
   const { aspectRatio, megapixels, duration } = normalizeVideoParams(params)
 
   const refImages = (Array.isArray(refs) ? refs : []).map((r) => r?.image).filter(Boolean)
@@ -569,24 +753,28 @@ export async function generateShotVideoV4(params = {}, options = {}) {
   while (images.length < 9) images.push(BLANK_PNG)
 
   const values = { prompt: String(prompt).trim(), aspectRatio, megapixels, duration: String(duration) }
-  values.combatLora = params.combatLora || 'H3_Combat_V2.safetensors'
-  values.combatLoraStrength = params.combatLoraStrength != null ? String(params.combatLoraStrength) : '0.5'
-  values.unetName = params.unetName || 'Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors'
+  // 底模 / 战斗 LoRA 名称与强度属工作流资源，由 config 提供（env 可覆盖），不在代码里写死文件名。
+  values.combatLora = params.combatLora || config.video?.combatLoraName || ''
+  values.combatLoraStrength = params.combatLoraStrength != null ? String(params.combatLoraStrength) : String(config.video?.combatLoraStrength ?? '0.5')
+  values.unetName = params.unetName || config.video?.unetName || ''
   if (params.firstPassSteps != null) values.firstPassSteps = String(params.firstPassSteps)
   if (params.firstPassDenoise != null) values.firstPassDenoise = String(params.firstPassDenoise)
   if (params.secondPassSteps != null) values.secondPassSteps = String(params.secondPassSteps)
   if (params.secondPassDenoise != null) values.secondPassDenoise = String(params.secondPassDenoise)
   if (params.upscaleMegapixels != null) values.upscaleMegapixels = String(params.upscaleMegapixels)
   if (params.seed != null) values.seed = String(params.seed)
+  values.refImageSize = params.refImageSize === 'max' ? 'max' : 'match'
     let useVc = false
     try {
     options.onProgress?.('uploading', { message: '上传参考图/音色...' })
+    // 硬失败策略：参考图/音色上传失败直接中止本次任务（未消耗生成费），
+    // 不再静默塞空白图/静音产废片。上传失败多为瞬态，任务层失败后可重试。
     const uploaded = []
     for (const src of images) {
       try { uploaded.push(await uploadMediaFileName(src)) }
       catch (e) {
-        console.warn('[generateShotVideoV4] 参考图上传失败，空白图原位占位:', e.message)
-        uploaded.push(await uploadMediaFileName(BLANK_PNG))
+        console.warn('[generateShotVideoV4] 参考图上传失败，中止出片:', e.message)
+        return { success: false, error: `参考图上传失败，本镜已中止出片（未消耗生成任务）。请重试。原因: ${e.message}` }
       }
     }
     while (uploaded.length < 9) uploaded.push(await uploadMediaFileName(BLANK_PNG))
@@ -598,8 +786,8 @@ export async function generateShotVideoV4(params = {}, options = {}) {
     for (let i = 0; i < audioSlots.length; i++) {
       try { values['audio' + i] = await uploadAudioV2(audioSlots[i]) }
       catch (e) {
-        console.warn('[generateShotVideoV4] 音色上传失败，静音原位占位:', e.message)
-        values['audio' + i] = await uploadAudioV2(SILENCE_WAV)
+        console.warn('[generateShotVideoV4] 音色上传失败，中止出片:', e.message)
+        return { success: false, error: `音色上传失败，本镜已中止出片（未消耗生成任务）。请重试。原因: ${e.message}` }
       }
     }
 
@@ -674,7 +862,7 @@ export async function generateShotVideoV4(params = {}, options = {}) {
   } catch (e) {
     console.warn(`[generateShotVideoV4] 尾帧抽取失败（不影响本镜成片，仅影响下一镜续接锚）: shot ${shotId}: ${e.message}`)
   }
-  return { ...result, videoUrl: `/uploads/${filename}`, vcApplied: useVc }
+  return { ...result, videoUrl: `${uploadsUrl(filename)}`, vcApplied: useVc }
   } catch (e) {
     console.warn(`[generateShotVideoV4] 成片落本地失败（shot ${shotId}），返回 24h 云端 URL:`, e.message)
     return { ...result, videoUrl: result.url, vcApplied: useVc, warning: '成片下载到本地失败，当前为 24 小时时效的云端链接，请尽快转存' }

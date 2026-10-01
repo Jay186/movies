@@ -1,12 +1,11 @@
 import { execute } from '../db.js'
+import { uploadsUrl, uploadsDir } from '../paths.js'
 import { clean as cleanShared } from './shared.js'
+import { assetLabel } from './assetTypes.js'
 import path from 'node:path'
 import fs from 'node:fs'
-import { uploadsDir } from '../paths.js'
+
 import { runFfmpeg } from './ffmpeg.js'
-
-
-
 
 export function buildSceneGridPrompt(shots, stylePrompt = '', charRows = [], sceneRow = null) {
   const stylePart = stylePrompt ? `整幅画面统一为以下画风：${stylePrompt}。` : ''
@@ -156,7 +155,8 @@ export function buildShotGridPrompt(shot, stylePrompt = '', charRows = [], scene
     : ''
 
   const integrated = shot.integrated_multimodal_description || ''
-  const moodPart = extractMood(integrated) || '整体光线与色温：暖色为主，柔和自然光，禁止冷蓝调、纯黑、霓虹色。'
+  const moodPart = extractMood(integrated)
+    || '整体光线与色温：与本场其他镜头及参考图保持一致，不切换影调。'
   if (!integrated) warnings.push('本镜无 integrated_multimodal_description（画质修复链路未覆盖），4 格瞬间从中文字段降级生成')
 
   const moments = extractMoments(integrated)
@@ -242,7 +242,7 @@ export async function splitSceneGrid(gridImagePath, shots, sceneId) {
         '-vf', `crop=${cellW}:${cellH}:${x}:${y}`,
         outPath,
       ])
-      const localUrl = `/uploads/${outName}`
+      const localUrl = `${uploadsUrl(outName)}`
       execute('UPDATE shots SET frame_url = ? WHERE id = ?', [localUrl, shot.id])
       updates.push({ shotId: shot.id, url: localUrl })
     } catch (e) {
@@ -288,7 +288,8 @@ export function buildShotGridContentApp({ shot, charRows = [], sceneRow = null, 
   }
   const presentChars = parseArr(shot.characters)
   const sceneName = sceneRow?.title || parseArr(shot.scene_assets)[0] || ''
-  const moodPart = extractMood(shot.integrated_multimodal_description) || '暖色为主，柔和自然光，电影级质感'
+  const moodPart = extractMood(shot.integrated_multimodal_description)
+    || '与本场其他镜头及参考图保持同一影调'
 
   const moments = extractMoments(shot.integrated_multimodal_description || '')
   const base = briefShot(shot)
@@ -304,11 +305,8 @@ export function buildShotGridContentApp({ shot, charRows = [], sceneRow = null, 
   const lines = []
   const labeled = refs.filter((r) => r.slot && !r.dup).sort((a, b) => a.slot - b.slot)
   if (labeled.length) {
-    const idOf = (r) => {
-      if (r.type === 'scene') return `${r.name || '场景'}（场景）`
-      if (r.type === 'prop') return `${r.name || '道具'}（道具）`
-      return r.name || '角色'
-    }
+    // 中文标签走 ASSET_META 单一事实源，不在此处另写一份类型判定
+    const idOf = (r) => `${r.name || assetLabel(r.type)}（${assetLabel(r.type)}）`
     lines.push(labeled.map((r) => `图${r.slot}是${idOf(r)}`).join('、') + '。')
   }
   if (stylePrompt) {

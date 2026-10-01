@@ -2,8 +2,10 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useProjectStore } from '../stores/project'
+import { useModelConfigStore } from '../stores/modelConfig'
 import { api } from '../services/api'
-import { toastWarn, toastError, toastInfo, toastSuccess } from '../services/dialog'
+import { promptDialog, toastWarn, toastError, toastInfo, toastSuccess } from '../services/dialog'
+import { MODEL_CONFIG_TEXT } from '../constants/modelConfig'
 import StyleBadge from '../components/StyleBadge.vue'
 import AssetFormDialog from '../components/AssetFormDialog.vue'
 import LibraryAssetPicker from '../components/LibraryAssetPicker.vue'
@@ -18,22 +20,31 @@ import {
   matchOrphanAnchor,
 } from '../utils/groupLockView.js'
 import { hasId, indexOfId, sameId, toIdKey, toIdKeySet, makeLocalId } from '../utils/assetId.js'
+import { TYPE_CHARACTER, TYPE_SCENE, TYPE_PROP, assetLabel } from '../constants/assetTypes'
 
 const store = useProjectStore()
+const modelConfigStore = useModelConfigStore()
 const router = useRouter()
 const route = useRoute()
+
+// 生图模型下拉数据源：来自「AI 模型配置」的已启用的生图条目
+const imageModelOptions = computed(() => modelConfigStore.enabledImageEntries)
+// 未加载完 / 一条都没启用，两种占位文案，保证下拉任何时候都不留白
+const imageModelHint = computed(() => (
+  modelConfigStore.loaded ? MODEL_CONFIG_TEXT.imageSelectEmpty : MODEL_CONFIG_TEXT.imageSelectPlaceholder
+))
 
 const activeTab = ref('characters')
 const mode = ref('standard')
 const showAddDialog = ref(false)
-const dialogType = ref('character')
+const dialogType = ref(TYPE_CHARACTER)
 const showLibraryPicker = ref(false)
-const libraryPickerType = ref('character')
+const libraryPickerType = ref(TYPE_CHARACTER)
 const replaceMode = ref(false) 
 const replaceTarget = ref(null) 
 const showDetailDialog = ref(false)
 const detailAsset = ref(null)
-const detailType = ref('character')
+const detailType = ref(TYPE_CHARACTER)
 const showScriptConfirmDialog = ref(false) 
 const audioFileInput = ref(null)
 const audioUploadTarget = ref(null)
@@ -83,11 +94,81 @@ const sceneBatchElapsed = computed(() => {
   return m ? `${m} 分 ${s % 60} 秒` : `${s} 秒`
 })
 
-const tabs = computed(() => [
-  { key: 'characters', label: '角色', count: store.characters.length },
-  { key: 'scenes', label: '场景', count: store.assetScenes.length },
-  { key: 'props', label: '道具', count: store.props.length },
-])
+// 资产类型的单一事实源（本视图内）：列表 / 保存接口 / 标签 / 字段 / 新建与来源导入。
+// 新增一种资产类型 = 在这里加一条数据，下面的增改删流程不再出现类型分支。
+const assetCollections = {
+  [TYPE_CHARACTER]: {
+    key: 'characters',
+    list: () => store.characters,
+    save: api.saveCharacters,
+    label: assetLabel(TYPE_CHARACTER),
+    fields: ['name', 'role', 'description', 'nameEn', 'descriptionEn'],
+    // 「改造」对话框的示例：C 端用户不必自己琢磨怎么描述，点一下就能套用
+    editExamples: ['戴一条红色针织围巾', '背一个棕色小书包', '换成冬季厚披风'],
+    create: (data, id) => ({
+      id,
+      name: data.name,
+      role: data.role || '配角',
+      description: data.description || '',
+      color: characterColor(store.characters.length),
+    }),
+  },
+  [TYPE_SCENE]: {
+    key: 'scenes',
+    list: () => store.assetScenes,
+    save: api.saveScenes,
+    label: assetLabel(TYPE_SCENE),
+    // 场景改造是「以当前图为底图调细节、整体不变」，示例按这个语义给
+    editExamples: ['把时间改成夜晚', '加一场雨', '多一盏暖色的路灯'],
+    // 场景允许清空（一场都没有是合法中间态）
+    allowEmpty: true,
+    afterDeleteEmpty: () => exitSceneMultiSelect(),
+    fields: ['name', 'description', 'lightingEn', 'titleEn', 'summaryEn', 'location'],
+    create: (data, id) => ({ id, name: data.name, description: data.description || '' }),
+    generate: (item, doGenerate) => {
+      const grp = sceneGroupOf(item.id)
+      // pending 组的代表场景出图＝定基准：走组卡同款链（布局串联＋出图＋自动确认基准），
+      // 不再从平铺按钮裸出一张「没确认基准」的图
+      if (grp && grp.status === 'pending' && sameId(grp.repSceneId, item.id)) {
+        regenBaseline(grp)
+        return
+      }
+      const pipelineBlock = sceneOutPipelineBlock(item)
+      if (pipelineBlock) { pipelineBlock(); return }
+      if (!hasSceneGenerationTarget(item)) {
+        // 「照样生成」也要过布局门禁：先补依据、再定路线，顺序不乱
+        promptMissingGenerationTarget(item, () => gatedSceneGenerate(item, grp, doGenerate))
+        return
+      }
+      gatedSceneGenerate(item, grp, doGenerate)
+    },
+  },
+  [TYPE_PROP]: {
+    key: 'props',
+    list: () => store.props,
+    save: api.saveProps,
+    label: assetLabel(TYPE_PROP),
+    fields: ['name', 'description', 'nameEn', 'descriptionEn', 'owner'],
+    editExamples: ['换成木质材质', '表面加一些磨损痕迹', '换成暖色调配色'],
+    create: (data, id) => ({ id, name: data.name, description: data.description || '' }),
+  },
+}
+
+// 页签 → 资产类型：页签顺序与文案由这张表决定，新增类型时在这里加一项即可
+const ASSET_TABS = [
+  { key: 'characters', type: TYPE_CHARACTER, list: () => store.characters },
+  { key: 'scenes', type: TYPE_SCENE, list: () => renderedScenes.value },
+  { key: 'props', type: TYPE_PROP, list: () => store.props },
+]
+const currentTab = computed(() => ASSET_TABS.find((t) => t.key === activeTab.value) || ASSET_TABS[0])
+
+const tabs = computed(() =>
+  ASSET_TABS.map((t) => ({
+    key: t.key,
+    label: assetLabel(t.type),
+    count: assetCollections[t.type].list().length,
+  }))
+)
 
 const showMoreMenu = ref(false)
 const moreMenuRef = ref(null)
@@ -117,15 +198,10 @@ function countPending(list) {
 }
 
 const tabMeta = computed(() => {
-  const source =
-    {
-      characters: { title: '角色', list: () => store.characters },
-      scenes: { title: '场景', list: () => renderedScenes.value },
-      props: { title: '道具', list: () => store.props },
-    }[activeTab.value] || { title: '角色', list: () => store.characters }
-  const list = source.list()
+  const tab = currentTab.value
+  const list = tab.list()
   return {
-    title: source.title,
+    title: assetLabel(tab.type),
     total: list.length,
     missing: countPending(list),
   }
@@ -187,12 +263,6 @@ function goToScript() {
   router.push('/script')
 }
 
-const assetCollections = {
-  character: { key: 'characters', list: () => store.characters, save: api.saveCharacters, label: '角色' },
-  scene: { key: 'scenes', list: () => store.assetScenes, save: api.saveScenes, label: '场景' },
-  prop: { key: 'props', list: () => store.props, save: api.saveProps, label: '道具' },
-}
-
 async function saveAssets(type, { silent = false, allowEmpty = false } = {}) {
   const config = assetCollections[type]
   if (!config || !store.currentEpisodeId) {
@@ -229,81 +299,45 @@ async function handleLibrarySelect(payload) {
     const coverUrl = items[0]?.cover_url || ''
     if (coverUrl) {
       const { type: t, id } = replaceTarget.value
-      if (t === 'character') {
-        const c = store.characters.find(x => sameId(x.id, id))
-        if (c) c.imageUrl = coverUrl
-      } else if (t === 'scene') {
-        const s = store.assetScenes.find(x => sameId(x.id, id))
-        if (s) s.imageUrl = coverUrl
-      } else if (t === 'prop') {
-        const p = store.props.find(x => sameId(x.id, id))
-        if (p) p.imageUrl = coverUrl
-      }
+      const target = assetCollections[t]?.list().find(x => sameId(x.id, id))
+      if (target) target.imageUrl = coverUrl
       await saveAssets(t)
-      if (t === 'scene' && activeTab.value === 'scenes') fetchSceneGroups(true)
+      if (t === TYPE_SCENE && activeTab.value === 'scenes') fetchSceneGroups(true)
     }
     replaceMode.value = false
     replaceTarget.value = null
     return
   }
 
+  const cfg = assetCollections[type]
+  if (!cfg) return
+  const list = cfg.list()
   for (const item of items) {
     const name = item.name || ''
     const desc = item.description || ''
     const coverUrl = item.cover_url || ''
-    if (type === 'character') {
-      if (!store.characters.find(c => c.name === name)) {
-        store.characters.push({
-          id: makeLocalId(),
-          name, role: '配角', description: desc,
-          imageUrl: coverUrl,
-          color: characterColor(store.characters.length),
-        })
-      }
-    } else if (type === 'scene') {
-      if (!store.assetScenes.find(s => s.name === name)) {
-        store.assetScenes.push({ id: makeLocalId(), name, description: desc, imageUrl: coverUrl })
-      }
-    } else if (type === 'prop') {
-      if (!store.props.find(p => p.name === name)) {
-        store.props.push({ id: makeLocalId(), name, description: desc, imageUrl: coverUrl })
-      }
+    if (!list.find(x => x.name === name)) {
+      list.push({ ...cfg.create({ name, description: desc }, makeLocalId()), imageUrl: coverUrl })
     }
   }
   await saveAssets(type)
 }
 
 async function handleCreate(data) {
-  const id = makeLocalId()
-  if (dialogType.value === 'character') {
-    store.characters.push({ id, name: data.name, role: data.role || '配角', description: data.description || '', color: characterColor(store.characters.length) })
-  } else if (dialogType.value === 'scene') {
-    store.assetScenes.push({ id, name: data.name, description: data.description || '' })
-  } else if (dialogType.value === 'prop') {
-    store.props.push({ id, name: data.name, description: data.description || '' })
-  }
+  const cfg = assetCollections[dialogType.value]
+  if (!cfg) return
+  cfg.list().push(cfg.create(data, makeLocalId()))
   await saveAssets(dialogType.value)
 }
 
 async function handleSelect(items) {
-  if (dialogType.value === 'character') {
-    for (const item of items) {
-      if (!store.characters.find(c => c.name === item.name)) {
-        store.characters.push({ id: makeLocalId(), name: item.name, role: item.role || '配角', description: item.description || '', color: characterColor(store.characters.length) })
-      }
-    }
-  } else if (dialogType.value === 'scene') {
-    for (const item of items) {
-      const name = item.name || item.title
-      if (!store.assetScenes.find(s => s.name === name)) {
-        store.assetScenes.push({ id: makeLocalId(), name, description: item.description || item.summary || '' })
-      }
-    }
-  } else if (dialogType.value === 'prop') {
-    for (const item of items) {
-      if (!store.props.find(p => p.name === item.name)) {
-        store.props.push({ id: makeLocalId(), name: item.name, description: item.description || '' })
-      }
+  const cfg = assetCollections[dialogType.value]
+  if (!cfg) return
+  const list = cfg.list()
+  for (const item of items) {
+    const name = item.name || item.title || ''
+    if (!list.find(x => x.name === name)) {
+      list.push(cfg.create({ name, role: item.role, description: item.description || item.summary || '' }, makeLocalId()))
     }
   }
   await saveAssets(dialogType.value)
@@ -318,13 +352,13 @@ async function performAssetDelete(type, id) {
   if (index < 0) return
   const item = list[index]
   list.splice(index, 1)
-  const ok = await saveAssets(type, { silent: true, allowEmpty: type === 'scene' })
+  const ok = await saveAssets(type, { silent: true, allowEmpty: !!config.allowEmpty })
   if (!ok) {
     list.splice(Math.min(index, list.length), 0, item)
     toastError(`删除${config.label}失败`, { detail: '已还原该卡片，请重试' })
     return
   }
-  if (type === 'scene' && !store.assetScenes.length) exitSceneMultiSelect()
+  if (!config.list().length) config.afterDeleteEmpty?.()
   toastSuccess(`已删除${item.name ? `「${item.name}」` : `该${config.label}`}`)
 }
 
@@ -347,7 +381,7 @@ async function deleteAsset(type, id) {
 
 function onDeleteSceneClick(item) {
   if (!item.imageUrl) {
-    deleteAsset('scene', item.id)
+    deleteAsset(TYPE_SCENE, item.id)
     return
   }
   openConfirmDialog({
@@ -357,7 +391,7 @@ function onDeleteSceneClick(item) {
     altConfirmText: '仅删图片',
     cancelText: '取消',
     danger: true,
-    onConfirm: () => performAssetDelete('scene', item.id),
+    onConfirm: () => performAssetDelete(TYPE_SCENE, item.id),
     onAltConfirm: () => deleteSceneImageOnly(item),
   })
 }
@@ -367,7 +401,7 @@ async function deleteSceneImageOnly(item) {
   if (!s || !s.imageUrl) return
   const oldUrl = s.imageUrl
   s.imageUrl = ''
-  const ok = await saveAssets('scene', { silent: true })
+  const ok = await saveAssets(TYPE_SCENE, { silent: true })
   if (!ok) {
     s.imageUrl = oldUrl
     toastError('删除图片失败', { detail: '已还原原图，请重试' })
@@ -417,7 +451,7 @@ function exitSceneMultiSelect() {
 
 function onSceneCardClick(item) {
   if (!sceneMultiSelect.value) {
-    openDetail('scene', item)
+    openDetail(TYPE_SCENE, item)
     return
   }
   if (isGenerating(item.id)) {
@@ -438,7 +472,7 @@ async function performBatchDeleteScenes(deletable) {
   const snapshot = store.assetScenes.slice()
   store.assetScenes = store.assetScenes.filter((s) => !delKeySet.has(toIdKey(s.id)))
   selectedSceneIds.value = selectedSceneIds.value.filter((id) => !delKeySet.has(toIdKey(id)))
-  const ok = await saveAssets('scene', { silent: true, allowEmpty: true })
+  const ok = await saveAssets(TYPE_SCENE, { silent: true, allowEmpty: true })
   if (!ok) {
     store.assetScenes = snapshot
     toastError('批量删除失败', { detail: '已还原被删除的场景，请重试' })
@@ -457,7 +491,7 @@ async function performBatchDeleteSceneImages(deletable) {
   }
   const backup = targets.map((s) => ({ s, url: s.imageUrl }))
   targets.forEach((s) => { s.imageUrl = '' })
-  const ok = await saveAssets('scene', { silent: true })
+  const ok = await saveAssets(TYPE_SCENE, { silent: true })
   if (!ok) {
     for (const { s, url } of backup) s.imageUrl = url
     toastError('批量删除图片失败', { detail: '已还原原图，请重试' })
@@ -554,7 +588,7 @@ async function loadBaselineHistory(group) {
   if (baselineHistoryMap.value[id] || baselineHistoryLoading.value[id]) return
   baselineHistoryLoading.value = { ...baselineHistoryLoading.value, [id]: true }
   try {
-    const r = await api.getAssetImageHistory({ type: 'scene', id })
+    const r = await api.getAssetImageHistory({ type: TYPE_SCENE, id })
     baselineHistoryMap.value = { ...baselineHistoryMap.value, [id]: r.history || [] }
   } catch {
     baselineHistoryMap.value = { ...baselineHistoryMap.value, [id]: [] }
@@ -677,7 +711,7 @@ async function restoreBaselineVersion(group, version) {
     onConfirm: async () => {
       groupBusyKey.value = group.group
       try {
-        await api.restoreAssetImage({ type: 'scene', id: group.repSceneId, historyId: version.id })
+        await api.restoreAssetImage({ type: TYPE_SCENE, id: group.repSceneId, historyId: version.id })
         await store.loadEpisode(store.currentEpisodeId)   
         await api.decideSpatialGroupReview({ episodeId: store.currentEpisodeId, group: group.group, action: 'confirm' })
         toastSuccess('已换回该版本并设为参考图')
@@ -862,9 +896,9 @@ function onMemberAction(action, member) {
     return
   }
   if (action === 'card-click') onSceneCardClick(s)
-  else if (action === 'generate') handleAiGenerate('scene', s)
-  else if (action === 'edit') handleEditAsset('scene', s)
-  else if (action === 'upload') handleLocalUpload('scene', s)
+  else if (action === 'generate') handleAiGenerate(TYPE_SCENE, s)
+  else if (action === 'edit') handleEditAsset(TYPE_SCENE, s)
+  else if (action === 'upload') handleLocalUpload(TYPE_SCENE, s)
   else if (action === 'delete-image') onDeleteSceneImageClick(s)
   else if (action === 'delete') onDeleteSceneClick(s)
   else if (action === 'set-baseline') setBaselineFromScene(s)
@@ -915,7 +949,7 @@ async function regenBaseline(group) {
     return
   }
   const run = async () => {
-    const res = await store.generateAssetImage('scene', rep.id, genDesc(rep), store.imageModel)
+    const res = await store.generateAssetImage(TYPE_SCENE, rep.id, genDesc(rep), store.imageModel)
     if (!res?.success) return
     try {
       await api.decideSpatialGroupReview({ episodeId: store.currentEpisodeId, group: group.group, action: 'confirm' })
@@ -937,11 +971,11 @@ async function regenBaseline(group) {
     if (group.status === 'pending' && !group.layoutAnchor?.imageUrl && layoutRoute.value !== 'off') {
       openConfirmDialog({
         title: `先画布局图，再出「${rep.name}」的参考图？`,
-        message: `这组还没画布局示意图、也没定参考图。会先画一张俯视布局示意图（约一分钟，自动质检），完成后自动出「${rep.name}」的参考图并设为基准——基准图从布局的空间结构里长出来，全组天然对齐。共 2 张图（计费）${rep.imageUrl ? '；当前旧图会进版本带，可随时换回' : ''}。`,
+        message: `这组还没画布局示意图、也没定参考图。会先画一张俯视布局示意图（约一分钟），完成后自动出「${rep.name}」的参考图并设为基准——基准图从布局的空间结构里长出来，全组天然对齐。共 2 张图（计费）${rep.imageUrl ? '；当前旧图会进版本带，可随时换回' : ''}。`,
         confirmText: '画布局图＋出参考图',
         cancelText: '取消',
         onConfirm: async () => {
-          toastInfo('先画布局图，完成后自动出参考图', { detail: '布局图约一分钟（含自动质检），期间请勿关闭页面' })
+          toastInfo('先画布局图，完成后自动出参考图', { detail: '布局图约一分钟，期间请勿关闭页面' })
           const layoutOk = await doGenerateLayout(group, { chained: true })
           if (!layoutOk) return
           await run()
@@ -988,8 +1022,8 @@ function uploadGroupBaseline(group) {
     return
   }
   replaceMode.value = true
-  replaceTarget.value = { type: 'scene', id: repId }
-  libraryPickerType.value = 'scene'
+  replaceTarget.value = { type: TYPE_SCENE, id: repId }
+  libraryPickerType.value = TYPE_SCENE
   showLibraryPicker.value = true
 }
 
@@ -1113,7 +1147,7 @@ async function doRefreshPendingGroup(group, smartIds, mode = 'parallel') {
     if (!repHas) {
       const src = store.assetScenes.find((s) => sameId(s.id, repId))
       batchProgressText('代表场景', 0, 1)
-      const res = await store.generateAssetImage('scene', repId, src ? `${src.name}：${src.description || ''}` : String(group.repSceneTitle || ''), store.imageModel)
+      const res = await store.generateAssetImage(TYPE_SCENE, repId, src ? `${src.name}：${src.description || ''}` : String(group.repSceneTitle || ''), store.imageModel)
       sceneBatchDone.value++
       batchProgressText('代表场景', 1, 1)
       if (!res?.success) {
@@ -1133,14 +1167,14 @@ async function doRefreshPendingGroup(group, smartIds, mode = 'parallel') {
       return
     }
     batchProgressText('成员场景', 0, memberIds.length)
-    const res = await store.batchGenerateAssetImages('scene', {
+    const res = await store.batchGenerateAssetImages(TYPE_SCENE, {
       ids: memberIds, onlyMissing: false, concurrency: 3, provider: store.imageModel, groupParallel: mode !== 'serial',
       onProgress: (d, t) => { batchProgressText('成员场景', d, t); sceneBatchDone.value = repTodo + d },
     })
     let okN = res.successCount || 0
     let failN = res.failCount || 0
     if (failN > 0 && (res.failedIds || []).length) {
-      const retry = await store.batchGenerateAssetImages('scene', { ids: res.failedIds, onlyMissing: false, concurrency: 3, provider: store.imageModel, groupParallel: mode !== 'serial' })
+      const retry = await store.batchGenerateAssetImages(TYPE_SCENE, { ids: res.failedIds, onlyMissing: false, concurrency: 3, provider: store.imageModel, groupParallel: mode !== 'serial' })
       okN += retry.successCount || 0
       failN = retry.failCount || 0
     }
@@ -1168,7 +1202,7 @@ async function doRefreshGroup(group, ids, label = '', mode = 'parallel') {
   sceneBatchBegin(ids.length)
   try {
     batchProgressText(`${modeLabel}出图`, 0, ids.length)
-    const res = await store.batchGenerateAssetImages('scene', {
+    const res = await store.batchGenerateAssetImages(TYPE_SCENE, {
       ids,
       onlyMissing: false,
       concurrency: 3,
@@ -1179,7 +1213,7 @@ async function doRefreshGroup(group, ids, label = '', mode = 'parallel') {
     let okN = res.successCount || 0
     let failN = res.failCount || 0
     if (failN > 0 && (res.failedIds || []).length) {
-      const retry = await store.batchGenerateAssetImages('scene', { ids: res.failedIds, onlyMissing: false, concurrency: 3, provider: store.imageModel, groupParallel: mode !== 'serial' })
+      const retry = await store.batchGenerateAssetImages(TYPE_SCENE, { ids: res.failedIds, onlyMissing: false, concurrency: 3, provider: store.imageModel, groupParallel: mode !== 'serial' })
       okN += retry.successCount || 0
       failN = retry.failCount || 0
     }
@@ -1262,7 +1296,7 @@ async function toggleAllLayoutRefs() {
 // 调 /scene-out-plan 拿全量判定，按波次执行：
 //   W1 布局图（route=on、组内>1、未停用、缺或过时）→ W2 代表场景 + pending 组自动确认
 //   → W3 组员与未分组（缺失 + 过时）。波内并发，单张失败自动重试 1 次。
-// 布局质检不过 → 该组布局停用（降级为不带布局继续）；自动确认失败 → 该组组员跳过。
+// 自动确认失败 → 该组组员跳过。
 
 // 批量出图期间的互锁：波次引擎按开跑时的基准/布局状态分波执行，
 // 中途换开关/换版本/删图/重画会造成后续波次的注入上下文与计划错位
@@ -1384,7 +1418,7 @@ async function runSceneOutWaves(plan) {
   const route = plan.route === 'off' ? 'off' : 'on'
   const groups = plan.groups || []
   const ungrouped = plan.ungrouped || []
-  const stat = { layoutOk: 0, layoutFail: 0, degraded: 0, repOk: 0, repFail: 0, confirmOk: 0, confirmFail: [], memberOk: 0, memberFail: 0 }
+  const stat = { layoutOk: 0, layoutFail: 0, repOk: 0, repFail: 0, confirmOk: 0, confirmFail: [], memberOk: 0, memberFail: 0 }
   const titleOf = (groupName) => (groups.find((g) => g.group === groupName) || {}).repSceneTitle || groupName
   try {
     // —— 开跑前先把三波任务量都算出来，撑起总体进度条 ——
@@ -1405,7 +1439,7 @@ async function runSceneOutWaves(plan) {
     for (const m of ungrouped) if (m.missing || m.stale) w3est.push(m.id)
     sceneBatchBegin(w1.length + w2.length + w3est.length)
 
-    // —— W1 布局示意图（质检不过 → 停用该组布局，降级继续）——
+    // —— W1 布局示意图 ——
     if (w1.length) {
       let w1Done = 0
       const r1 = await runPool(w1, 2, async (g) => {
@@ -1414,11 +1448,6 @@ async function runSceneOutWaves(plan) {
         sceneBatchDone.value++
         batchProgressText('布局图', w1Done, w1.length)
         if (!res?.success) return false
-        if (res.layoutReview?.verdict === 'fail') {
-          // 质检不过：停用该组布局（出图不带底图，免得瑕疵布局污染整组），用户可手动重画后再启用
-          try { await api.setLayoutAnchorEnabled({ episodeId: store.currentEpisodeId, group: g.group, enabled: false }) } catch { }
-          stat.degraded++
-        }
         return true
       })
       stat.layoutOk = r1.ok.length
@@ -1442,7 +1471,7 @@ async function runSceneOutWaves(plan) {
       const r2 = await runPool(w2, 3, async (g) => {
         const src = store.assetScenes.find((s) => sameId(s.id, g.repSceneId))
         const desc = src ? `${src.name}：${src.description || ''}` : String(g.repSceneTitle || '')
-        const res = await store.generateAssetImage('scene', g.repSceneId, desc, store.imageModel)
+        const res = await store.generateAssetImage(TYPE_SCENE, g.repSceneId, desc, store.imageModel)
         w2Done++
         sceneBatchDone.value++
         batchProgressText('代表场景', w2Done, w2.length)
@@ -1476,7 +1505,7 @@ async function runSceneOutWaves(plan) {
     if (w3Ids.length) {
       batchProgressText('成员场景', 0, w3Ids.length)
       const w3Base = w1.length + w2.length
-      const res = await store.batchGenerateAssetImages('scene', {
+      const res = await store.batchGenerateAssetImages(TYPE_SCENE, {
         ids: w3Ids, onlyMissing: false, concurrency: 3, provider: store.imageModel,
         onProgress: (d, t) => { batchProgressText('成员场景', d, t); sceneBatchDone.value = w3Base + d },
       })
@@ -1484,7 +1513,7 @@ async function runSceneOutWaves(plan) {
       stat.memberFail = res.failCount || 0
       if (stat.memberFail > 0 && (res.failedIds || []).length) {
         // 失败项统一重试 1 次：总体进度已计满，只更新阶段文案
-        const retry = await store.batchGenerateAssetImages('scene', {
+        const retry = await store.batchGenerateAssetImages(TYPE_SCENE, {
           ids: res.failedIds, onlyMissing: false, concurrency: 3, provider: store.imageModel,
           onProgress: (d, t) => batchProgressText('重试失败项', d, t),
         })
@@ -1505,7 +1534,6 @@ async function runSceneOutWaves(plan) {
   if (imgOk) parts.push(`成功 ${imgOk} 张`)
   if (imgFail) parts.push(`失败 ${imgFail} 张`)
   if (stat.confirmOk) parts.push(`自动确认基准 ${stat.confirmOk} 组`)
-  if (stat.degraded) parts.push(`${stat.degraded} 组布局质检未过、已停用布局参考（可重画布局后再启用）`)
   if (stat.confirmFail.length) parts.push(`${stat.confirmFail.length} 组确认失败（${stat.confirmFail.map(titleOf).join('、')}），组员已跳过`)
   const msg = `智能补出完成：${parts.join('，') || '没有需要生成的'}`
   if (imgFail > 0 || stat.confirmFail.length) toastWarn(msg, { detail: '失败项可点对应卡片上的「AI生成」单独重试' })
@@ -1534,7 +1562,7 @@ async function runSceneOutMissingOnly(plan) {
     }
     sceneBatchBegin(ids.length)
     batchProgressText('补缺失', 0, ids.length)
-    const res = await store.batchGenerateAssetImages('scene', {
+    const res = await store.batchGenerateAssetImages(TYPE_SCENE, {
       ids, onlyMissing: true, concurrency: 3, provider: store.imageModel,
       onProgress: (d, t) => { batchProgressText('补缺失', d, t); sceneBatchDone.value = d },
     })
@@ -1665,8 +1693,8 @@ function generateLayout(group) {
     openConfirmDialog({
       title: `重画「${group.repSceneTitle || group.group}」的布局示意图？`,
       message: (group.layoutStale === true
-        ? '这组的场景内容改过了，当前这张布局图可能已经对不上实际空间（组内场景会照它对齐，图错了一起错），建议重画。会覆盖当前这张（计费），画完自动质检，有明显问题会自动重画几次。'
-        : '会给这组重新画一张俯视布局示意图并覆盖当前这张（计费）。画完会自动质检，有明显问题会自动重画几次。若这组场景还没改动静，通常不需要重画。')
+        ? '这组的场景内容改过了，当前这张布局图可能已经对不上实际空间（组内场景会照它对齐，图错了一起错），建议重画。会覆盖当前这张（计费）。'
+        : '会给这组重新画一张俯视布局示意图并覆盖当前这张（计费）。若这组场景还没改动静，通常不需要重画。')
         + ' 重画完成后会自动作为出图参考（此前若已停用也会一并恢复）。',
       confirmText: '重画布局图',
       cancelText: '取消',
@@ -1691,13 +1719,7 @@ async function doGenerateLayout(group, { chained = false } = {}) {
       toastError('布局图生成失败', { detail: String(res?.error || '未知错误') })
       return false
     }
-    const rv = res.layoutReview || {}
-    if (rv.verdict === 'fail') {
-      const kinds = (rv.defects || []).map((d) => d.type).filter(Boolean)
-      toastWarn('布局图已生成，但质检没过', {
-        detail: `重画了 ${rv.attempts || 1} 次仍未通过（${kinds.join('、') || '未明'}）。图上若有多余文字/标注，建议再重画一次。${rv.summary ? `（${rv.summary}）` : ''}`,
-      })
-    } else if (!chained) {
+    if (!chained) {
       const nextHint = group.status === 'confirmed'
         ? '这组的成员图是之前出的、未参考布局图——点「并行出图」让全部成员吃到布局图对齐'
         : '下一步：点「重新画一张」出代表场景参考图，确认基准后组内成员照基准＋布局图画'
@@ -1853,39 +1875,18 @@ async function saveDetail(data) {
   const type = detailType.value
   const oldId = detailAsset.value.id
   const hasImage = !!detailAsset.value.imageUrl
-  if (type === 'character') {
-    const c = store.characters.find(x => x.id === oldId)
-    if (c) {
-      c.name = data.name
-      c.role = data.role
-      c.description = data.description
-      if (data.nameEn !== undefined) c.nameEn = data.nameEn
-      if (data.descriptionEn !== undefined) c.descriptionEn = data.descriptionEn
-    }
-  } else if (type === 'scene') {
-    const s = store.assetScenes.find(x => x.id === oldId)
-    if (s) {
-      s.name = data.name
-      s.description = data.description
-      if (data.lightingEn !== undefined) s.lightingEn = data.lightingEn
-      if (data.titleEn !== undefined) s.titleEn = data.titleEn
-      if (data.summaryEn !== undefined) s.summaryEn = data.summaryEn
-      if (data.location !== undefined) s.location = data.location
-    }
-  } else if (type === 'prop') {
-    const p = store.props.find(x => x.id === oldId)
-    if (p) {
-      p.name = data.name
-      p.description = data.description
-      if (data.nameEn !== undefined) p.nameEn = data.nameEn
-      if (data.descriptionEn !== undefined) p.descriptionEn = data.descriptionEn
-      if (data.owner !== undefined) p.owner = data.owner
+  const cfg = assetCollections[type]
+  const target = cfg?.list().find(x => x.id === oldId)
+  if (target) {
+    // 字段清单由类型数据决定：新增资产类型只改 assetCollections
+    for (const f of cfg.fields || []) {
+      if (data[f] !== undefined) target[f] = data[f]
     }
   }
   await saveAssets(type)
   showDetailDialog.value = false
 
-  const list = type === 'character' ? store.characters : type === 'scene' ? store.assetScenes : store.props
+  const list = cfg?.list() || []
   const updated = list.find(x => x.name === data.name)
   const latestId = updated?.id || oldId
 
@@ -1949,7 +1950,7 @@ function promptMissingGenerationTarget(item, onProceed) {
     confirmText: '先上传参考图',
     altConfirmText: '照样生成',
     cancelText: '取消',
-    onConfirm: () => handleLocalUpload('scene', item),
+    onConfirm: () => handleLocalUpload(TYPE_SCENE, item),
     onAltConfirm: onProceed,
   })
 }
@@ -1985,12 +1986,12 @@ function layoutGateCheck(group, { actionLabel = '出图', onProceed } = {}) {
   if (!la?.imageUrl) {
     openConfirmDialog({
       title: `「${group.repSceneTitle || group.group}」还没画布局示意图`,
-      message: `布局示意图（俯视）是这组 ${group.memberScenes.length} 个场景共用的空间底图。还没画就${actionLabel}，这组图会按文字各画各的，位置、朝向可能对不上。要先画一张吗？约一分钟（自动质检），画完自动继续。`,
+      message: `布局示意图（俯视）是这组 ${group.memberScenes.length} 个场景共用的空间底图。还没画就${actionLabel}，这组图会按文字各画各的，位置、朝向可能对不上。要先画一张吗？约一分钟，画完自动继续。`,
       confirmText: '先画布局图，再继续',
       altConfirmText: `直接${actionLabel}（不带布局）`,
       cancelText: '取消',
       onConfirm: async () => {
-        toastInfo('先画布局图，完成后自动继续', { detail: '布局图约一分钟（含自动质检），期间请勿关闭页面' })
+        toastInfo('先画布局图，完成后自动继续', { detail: '布局图约一分钟，期间请勿关闭页面' })
         const ok = await doGenerateLayout(group, { chained: true })
         if (!ok) return
         proceed()
@@ -2050,24 +2051,9 @@ function gatedSceneGenerate(item, grp, doGenerate) {
 
 function handleAiGenerate(type, item) {
   const doGenerate = () => store.generateAssetImage(type, item.id, genDesc(item), store.imageModel)
-  if (type === 'scene') {
-    const grp = sceneGroupOf(item.id)
-    // pending 组的代表场景出图＝定基准：走组卡同款链（布局串联＋出图＋自动确认基准），
-    // 不再从平铺按钮裸出一张「没确认基准」的图
-    if (grp && grp.status === 'pending' && sameId(grp.repSceneId, item.id)) {
-      regenBaseline(grp)
-      return
-    }
-    const pipelineBlock = sceneOutPipelineBlock(item)
-    if (pipelineBlock) { pipelineBlock(); return }
-    if (!hasSceneGenerationTarget(item)) {
-      // 「照样生成」也要过布局门禁：先补依据、再定路线，顺序不乱
-      promptMissingGenerationTarget(item, () => gatedSceneGenerate(item, grp, doGenerate))
-      return
-    }
-    gatedSceneGenerate(item, grp, doGenerate)
-    return
-  }
+  // 场景有「布局门禁 / 基准确认」前置链，走类型数据里挂的 generate；其余类型直接确认出图
+  const custom = assetCollections[type]?.generate
+  if (custom) { custom(item, doGenerate); return }
   confirmOverwriteOrGenerate(item, doGenerate)
 }
 
@@ -2076,11 +2062,17 @@ async function handleEditAsset(type, item) {
     toastWarn(`「${item.name}」还没有图片，无法改造`, { detail: '请先「AI生成」一张基础形象图' })
     return
   }
-  const instruction = (window.prompt(`要在「${item.name}」这个形象上改什么？\n例：戴一条红色针织围巾 / 背一个棕色小书包 / 换成冬季厚披风`) || '').trim()
+  const instruction = (await promptDialog({
+    title: `要在「${item.name}」这个${assetLabel(type)}上改什么？`,
+    description: '以当前图为底图修改，没提到的部分保持不变。',
+    placeholder: '用一句话描述要改的地方',
+    examples: assetCollections[type]?.editExamples || [],
+    confirmText: '开始改造',
+  }) || '').trim()
   if (!instruction) return
   const res = await store.generateAssetImage(type, item.id, genDesc(item), store.imageModel, instruction)
   if (res?.success) {
-    const list = type === 'character' ? store.characters : type === 'scene' ? store.assetScenes : store.props
+    const list = assetCollections[type]?.list() || []
     const target = list.find(x => String(x.id) === String(item.id))
     if (target && res.description) {
       target.description = res.description
@@ -2124,13 +2116,19 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
             <select
               v-model="store.imageModel"
               aria-label="生图模型"
-              class="cursor-pointer appearance-none bg-transparent pr-4 text-2xs font-medium text-text-primary outline-none"
+              :disabled="!imageModelOptions.length"
+              class="cursor-pointer appearance-none bg-transparent pr-4 text-2xs font-medium text-text-primary outline-none disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <option value="zikl" class="bg-bg-card text-text-primary">gpt-image-2 (ZIKL)</option>
-              <option value="visionary-nano-banana-pro" class="bg-bg-card text-text-primary">Nano Banana Pro</option>
-              <option value="visionary-nano-banana-pro-cl" class="bg-bg-card text-text-primary">Nano Banana Pro CL</option>
-              <option value="visionary-nano-banana-2-lite" class="bg-bg-card text-text-primary">Nano Banana 2 Lite</option>
-              <option value="runninghub" class="bg-bg-card text-text-primary">四宫格通道（文生图）</option>
+              <option v-if="!imageModelOptions.length" :value="store.imageModel" class="bg-bg-card text-text-primary">
+                {{ imageModelHint }}
+              </option>
+              <option
+                v-for="entry in imageModelOptions"
+                :key="entry.id"
+                :value="entry.id"
+                :title="entry.model_id"
+                class="bg-bg-card text-text-primary"
+              >{{ entry.name }}</option>
             </select>
             <svg class="pointer-events-none absolute right-0 h-2.5 w-2.5 text-text-muted" viewBox="0 0 10 10" fill="none" aria-hidden="true"><path d="M2 4L5 7L8 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
           </span>
@@ -2297,7 +2295,7 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
     </div>
     <div class="flex flex-1 flex-wrap content-start gap-4 overflow-y-auto px-6 pb-6 pt-0">
     <template v-if="activeTab==='characters'">
-      <div v-for="item in store.characters" :key="item.id" class="group flex w-64 cursor-pointer flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition hover:border-accent/30" @click="openDetail('character', item)">
+      <div v-for="item in store.characters" :key="item.id" class="group flex w-64 cursor-pointer flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition hover:border-accent/30" @click="openDetail(TYPE_CHARACTER, item)">
         <div class="relative h-40 overflow-hidden bg-white">
           <img v-if="item.imageUrl" :src="item.imageUrl" :alt="item.name" class="h-full w-full object-cover" />
           <div v-else class="flex h-full items-center justify-center">
@@ -2308,17 +2306,17 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
             <span class="text-xs text-white">AI生成中...</span>
             <button class="rounded bg-white/15 px-2.5 py-0.5 text-[10px] text-white transition hover:bg-red-500" @click.stop="store.cancelAssetImageGen(item.id)">取消</button>
           </div>
-          <button v-if="!isGenerating(item.id)" class="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white backdrop-blur opacity-0 transition hover:bg-red-500 group-hover:opacity-100" title="删除" @click.stop="deleteAsset('character', item.id)">
+          <button v-if="!isGenerating(item.id)" class="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white backdrop-blur opacity-0 transition hover:bg-red-500 group-hover:opacity-100" title="删除" @click.stop="deleteAsset(TYPE_CHARACTER, item.id)">
             <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
           </button>
           <div class="absolute bottom-0 left-0 right-0 flex gap-1 bg-black/70 p-1.5 backdrop-blur">
-            <button class="flex flex-1 items-center justify-center gap-1 rounded bg-accent/90 py-1 text-[10px] font-medium text-black transition hover:bg-accent disabled:opacity-60" :disabled="isGenerating(item.id)" @click.stop="handleAiGenerate('character', item)">
+            <button class="flex flex-1 items-center justify-center gap-1 rounded bg-accent/90 py-1 text-[10px] font-medium text-black transition hover:bg-accent disabled:opacity-60" :disabled="isGenerating(item.id)" @click.stop="handleAiGenerate(TYPE_CHARACTER, item)">
               <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>{{ isGenerating(item.id) ? '生成中...' : 'AI生成' }}
             </button>
-            <button v-if="item.imageUrl" class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20 disabled:opacity-60" :disabled="isGenerating(item.id)" title="以当前图为底图换装/加饰品，保持形象不变" @click.stop="handleEditAsset('character', item)">
+            <button v-if="item.imageUrl" class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20 disabled:opacity-60" :disabled="isGenerating(item.id)" title="以当前图为底图换装/加饰品，保持形象不变" @click.stop="handleEditAsset(TYPE_CHARACTER, item)">
               <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>改造
             </button>
-            <button class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20" @click.stop="handleLocalUpload('character', item)">
+            <button class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20" @click.stop="handleLocalUpload(TYPE_CHARACTER, item)">
               <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>本地上传
             </button>
           </div>
@@ -2373,13 +2371,13 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                 <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
               </button>
               <div v-if="!sceneMultiSelect" class="absolute bottom-0 left-0 right-0 flex gap-1 bg-black/70 p-1.5 backdrop-blur">
-                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-accent/90 py-1 text-[10px] font-medium text-black transition hover:bg-accent disabled:opacity-60" :disabled="isGenerating(item.id)" @click.stop="handleAiGenerate('scene', item)">
+                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-accent/90 py-1 text-[10px] font-medium text-black transition hover:bg-accent disabled:opacity-60" :disabled="isGenerating(item.id)" @click.stop="handleAiGenerate(TYPE_SCENE, item)">
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>{{ isGenerating(item.id) ? '生成中...' : 'AI生成' }}
                 </button>
-                <button v-if="item.imageUrl" class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20 disabled:opacity-60" :disabled="isGenerating(item.id)" title="以当前图为底图调整场景细节，保持整体不变" @click.stop="handleEditAsset('scene', item)">
+                <button v-if="item.imageUrl" class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20 disabled:opacity-60" :disabled="isGenerating(item.id)" title="以当前图为底图调整场景细节，保持整体不变" @click.stop="handleEditAsset(TYPE_SCENE, item)">
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>改造
                 </button>
-                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20" @click.stop="handleLocalUpload('scene', item)">
+                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20" @click.stop="handleLocalUpload(TYPE_SCENE, item)">
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>本地上传
                 </button>
               </div>
@@ -2490,9 +2488,9 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                     :multi-select="sceneMultiSelect"
                     :selected="isSceneSelected(s)"
                     @card-click="onSceneCardClick(s)"
-                    @generate="handleAiGenerate('scene', s)"
-                    @edit="handleEditAsset('scene', s)"
-                    @upload="handleLocalUpload('scene', s)"
+                    @generate="handleAiGenerate(TYPE_SCENE, s)"
+                    @edit="handleEditAsset(TYPE_SCENE, s)"
+                    @upload="handleLocalUpload(TYPE_SCENE, s)"
                     @delete-image="onDeleteSceneImageClick(s)"
                     @delete="onDeleteSceneClick(s)"
                     @cancel-generate="store.cancelAssetImageGen(s.id)"
@@ -2509,7 +2507,7 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         </template>
 
         <template v-else>
-          <div v-for="item in store.props" :key="item.id" class="group flex w-64 cursor-pointer flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition hover:border-accent/30" @click="openDetail('prop', item)">
+          <div v-for="item in store.props" :key="item.id" class="group flex w-64 cursor-pointer flex-col overflow-hidden rounded-xl border border-border bg-bg-card transition hover:border-accent/30" @click="openDetail(TYPE_PROP, item)">
             <div class="relative h-40 overflow-hidden bg-white">
               <img v-if="item.imageUrl" :src="item.imageUrl" :alt="item.name" class="h-full w-full object-cover" />
               <div v-else class="flex h-full items-center justify-center">
@@ -2520,17 +2518,17 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
                 <span class="text-xs text-white">AI生成中...</span>
                 <button class="rounded bg-white/15 px-2.5 py-0.5 text-[10px] text-white transition hover:bg-red-500" @click.stop="store.cancelAssetImageGen(item.id)">取消</button>
               </div>
-              <button v-if="!isGenerating(item.id)" class="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white backdrop-blur opacity-0 transition hover:bg-red-500 group-hover:opacity-100" title="删除" @click.stop="deleteAsset('prop', item.id)">
+              <button v-if="!isGenerating(item.id)" class="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-black/60 text-white backdrop-blur opacity-0 transition hover:bg-red-500 group-hover:opacity-100" title="删除" @click.stop="deleteAsset(TYPE_PROP, item.id)">
                 <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
               </button>
               <div class="absolute bottom-0 left-0 right-0 flex gap-1 bg-black/70 p-1.5 backdrop-blur">
-                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-accent/90 py-1 text-[10px] font-medium text-black transition hover:bg-accent disabled:opacity-60" :disabled="isGenerating(item.id)" @click.stop="handleAiGenerate('prop', item)">
+                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-accent/90 py-1 text-[10px] font-medium text-black transition hover:bg-accent disabled:opacity-60" :disabled="isGenerating(item.id)" @click.stop="handleAiGenerate(TYPE_PROP, item)">
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>{{ isGenerating(item.id) ? '生成中...' : 'AI生成' }}
                 </button>
-                <button v-if="item.imageUrl" class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20 disabled:opacity-60" :disabled="isGenerating(item.id)" title="以当前图为底图调整道具细节，保持整体不变" @click.stop="handleEditAsset('prop', item)">
+                <button v-if="item.imageUrl" class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20 disabled:opacity-60" :disabled="isGenerating(item.id)" title="以当前图为底图调整道具细节，保持整体不变" @click.stop="handleEditAsset(TYPE_PROP, item)">
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>改造
                 </button>
-                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20" @click.stop="handleLocalUpload('prop', item)">
+                <button class="flex flex-1 items-center justify-center gap-1 rounded bg-white/10 py-1 text-[10px] text-white transition hover:bg-white/20" @click.stop="handleLocalUpload(TYPE_PROP, item)">
                   <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>本地上传
                 </button>
               </div>
@@ -2545,13 +2543,13 @@ function genDesc(item) { return item.name + '：' + (item.description || '') }
         <button
           v-if="activeTab==='scenes' && !sceneMultiSelect && !(sceneGroupsLoading && !sceneGroups.length)"
           class="flex h-14 w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border transition hover:border-accent/50"
-          @click="openDialog('scene')"
+          @click="openDialog(TYPE_SCENE)"
         >
           <svg class="h-4 w-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4v16m8-8H4" /></svg>
           <span class="text-2xs text-text-secondary">添加场景</span>
           <span class="text-micro text-text-muted">（加完直接成组卡，重新提取资产时才由 AI 并组）</span>
         </button>
-        <button v-else-if="activeTab!=='scenes'" class="flex h-[340px] w-64 items-center justify-center rounded-xl border border-dashed border-border transition hover:border-accent/50" @click="openDialog(activeTab==='characters'?'character':'prop')">
+        <button v-else-if="activeTab!=='scenes'" class="flex h-[340px] w-64 items-center justify-center rounded-xl border border-dashed border-border transition hover:border-accent/50" @click="openDialog(activeTab==='characters'?TYPE_CHARACTER:TYPE_PROP)">
           <svg class="h-10 w-10 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 4v16m8-8H4" /></svg>
         </button>
       </div>

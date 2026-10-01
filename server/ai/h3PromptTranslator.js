@@ -4,30 +4,15 @@ import { CJK_DIRTY_RE, pickInjectableEnglish } from './shared.js'
 import { config } from '../config.js'
 import { recordAlert } from './alerts.js'
 
-// MiniMax H3 官方未给景别枚举表，官方范例只出现过 4 个景别词（已用离线探针核对 base-en/ref-en 原文）：
-//   medium-wide shot (base-en L81/L175) · medium shot (ref-en L330) · close-up (ref-en L331/L332) · extreme close-up (ref-en L239)
-// 故本表以"官方范例原词 + 导演语义"双重对齐，避免整体上移一级：
+// 景别英文映射已抽到 ai/shotTypes.js，与归一档位表 / 提示词枚举共用同一份数据。
+// 映射口径说明（原注释保留）：
+// 出片模型官方未给景别枚举表，官方范例只出现过 4 个景别词：
+//   medium-wide shot · medium shot · close-up · extreme close-up
+// 故映射以"官方范例原词 + 导演语义"双重对齐，避免整体上移一级：
 //   近景 = 半身/胸上景 → medium close-up（MCU）
-//   特写 = 看脸/细节   → close-up（CU，官方原词；此前误映射为 extreme close-up 导致"情绪点必特写"出片成脸贴满画面的 ECU）
-//   大特写 = 更极端    → extreme close-up（ECU，唯一入口；此前与"特写"撞成同值）
-// 产线（doubao.js L2338 白名单）只产 全景/中景/近景/特写 这 4 个值，其余条目为历史/兜底用，保留不删。
-const SHOT_SIZE_MAP = {
-  '大远景': 'extreme long establishing shot',
-  '远景': 'long establishing shot',
-  '大全景': 'extreme wide shot',
-  '全景': 'wide shot',
-  '中全景': 'medium-wide shot',
-  '中景': 'medium shot',
-  '中近景': 'medium close-up',
-  '近景': 'medium close-up',
-  '特写': 'close-up',
-  '大特写': 'extreme close-up',
-}
-
-export function translateShotSize(cn) {
-  const key = String(cn || '').trim()
-  return SHOT_SIZE_MAP[key] || `medium shot`
-}
+//   特写 = 看脸/细节   → close-up（CU，官方原词）
+//   大特写 = 更极端    → extreme close-up（ECU，唯一入口）
+export { translateShotSize } from './shotTypes.js'
 
 // MiniMax H3 官方 camera-motion 三维语法（base-en.txt §4.3）：
 //   Motion type: Zoom In/Out · Push In/Pull Out · Pan Left/Right · Truck Left/Right ·
@@ -160,6 +145,7 @@ const CAMERA_MAP = {
 const CAMERA_ANGLE_MAP = {
   '正面': 'the camera is positioned front-on at eye level, facing the subject directly',
   '侧面': 'the camera is positioned at a 45-degree three-quarter side view of the subject',
+  '侧45度': 'the camera is positioned at a 45-degree three-quarter side view of the subject',
   '正侧': 'the camera is positioned in a full side profile view of the subject',
   '背面': 'the camera is positioned behind the subject, framing the back of the character',
   '过肩': 'the camera is positioned in an over-the-shoulder framing behind the subject',
@@ -170,6 +156,50 @@ const CAMERA_ANGLE_MAP = {
 export function translateCameraAngle(cn) {
   const key = String(cn || '').trim()
   return CAMERA_ANGLE_MAP[key] || ''
+}
+
+// 俯仰维度（中性中文 → H3 英文从句）：与 CAMERA_ANGLE_MAP 的水平机位正交组合，
+// 表达 Skill 的复合机位（如「侧45度+微俯」）。来源：xiaomo-film-studio storyboard-rules §5/§9。
+const ELEVATION_MAP = {
+  '平视': '',
+  '微俯': 'from a slightly elevated angle looking down',
+  '俯拍': 'from a high angle looking down',
+  '大俯角': 'from a steep overhead angle looking down',
+  '微仰': 'from a slightly low angle looking up',
+  '仰拍': 'from a low angle looking up',
+  '大仰角': 'from a steep low angle looking up',
+}
+
+// 机位 = 水平角度 × 俯仰 两字段组合翻译；俯仰为空/平视时退回纯角度句。
+export function translateCameraAngleElevation(angle, elevation) {
+  const baseRaw = translateCameraAngle(angle)
+  if (!baseRaw) return ''
+  const el = ELEVATION_MAP[String(elevation || '').trim()]
+  if (!el) return baseRaw
+  const base = baseRaw.replace(/,? at eye level,?/i, '')
+  return `${base}, ${el}`
+}
+
+// 焦段（中性中文 → H3 英文句）：Skill 表头写「标准 35mm / 中长焦 85mm / 微距 100mm」，
+// 提取 mm 数与镜头类型，拼成实拍语言。mm 与类型都缺时返回空（不瞎编）。
+const LENS_TYPE_MAP = {
+  '超广角': 'an ultra-wide-angle',
+  '广角': 'a wide-angle',
+  '标准': 'a standard',
+  '中长焦': 'a medium-telephoto',
+  '长焦': 'a telephoto',
+  '微距': 'a macro',
+}
+
+export function translateLens(cn) {
+  const s = String(cn || '').trim()
+  if (!s) return ''
+  const mm = s.match(/(\d+)\s*mm/i)
+  const typeKey = Object.keys(LENS_TYPE_MAP).find((k) => s.includes(k))
+  if (mm && typeKey) return `shot on ${LENS_TYPE_MAP[typeKey]} ${mm[1]}mm lens`
+  if (mm) return `shot on a ${mm[1]}mm lens`
+  if (typeKey) return `shot on ${LENS_TYPE_MAP[typeKey]} lens`
+  return ''
 }
 
 // 运镜无安全默认值（瞎给"固定"会把动态运镜降级成胡编），故 translateCameraMovement
@@ -269,9 +299,11 @@ export function translateTone(cn) {
 
 const translationCache = new Map()
 
-// 站位/末帧翻译规则（数据模型重构 C：worldStateOut 与含中文 finalFrame 接入出片链路）
-const WORLD_STATE_RULES = `8. **站位信息（world_state）翻译**：输入的「站位」是首帧构图硬约束——谁在画面哪个位置、什么姿态、面向哪边、谁驮着谁、谁抱着谁。必须**逐字忠实**翻译，一个位置关系/姿态/朝向都不许省略、合并或改写；输出 30-80 英文词，用 "X is at ... facing ..." 的直陈句式。这是首帧构图的决定性信息，优先级高于一切铺陈。
-9. **末帧（final_frame）翻译**：仅当末帧含中文时才翻译，输出 40-100 英文词的末帧构图描述，忠实保留每个角色的位置/姿态/朝向与环境状态；末帧纯英文时返回空字符串。`
+// 首尾状态翻译规则：world_state_in/out 分别是本镜 0.00s 与结束时的结构化状态快照。
+// 两者都必须独立保留，不能把出场状态误当成开场状态，否则上一镜末态会在本镜被重置。
+const WORLD_STATE_RULES = `8. **开场状态（world_state_in）翻译**：输入的「开场状态」是 0.00s 首帧构图硬约束——谁在画面哪个位置、什么姿态、面向哪边、谁驮着谁、谁抱着谁。必须**逐字忠实**翻译，一个位置关系/姿态/朝向都不许省略、合并或改写；输出 30-80 英文词，用 "X is at ... facing ..." 的直陈句式。这是首帧构图的决定性信息，优先级高于一切铺陈。
+9. **收尾状态（world_state_out）翻译**：输入的「收尾状态」是本镜结束时必须成立的状态快照。必须**逐字忠实**翻译，一个位置关系/姿态/朝向/道具状态都不许省略、合并或改写；输出 30-80 英文词。它约束动作完成后的结果，禁止退回开场状态。
+10. **末帧（final_frame）翻译**：仅当末帧含中文时才翻译，输出 40-100 英文词的末帧构图描述，忠实保留每个角色的位置/姿态/朝向与环境状态；末帧纯英文时返回空字符串。`
 
 const TRANSLATE_SYSTEM_PROMPT = `你是 AI 视频 prompt 翻译与扩写专家，把中文分镜描述翻译成符合 MiniMax H3 Ref2VA 规范的英文。
 
@@ -303,8 +335,8 @@ API 单条 7000 字符硬上限优先于词数质量指导）。按「首帧锚�
 
 - description_en：**300-380 英文词**。**首先**逐字忠实保留原文的空间关系与朝向（谁背对/面对/侧对镜头、谁躲在什么后、只露出什么、谁看谁、远近高低）；**然后**在保留这些硬信息的前提下，扩写景别与构图布局、光线的方向/质量/色温、材质与色彩细节、环境元素与空间纵深、角色的姿态变化与面部表情。用可拍摄的视觉化语言，不要复述剧情。**一个镜头也要写满**，信息分部在前景/中景/远景三层铺开。
 - action_note_en：**60-100 英文词**。按时间进程分解动作：起始姿态 → 动作过程 → 结束状态，写明动作幅度与节奏。
-- soundscape_en：20-50 英文词，写环境音与物理音效的层次（1-4 句，官方区间）。
-- music_en：20-50 英文词（1-3 句，官方区间），写观众能听到的背景配乐（角色听不到的）；原文为空则返回空字符串。**禁止抽象情绪词、禁止解释配乐的情绪功能**，只写乐器编制/速度/节奏/动态变化。
+- soundscape_en：1-4 个英文句子成段（官方 base-en §4.6 口径，词数不限），写环境音与物理音效的层次。
+- music_en：1-3 个英文句子（官方 base-en §4.7 口径，词数不限），写观众能听到的背景配乐（角色听不到的）；原文为空则返回空字符串。**禁止抽象情绪词、禁止解释配乐的情绪功能**，只写乐器编制/速度/节奏/动态变化。
 - tone_en：英文语气短语；原文为空则返回空字符串。
 
 【输出格式】严格 JSON：
@@ -315,6 +347,7 @@ API 单条 7000 字符硬上限优先于词数质量指导）。按「首帧锚�
   "music_en": "...",
   "tone_en": "...",
   "world_state_en": "...",
+  "world_state_end_en": "...",
   "final_frame_en": "..."
 }
 
@@ -322,12 +355,102 @@ ${WORLD_STATE_RULES}
 
 字段为空就返回空字符串。只输出 JSON，不要任何其他文字。`
 
+// ── 首尾状态单字段翻译（回填/质检用）────────────────────────────────────
+// 与 translateShotFields 的第 8/9 条规则同源，但只发一条最小请求：
+// 存量回填时若走完整 translateShotFields，会被迫连带翻译画面/动作/声景/配乐四个大字段
+// （每次 2600 tokens、单镜最多 2 次重试），36 镜的代价是几十倍。首尾状态之间是强上下文关系，
+// 所以这里一次性翻译「首→末」成对送入，保证两句的用词和空间关系互不漂移。
+const WORLD_STATE_ONLY_PROMPT = `你是 AI 视频 prompt 翻译专家，把中文分镜的「开场状态 / 收尾状态」翻译成英文。
+
+这两句分别是本镜 0.00s 首帧与结束帧的构图硬约束：谁在画面哪个位置、什么姿态、面向哪边、
+谁驮着谁、谁抱着谁、手持什么道具。
+
+【规则】
+1. **逐字忠实**：一个位置关系、姿态、朝向、道具状态都不许省略、合并或改写。
+   原文说「停步」就写 stopped walking，不许简化成 paused；原文说「面向画面深处」就必须
+   落在 facing 短语里，不许漏译成中英混排。
+2. 输出 30-80 英文词/句，用 "X is at ... facing ..." 的直陈句式。
+3. 角色名/场景名保留中文原样（如 "角色中文名 is at frame center"），其余必须是纯英文。
+4. 原文为空的字段返回空字符串。
+5. 只输出 JSON，不要任何其他文字。`
+
+export async function translateWorldStateOnly(zhIn = '', zhOut = '', ctx = {}) {
+  const { characterNames = [], sceneNames = [] } = ctx
+  const srcIn = String(zhIn || '').replace(/@/g, '').trim()
+  const srcOut = String(zhOut || '').replace(/@/g, '').trim()
+  if (!srcIn && !srcOut) return { world_state_en: '', world_state_end_en: '', failed: false }
+
+  const nameList = [...characterNames, ...sceneNames].filter(Boolean).map((n) => `- ${n}`).join('\n')
+  const messages = [
+    { role: 'system', content: WORLD_STATE_ONLY_PROMPT },
+    {
+      role: 'user',
+      content: `角色/场景名（保留原文不翻译）：
+${nameList || '（无）'}
+
+开场状态（0.00s 首帧硬约束，按规则 1 逐字忠实翻译）：${srcIn || '（空）'}
+收尾状态（本镜结束时必须成立，按规则 1 逐字忠实翻译）：${srcOut || '（空）'}
+
+输出 JSON：{"world_state_en": "...", "world_state_end_en": "..."}`,
+    },
+  ]
+
+  const NAME_SAFE = new Set([...characterNames, ...sceneNames].filter(Boolean))
+  const hasLeakedChinese = (s) => {
+    if (!s) return false
+    let probe = s
+    for (const n of NAME_SAFE) probe = probe.split(n).join('')
+    return CJK_DIRTY_RE.test(probe)
+  }
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const msgs = attempt === 0
+        ? messages
+        : [
+            messages[0],
+            { role: 'assistant', content: '（上一次输出含中文，请重新输出纯英文 JSON）' },
+            { ...messages[1], content: messages[1].content + '\n\n【重要】除角色名/场景名外不得出现任何中文字符。' },
+          ]
+      const text = await chatCompletion(msgs, {
+        temperature: 0.3,
+        maxTokens: 700,
+        responseFormat: { type: 'json_object' },
+        timeoutMs: config.timeouts.llm.repair,
+        usageContext: { task: 'h3-worldstate-translate' },
+      })
+      // 实测部分模型在 json_object 模式下仍偶发包裹 ```json 围栏（2026-10-01 回填验证抓出），
+      // 不剥则 JSON.parse 整次失败、全部字段跟着降级为空——剥围栏是纯防御性清洗，无行为变化。
+      const parsed = JSON.parse(String(text || '').replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim())
+      const result = {
+        world_state_en: String(parsed.world_state_en || '').trim(),
+        world_state_end_en: String(parsed.world_state_end_en || '').trim(),
+        failed: false,
+      }
+      if (!hasLeakedChinese(result.world_state_en) && !hasLeakedChinese(result.world_state_end_en)) return result
+      if (attempt === 1) return { ...result, failed: true }
+    } catch (e) {
+      if (attempt === 1) return { world_state_en: '', world_state_end_en: '', failed: true }
+    }
+  }
+  return { world_state_en: '', world_state_end_en: '', failed: true }
+}
+
 function rescueLeakedFields(result = {}, hasLeaked = () => true) {
-  const FIELDS = ['description_en', 'action_note_en', 'soundscape_en', 'music_en', 'tone_en', 'world_state_en', 'final_frame_en']
+  const FIELDS = ['description_en', 'action_note_en', 'soundscape_en', 'music_en', 'tone_en', 'final_frame_en']
+  // 首尾状态（world_state_en / world_state_end_en）不参与删残救援：
+  // 它们是 0.00s 与末帧的构图硬约束（WORLD_STATE_RULES「逐字忠实、一个位置关系都不许省略」），
+  // pickInjectableEnglish 只挑可注入的英文句子，含一处汉字即可能整句丢弃 → 首帧约束静默消失，
+  // 上一镜末态在本镜被重置（即 h3-prompt-pipeline ⑧ 的失败形态）。
+  // 宁可保留含残留 CJK 的原文交给下游 zhNamesToEn + stripResidualCjk 处理，也不整句报废。
   const rescued = {}
   for (const k of FIELDS) {
     const v = String(result[k] || '').trim()
     rescued[k] = v && hasLeaked(v) ? pickInjectableEnglish(v) : v
+  }
+  // 首尾状态走「原样保留 + 下游剥残」通道，不经过 pickInjectableEnglish
+  for (const k of ['world_state_en', 'world_state_end_en']) {
+    rescued[k] = String(result[k] || '').trim()
   }
   return FIELDS.some((k) => rescued[k]) ? { ...rescued, failed: false } : null
 }
@@ -339,10 +462,22 @@ export async function translateShotFields(shot = {}, ctx = {}) {
   const dlgArr = Array.isArray(dlgRaw) ? dlgRaw : (dlgRaw && typeof dlgRaw === 'object' ? [dlgRaw] : [])
   const toneList = dlgArr.map((x) => String(x?.tone || '').trim()).filter(Boolean)
 
-  // 站位信息（首帧构图硬约束）与含中文的末帧（数据模型重构 C：接入出片链路）
-  const worldStateRaw = String(shot.world_state_out || shot.worldStateOut || '').replace(/@/g, '').trim()
+  // 首尾状态与含中文的末帧分别接入出片链路，禁止把末态复用成首态。
+  const worldStateRaw = String(shot.world_state_in || shot.worldStateIn || '').replace(/@/g, '').trim()
+  const worldStateEndRaw = String(shot.world_state_out || shot.worldStateOut || '').replace(/@/g, '').trim()
   const finalFrameRaw = String(shot.final_frame || shot.finalFrame || '').replace(/@/g, '').trim()
   const finalFrameNeedsTranslate = finalFrameRaw && CJK_DIRTY_RE.test(finalFrameRaw)
+  // 首尾状态的英文副本（2026-09-27）：分镜阶段已落库的英文优先，命中即直用、不再送 LLM 盲翻。
+  // 中文源走 LLM 时看不到前后镜上下文，会把「停步」翻成 paused、把「面向」漏成中英混排
+  // （实测 1-2/1-3 compiled_prompt），而分镜那一刻 LLM 上下文最全、英文语义最准。
+  const worldStateInEnRaw = String(shot.world_state_in_en || shot.worldStateInEn || '').trim()
+  const worldStateOutEnRaw = String(shot.world_state_out_en || shot.worldStateOutEn || '').trim()
+  const worldStateProvided = Boolean(worldStateInEnRaw && !CJK_DIRTY_RE.test(worldStateInEnRaw))
+  const worldStateEndProvided = Boolean(worldStateOutEnRaw && !CJK_DIRTY_RE.test(worldStateOutEnRaw))
+  // 库内已有合规英文时，从中文源里摘掉对应字段：既省一次无谓翻译，也避免 LLM 产出被丢弃后
+  // 仍被判「含中文」而触发重试/降级（原逻辑会因中文源必然产出中文而误判整批失败）。
+  const cnWorldState = worldStateProvided ? '' : worldStateRaw
+  const cnWorldStateEnd = worldStateEndProvided ? '' : worldStateEndRaw
 
   const cacheKey = JSON.stringify({
     d: shot.description || '',
@@ -353,8 +488,13 @@ export async function translateShotFields(shot = {}, ctx = {}) {
     n: [...characterNames, ...sceneNames],
     vc: voiceClone ? voicedNames : false,
     wb: wordBudget?.descActionMax ?? 0, // 预算进缓存键：同文本不同预算须重译，否则收缩预算会命中旧长译文
-    w: worldStateRaw,
+    w: cnWorldState,
+    we: cnWorldStateEnd,
     f: finalFrameNeedsTranslate ? finalFrameRaw : '',
+    // 库内英文副本进缓存键：中文相同但英文副本变了（重新分镜/人工编辑）必须重译，
+    // 否则会命中「按中文源缓存」的旧结果，把已落库的英文副本覆盖回 LLM 盲翻版本
+    wi: worldStateProvided ? worldStateInEnRaw : '',
+    wo: worldStateEndProvided ? worldStateOutEnRaw : '',
   })
 
   if (translationCache.has(cacheKey)) return translationCache.get(cacheKey)
@@ -365,15 +505,23 @@ export async function translateShotFields(shot = {}, ctx = {}) {
     soundscape: [shot.overall_soundscape || shot.overallSoundscape, shot.sound_effects || shot.soundEffects].filter(Boolean).join('；').trim(),
     music: String(shot.non_diegetic_music || shot.nonDiegeticMusic || '').trim(),
     tone: toneList.join('，'),
-    worldState: worldStateRaw,
+    worldState: cnWorldState,
+    worldStateEnd: cnWorldStateEnd,
     finalFrame: finalFrameNeedsTranslate ? finalFrameRaw : '',
   }
 
-  const empty = { description_en: '', action_note_en: '', soundscape_en: '', music_en: '', tone_en: '', world_state_en: '', final_frame_en: '', failed: false }
+  const empty = { description_en: '', action_note_en: '', soundscape_en: '', music_en: '', tone_en: '', world_state_en: '', world_state_end_en: '', final_frame_en: '', failed: false }
+  // 降级壳仍要带上库内英文副本：LLM 全挂时这两句是首帧/末帧构图约束的唯一英文源，
+  // 不能跟着一起丢（否则回到「LLM 掉线 = 首尾约束整段消失」的老问题）
+  const emptyWithProvided = {
+    ...empty,
+    world_state_en: worldStateProvided ? worldStateInEnRaw : '',
+    world_state_end_en: worldStateEndProvided ? worldStateOutEnRaw : '',
+  }
 
-  if (!cn.description && !cn.actionNote && !cn.soundscape && !cn.music && !cn.tone && !cn.worldState && !cn.finalFrame) {
-    translationCache.set(cacheKey, empty)
-    return empty
+  if (!cn.description && !cn.actionNote && !cn.soundscape && !cn.music && !cn.tone && !cn.worldState && !cn.worldStateEnd && !cn.finalFrame) {
+    translationCache.set(cacheKey, emptyWithProvided)
+    return emptyWithProvided
   }
 
   const nameList = [...characterNames, ...sceneNames].filter(Boolean).map((n) => `- ${n}`).join('\n')
@@ -394,8 +542,9 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
 需要翻译并扩写的内容：
 画面描述：${cn.description || '（空）'}
 动作说明：${cn.actionNote || '（空）'}
-站位（首帧构图硬约束，按规则 8 逐字忠实翻译）：${cn.worldState || '（空）'}
-末帧（含中文时按规则 9 翻译，纯英文则返回空）：${cn.finalFrame || '（空）'}
+开场状态（0.00s 首帧硬约束，按规则 8 逐字忠实翻译）：${cn.worldState || '（空）'}
+收尾状态（本镜结束时必须成立，按规则 9 逐字忠实翻译）：${cn.worldStateEnd || '（空）'}
+末帧（含中文时按规则 10 翻译，纯英文则返回空）：${cn.finalFrame || '（空）'}
 环境音与画内音效：${cn.soundscape || '（空）'}
 配乐：${cn.music || '（空）'}
 语气：${cn.tone || '（空）'}${budgetNote}`,
@@ -427,14 +576,18 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
         timeoutMs: config.timeouts.llm.repair,
         usageContext: { task: 'h3-prompt-translate' },
       })
-      const parsed = JSON.parse(text)
+      // 实测部分模型在 json_object 模式下仍偶发包裹 ```json 围栏（2026-10-01 回填验证抓出），
+      // 不剥则 JSON.parse 整次失败、全部字段跟着降级为空——剥围栏是纯防御性清洗，无行为变化。
+      const parsed = JSON.parse(String(text || '').replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim())
       const result = {
         description_en: String(parsed.description_en || '').trim(),
         action_note_en: String(parsed.action_note_en || '').trim(),
         soundscape_en: String(parsed.soundscape_en || '').trim(),
         music_en: String(parsed.music_en || '').trim(),
         tone_en: String(parsed.tone_en || '').trim(),
-        world_state_en: String(parsed.world_state_en || '').trim(),
+        // 首尾状态：库内英文副本优先于 LLM 盲翻结果（见上方 worldStateProvided 注释）
+        world_state_en: worldStateProvided ? worldStateInEnRaw : String(parsed.world_state_en || '').trim(),
+        world_state_end_en: worldStateEndProvided ? worldStateOutEnRaw : String(parsed.world_state_end_en || '').trim(),
         final_frame_en: String(parsed.final_frame_en || '').trim(),
         failed: false,
       }
@@ -444,6 +597,7 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
         || hasLeakedChinese(result.music_en)
         || hasLeakedChinese(result.tone_en)
         || hasLeakedChinese(result.world_state_en)
+        || hasLeakedChinese(result.world_state_end_en)
         || hasLeakedChinese(result.final_frame_en)
       if (leaked) {
         console.warn(`[h3PromptTranslator] 第 ${attempt + 1} 次翻译输出含中文，${attempt === 0 ? '重试' : '先试删残救济'}`)
@@ -459,9 +613,9 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
           episodeId: shot.episode_id ?? null, shotId: shot.id ?? null, shotNumber: shot.shot_number || '',
           source: 'translate', level: 'warn',
           message: `镜 ${shot.shot_number || '?'} 的分镜字段翻译两次仍含中文、删残后无英文主体，已降级为空：本镜出片 prompt 将缺画面/动作/声景描述，请人工核对原文后重试`,
-          detail: JSON.stringify({ leakedFields: ['description_en', 'action_note_en', 'soundscape_en', 'music_en', 'tone_en'].filter((k) => hasLeakedChinese(result[k])) }).slice(0, 2000),
+          detail: JSON.stringify({ leakedFields: ['description_en', 'action_note_en', 'soundscape_en', 'music_en', 'tone_en', 'world_state_en', 'world_state_end_en', 'final_frame_en'].filter((k) => hasLeakedChinese(result[k])) }).slice(0, 2000),
         })
-        const degraded = { ...empty, failed: true }
+        const degraded = { ...emptyWithProvided, failed: true }
         translationCache.set(cacheKey, degraded)
         return degraded
       }
@@ -470,13 +624,13 @@ ${voiceClone && voicedNames.length ? `\n音色克隆角色（这些角色的台�
     } catch (e) {
       console.warn(`[h3PromptTranslator] 第 ${attempt + 1} 次翻译失败:`, e.message)
       if (attempt === 0) continue
-      const degraded = { ...empty, failed: true }
+      const degraded = { ...emptyWithProvided, failed: true }
       translationCache.set(cacheKey, degraded)
       return degraded
     }
   }
 
-  const degraded = { ...empty, failed: true }
+  const degraded = { ...emptyWithProvided, failed: true }
   translationCache.set(cacheKey, degraded)
   return degraded
 }
